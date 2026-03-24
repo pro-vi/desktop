@@ -28,6 +28,12 @@ export function settingsPath(stateDir = defaultStateDir()) {
 
 export function defaultSettings() {
   return {
+    browserBackend: 'electron',
+    chromeDebugPort: 9222,
+    chromeExecutablePath: null,
+    chromeProfileMode: 'isolated',
+    chromeProfileName: 'Default',
+
     // Governor defaults (intentionally conservative).
     maxInflightQueries: 2,
     maxQueriesPerMinute: 12,
@@ -57,6 +63,17 @@ export function normalizeSettings(input) {
   const clampMs = (v, { min, max, fallback }) => clampInt(v, { min, max, fallback });
 
   const out = {
+    browserBackend: ['electron', 'chrome-cdp'].includes(String(s.browserBackend || '').trim().toLowerCase())
+      ? String(s.browserBackend || '').trim().toLowerCase()
+      : d.browserBackend,
+    chromeDebugPort: clampInt(s.chromeDebugPort, { min: 1024, max: 65535, fallback: d.chromeDebugPort }),
+    chromeExecutablePath:
+      typeof s.chromeExecutablePath === 'string' && s.chromeExecutablePath.trim() ? s.chromeExecutablePath.trim() : null,
+    chromeProfileMode: ['isolated', 'existing'].includes(String(s.chromeProfileMode || '').trim().toLowerCase())
+      ? String(s.chromeProfileMode || '').trim().toLowerCase()
+      : d.chromeProfileMode,
+    chromeProfileName:
+      typeof s.chromeProfileName === 'string' && s.chromeProfileName.trim() ? s.chromeProfileName.trim() : d.chromeProfileName,
     maxInflightQueries: clampInt(s.maxInflightQueries, { min: 1, max: 12, fallback: d.maxInflightQueries }),
     maxQueriesPerMinute: clampInt(s.maxQueriesPerMinute, { min: 1, max: 600, fallback: d.maxQueriesPerMinute }),
     minTabGapMs: clampMs(s.minTabGapMs, { min: 0, max: 60_000, fallback: d.minTabGapMs }),

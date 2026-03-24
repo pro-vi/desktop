@@ -1,11 +1,19 @@
 #!/usr/bin/env node
-import { app, Notification, BrowserWindow, ipcMain, shell, Menu } from 'electron';
+import { app, Notification, BrowserWindow, ipcMain, shell, Menu, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
+import {
+  createBrowserBackend,
+  resolveBrowserBackend,
+  resolveChromeDebugPort,
+  resolveChromeExecutablePath,
+  resolveChromeProfileMode,
+  resolveChromeProfileName
+} from './browser-backend.mjs';
 import { ChatGPTController } from './chatgpt-controller.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { TabManager } from './tab-manager.mjs';
@@ -110,6 +118,11 @@ async function main() {
   const selectors = await loadSelectors(stateDir);
   const vendors = await loadVendors();
   let settings = await readSettings(stateDir);
+  const browserBackendKind = resolveBrowserBackend({ settings });
+  const chromeExecutablePath = resolveChromeExecutablePath({ settings });
+  const chromeDebugPort = resolveChromeDebugPort({ settings });
+  const chromeProfileMode = resolveChromeProfileMode({ settings });
+  const chromeProfileName = resolveChromeProfileName({ settings });
   const serverId = crypto.randomUUID();
 
   const notify = (body) => {
@@ -160,26 +173,38 @@ async function main() {
     await controlWin.loadFile(path.join(__dirname, 'ui', 'control-center.html'));
   };
 
-  const tabs = new TabManager({
-    maxTabs: Number(process.env.AGENTIFY_DESKTOP_MAX_TABS || 12),
-    onNeedsAttention,
+  const emitTabsChanged = () => {
+    try {
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:tabsChanged');
+    } catch {}
+  };
+  const browserBackend = await createBrowserBackend({
+    kind: browserBackendKind,
+    stateDir,
+    windowDefaults: { width: 1100, height: 800, show: !startMinimized, title: 'Agentify Desktop' },
     userAgent: app.userAgentFallback,
-    onChanged: () => {
-      try {
-        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:tabsChanged');
-      } catch {}
-    },
+    onChanged: emitTabsChanged,
     popupPolicy: ({ url, vendorId }) =>
       shouldAllowPopup({
         url,
         vendorId,
         allowAuthPopups: settings?.allowAuthPopups !== false
       }),
-    windowDefaults: { width: 1100, height: 800, show: !startMinimized, title: 'Agentify Desktop' },
-    createController: async ({ tabId, win }) => {
+    chromeExecutablePath,
+    chromeDebugPort,
+    chromeProfileMode,
+    chromeProfileName
+  });
+  const browserState = await browserBackend.start();
+
+  const tabs = new TabManager({
+    browserBackend,
+    maxTabs: Number(process.env.AGENTIFY_DESKTOP_MAX_TABS || 12),
+    onNeedsAttention,
+    onChanged: emitTabsChanged,
+    createController: async ({ tabId, page }) => {
       const controller = new ChatGPTController({
-        webContents: win.webContents,
-        loadURL: (url) => win.loadURL(url),
+        page,
         selectors,
         stateDir,
         onBlocked: async (st) => {
@@ -211,9 +236,9 @@ async function main() {
   focusDefaultTab = () => {
     try {
       const win = tabs.getWindowById(defaultTabId);
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+      if (win.isMinimized?.()) win.restore?.();
+      win.show?.();
+      win.focus?.();
     } catch {}
   };
   if (pendingSecondInstanceFocus) focusDefaultTab();
@@ -259,7 +284,15 @@ async function main() {
   } catch {}
 
   ipcMain.handle('agentify:getState', async () => {
-    return { ok: true, vendors, tabs: tabs.listTabs(), defaultTabId, stateDir };
+    return {
+      ok: true,
+      vendors,
+      tabs: tabs.listTabs(),
+      defaultTabId,
+      stateDir,
+      browserBackend: browserBackendKind,
+      browser: browserState
+    };
   });
 
   ipcMain.handle('agentify:getSettings', async () => {
@@ -278,6 +311,11 @@ async function main() {
     if (has('maxQueriesPerMinute')) next.maxQueriesPerMinute = args.maxQueriesPerMinute;
     if (has('minTabGapMs')) next.minTabGapMs = args.minTabGapMs;
     if (has('minGlobalGapMs')) next.minGlobalGapMs = args.minGlobalGapMs;
+    if (has('browserBackend')) next.browserBackend = args.browserBackend;
+    if (has('chromeDebugPort')) next.chromeDebugPort = args.chromeDebugPort;
+    if (has('chromeExecutablePath')) next.chromeExecutablePath = args.chromeExecutablePath;
+    if (has('chromeProfileMode')) next.chromeProfileMode = args.chromeProfileMode;
+    if (has('chromeProfileName')) next.chromeProfileName = args.chromeProfileName;
     if (has('showTabsByDefault')) next.showTabsByDefault = args.showTabsByDefault;
     if (has('allowAuthPopups')) next.allowAuthPopups = args.allowAuthPopups;
     if (args?.acknowledge) next.acknowledgedAt = new Date().toISOString();
@@ -299,9 +337,9 @@ async function main() {
 
     if (show) {
       const win = tabs.getWindowById(tabId);
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+      if (win.isMinimized?.()) win.restore?.();
+      win.show?.();
+      win.focus?.();
     }
     return { ok: true, tabId };
   });
@@ -310,9 +348,9 @@ async function main() {
     const tabId = String(args?.tabId || '').trim();
     if (!tabId) throw new Error('missing_tabId');
     const win = tabs.getWindowById(tabId);
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
+    if (win.isMinimized?.()) win.restore?.();
+    win.show?.();
+    win.focus?.();
     return { ok: true };
   });
 
@@ -320,7 +358,7 @@ async function main() {
     const tabId = String(args?.tabId || '').trim();
     if (!tabId) throw new Error('missing_tabId');
     const win = tabs.getWindowById(tabId);
-    win.minimize();
+    win.minimize?.();
     return { ok: true };
   });
 
@@ -445,13 +483,13 @@ async function main() {
         getSettings: async () => settings,
         onShow: async ({ tabId }) => {
           const win = tabs.getWindowById(tabId || defaultTabId);
-          if (win.isMinimized()) win.restore();
-          win.show();
-          win.focus();
+          if (win.isMinimized?.()) win.restore?.();
+          win.show?.();
+          win.focus?.();
         },
         onHide: async ({ tabId }) => {
           const win = tabs.getWindowById(tabId || defaultTabId);
-          win.minimize();
+          win.minimize?.();
         },
         onShutdown: async () => {
           try {
@@ -499,6 +537,7 @@ async function main() {
       } catch {}
     }
     tabs.setQuitting(true);
+    browserBackend.dispose?.().catch?.(() => {});
   });
 
   process.on('SIGINT', () => {
@@ -514,6 +553,22 @@ async function main() {
 }
 
 main().catch((e) => {
+  const stateDir = argValue('--state-dir') || defaultStateDir();
+  const detail = e?.data?.hint === 'close_regular_chrome_and_retry'
+    ? 'Chrome is already using that profile. Fully quit regular Chrome, then retry Agentify Desktop.'
+    : e?.message || String(e);
+  writeState(
+    {
+      ok: false,
+      error: e?.message || String(e),
+      data: e?.data || null,
+      startedAt: new Date().toISOString()
+    },
+    stateDir
+  ).catch(() => {});
+  try {
+    dialog.showErrorBox('Agentify Desktop failed to start', detail);
+  } catch {}
   console.error('agentify-desktop fatal:', e);
   process.exit(1);
 });

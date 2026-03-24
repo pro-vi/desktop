@@ -88,6 +88,9 @@ body {
   color: rgba(233,236,242,0.58);
   line-height: 1.25;
 }
+.field.isHidden {
+  display: none;
+}
 input, select {
   width: 100%;
   border-radius: 10px;

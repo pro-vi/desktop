@@ -31,6 +31,10 @@ test('state: writeToken overrides existing', async () => {
 test('state: normalizeSettings defaults allowAuthPopups to true', () => {
   const s = normalizeSettings({});
   assert.equal(s.allowAuthPopups, true);
+  assert.equal(s.browserBackend, 'electron');
+  assert.equal(s.chromeDebugPort, 9222);
+  assert.equal(s.chromeProfileMode, 'isolated');
+  assert.equal(s.chromeProfileName, 'Default');
 });
 
 test('state: readSettings returns defaults when file missing', async () => {
@@ -45,4 +49,19 @@ test('state: writeSettings persists allowAuthPopups', async () => {
   assert.equal(saved.allowAuthPopups, false);
   const re = await readSettings(dir);
   assert.equal(re.allowAuthPopups, false);
+});
+
+test('state: normalizeSettings clamps backend fields', () => {
+  const s = normalizeSettings({
+    browserBackend: 'chrome-cdp',
+    chromeDebugPort: 70000,
+    chromeExecutablePath: ' /Applications/Google Chrome.app/Contents/MacOS/Google Chrome ',
+    chromeProfileMode: 'existing',
+    chromeProfileName: ' Profile 2 '
+  });
+  assert.equal(s.browserBackend, 'chrome-cdp');
+  assert.equal(s.chromeDebugPort, 65535);
+  assert.equal(s.chromeExecutablePath, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+  assert.equal(s.chromeProfileMode, 'existing');
+  assert.equal(s.chromeProfileName, 'Profile 2');
 });

@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import { BrowserWindow } from 'electron';
 
 class Mutex {
   #p = Promise.resolve();
@@ -17,16 +16,14 @@ class Mutex {
 }
 
 export class TabManager {
-  constructor({ createController, maxTabs = 12, onNeedsAttention, windowDefaults, userAgent, onChanged, popupPolicy }) {
+  constructor({ browserBackend, createController, maxTabs = 12, onNeedsAttention, onChanged }) {
+    this.browserBackend = browserBackend;
     this.createController = createController;
     this.maxTabs = Math.max(1, Number(maxTabs) || 12);
     this.onNeedsAttention = onNeedsAttention;
-    this.windowDefaults = windowDefaults || { width: 1100, height: 800, show: false, title: 'Agentify Desktop' };
-    this.userAgent = typeof userAgent === 'string' && userAgent.trim() ? userAgent.trim() : null;
     this.onChanged = typeof onChanged === 'function' ? onChanged : null;
-    this.popupPolicy = typeof popupPolicy === 'function' ? popupPolicy : (() => false);
 
-    this.tabs = new Map(); // tabId -> { id, key, name, vendorId, vendorName, url, win, controller, createdAt, lastUsedAt }
+    this.tabs = new Map(); // tabId -> { id, key, name, vendorId, vendorName, url, session, presenter, controller, createdAt, lastUsedAt }
     this.keyToId = new Map();
     this.forcedFocusTabs = new Set();
     this.mutex = new Mutex();
@@ -35,6 +32,7 @@ export class TabManager {
 
   setQuitting(v = true) {
     this.quitting = !!v;
+    this.browserBackend?.setQuitting?.(this.quitting);
   }
 
   async createTab({ key = null, name = null, url = 'https://chatgpt.com/', show = false, protectedTab = false, vendorId = null, vendorName = null } = {}) {
@@ -43,76 +41,26 @@ export class TabManager {
       if (this.tabs.size >= this.maxTabs) throw new Error('max_tabs_reached');
 
       const id = crypto.randomUUID();
-      const win = new BrowserWindow({
-        ...this.windowDefaults,
-        show: !!show,
-        webPreferences: {
-          sandbox: true,
-          contextIsolation: true,
-          nodeIntegration: false,
-          ...(this.windowDefaults.webPreferences || {})
-        }
-      });
-      if (this.userAgent) {
-        try {
-          win.webContents.setUserAgent(this.userAgent);
-        } catch {}
-      }
-      win.webContents.on('did-create-window', (childWin) => {
-        if (!childWin || childWin.isDestroyed?.()) return;
-        if (this.userAgent) {
-          try {
-            childWin.webContents.setUserAgent(this.userAgent);
-          } catch {}
-        }
-      });
-      win.webContents.setWindowOpenHandler((details) => {
-        let openerUrl = '';
-        try {
-          openerUrl =
-            String(details?.referrer?.url || '').trim() ||
-            String(win.webContents.getURL?.() || '').trim() ||
-            String(url || '').trim();
-        } catch {
-          openerUrl = String(url || '').trim();
-        }
-        const allow = !!this.popupPolicy({
-          url: details?.url || '',
-          frameName: details?.frameName || '',
-          disposition: details?.disposition || '',
-          openerUrl,
-          vendorId: vendorId || 'chatgpt'
-        });
-        if (!allow) return { action: 'deny' };
-        return {
-          action: 'allow',
-          overrideBrowserWindowOptions: {
-            width: 520,
-            height: 760,
-            show: true,
-            title: 'Agentify Desktop — Sign in',
-            autoHideMenuBar: true,
-            webPreferences: {
-              sandbox: true,
-              contextIsolation: true,
-              nodeIntegration: false,
-              ...(this.windowDefaults.webPreferences || {})
-            }
-          }
-        };
-      });
-      const fixedTitle = `Agentify Desktop${vendorName ? ` — ${vendorName}` : ''}`;
-      try {
-        win.setTitle(fixedTitle);
-        win.on('page-title-updated', (e) => {
-          try {
-            e.preventDefault();
-            win.setTitle(fixedTitle);
-          } catch {}
-        });
-      } catch {}
+      let finalized = false;
+      const finalizeClose = () => {
+        if (finalized) return;
+        finalized = true;
+        this.tabs.delete(id);
+        if (key) this.keyToId.delete(key);
+        this.forcedFocusTabs.delete(id);
+        this.onChanged?.();
+      };
 
-      const controller = await this.createController({ tabId: id, win });
+      const session = await this.browserBackend.createSession({
+        tabId: id,
+        url,
+        show,
+        protectedTab,
+        vendorId,
+        vendorName,
+        onClosed: finalizeClose
+      });
+      const controller = await this.createController({ tabId: id, page: session.page, session });
 
       const tab = {
         id,
@@ -121,7 +69,8 @@ export class TabManager {
         vendorId: vendorId || null,
         vendorName: vendorName || null,
         url: String(url || ''),
-        win,
+        session,
+        presenter: session.presenter,
         controller,
         protectedTab: !!protectedTab,
         createdAt: Date.now(),
@@ -130,26 +79,6 @@ export class TabManager {
 
       this.tabs.set(id, tab);
       if (key) this.keyToId.set(key, id);
-      this.onChanged?.();
-
-      win.on('closed', () => {
-        this.tabs.delete(id);
-        if (tab.key) this.keyToId.delete(tab.key);
-        this.forcedFocusTabs.delete(id);
-        this.onChanged?.();
-      });
-
-      win.on('close', (e) => {
-        if (this.quitting) return;
-        if (!tab.protectedTab) return;
-        try {
-          e.preventDefault();
-          if (win.isMinimized()) return;
-          win.minimize();
-        } catch {}
-      });
-
-      await win.loadURL(url);
       this.onChanged?.();
       return id;
     });
@@ -164,9 +93,7 @@ export class TabManager {
         this.keyToId.delete(key);
         return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName });
       }
-      if (vendorId) {
-        if (tab.vendorId && tab.vendorId !== vendorId) throw new Error('key_vendor_mismatch');
-      }
+      if (vendorId && tab.vendorId && tab.vendorId !== vendorId) throw new Error('key_vendor_mismatch');
       return existing;
     }
     return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName });
@@ -194,7 +121,7 @@ export class TabManager {
   getControllerById(id) {
     const tab = this.tabs.get(id);
     if (!tab) throw new Error('tab_not_found');
-    if (tab.win?.isDestroyed?.() || tab.win?.webContents?.isDestroyed?.()) throw new Error('tab_closed');
+    if (tab.session?.isClosed?.()) throw new Error('tab_closed');
     tab.lastUsedAt = Date.now();
     return tab.controller;
   }
@@ -202,8 +129,9 @@ export class TabManager {
   getWindowById(id) {
     const tab = this.tabs.get(id);
     if (!tab) throw new Error('tab_not_found');
+    if (tab.session?.isClosed?.()) throw new Error('tab_closed');
     tab.lastUsedAt = Date.now();
-    return tab.win;
+    return tab.presenter;
   }
 
   async closeTab(id) {
@@ -214,7 +142,7 @@ export class TabManager {
       this.tabs.delete(id);
       this.forcedFocusTabs.delete(id);
       try {
-        tab.win.close();
+        await tab.session?.close?.();
       } catch {}
       this.onChanged?.();
       return true;
@@ -224,10 +152,10 @@ export class TabManager {
   async needsAttention(tabId, reason) {
     this.forcedFocusTabs.add(tabId);
     try {
-      const win = this.getWindowById(tabId);
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+      const presenter = this.getWindowById(tabId);
+      if (presenter.isMinimized?.()) presenter.restore?.();
+      presenter.show?.();
+      presenter.focus?.();
     } catch {}
     await this.onNeedsAttention?.({ tabId, reason });
   }
@@ -235,11 +163,10 @@ export class TabManager {
   async resolvedAttention(tabId) {
     const wasForced = this.forcedFocusTabs.has(tabId);
     this.forcedFocusTabs.delete(tabId);
-    // Hide only the window that we forced to the front (best-effort).
     if (wasForced) {
       try {
-        const win = this.getWindowById(tabId);
-        if (win.isVisible()) win.minimize();
+        const presenter = this.getWindowById(tabId);
+        if (presenter.isVisible?.()) presenter.minimize?.();
       } catch {}
     }
     if (this.forcedFocusTabs.size === 0) {

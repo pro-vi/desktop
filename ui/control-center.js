@@ -28,14 +28,8 @@ function setChecked(id, value) {
   el(id).checked = !!value;
 }
 
-function uuidv4() {
-  // RFC4122 v4, from crypto.getRandomValues (browser-safe).
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  b[6] = (b[6] & 0x0f) | 0x40;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const hex = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+function setHidden(id, hidden) {
+  el(id).classList.toggle('isHidden', !!hidden);
 }
 
 function getBridge() {
@@ -76,12 +70,19 @@ function defaultState() {
     vendors: [...fallbackVendors],
     tabs: [],
     defaultTabId: null,
-    stateDir: ''
+    stateDir: '',
+    browserBackend: 'electron',
+    browser: null
   };
 }
 
 function defaultSettings() {
   return {
+    browserBackend: 'electron',
+    chromeDebugPort: 9222,
+    chromeExecutablePath: null,
+    chromeProfileMode: 'isolated',
+    chromeProfileName: 'Default',
     maxInflightQueries: 2,
     maxQueriesPerMinute: 12,
     minTabGapMs: 0,
@@ -96,6 +97,16 @@ function statusText(msg) {
   el('statusLine').textContent = msg;
 }
 
+function isChromeCdpSelected() {
+  return String(el('setBrowserBackend').value || '').trim() === 'chrome-cdp';
+}
+
+function syncChromeProfileFields() {
+  const hidden = !isChromeCdpSelected();
+  setHidden('chromeProfileModeField', hidden);
+  setHidden('chromeProfileNameField', hidden);
+}
+
 let lastState = defaultState();
 let refreshInFlight = null;
 
@@ -104,7 +115,6 @@ async function refresh() {
   refreshInFlight = (async () => {
     const state = (await callApi('getState', undefined, { fallback: lastState })) || lastState;
     const settings = (await callApi('getSettings', undefined, { fallback: defaultSettings() })) || defaultSettings();
-    const orch = (await callApi('getOrchestrators', undefined, { fallback: { running: [], recent: [] } })) || { running: [], recent: [] };
     lastState = { ...defaultState(), ...state };
 
     const vendorSelect = el('vendorSelect');
@@ -202,9 +212,16 @@ async function refresh() {
     list.appendChild(row);
   }
 
-    statusText(`Tabs: ${tabs.length} • State: ${lastState.stateDir || ''}`);
+    const browserSummary =
+      lastState.browserBackend === 'chrome-cdp'
+        ? `Chrome CDP${lastState.browser?.profileMode === 'existing' ? ' (existing profile)' : ''}${lastState.browser?.debugPort ? `:${lastState.browser.debugPort}` : ''}`
+        : 'Electron';
+    statusText(`Backend: ${browserSummary} • Tabs: ${tabs.length} • State: ${lastState.stateDir || ''}`);
 
   // Settings UI.
+    el('setBrowserBackend').value = settings.browserBackend || 'electron';
+    el('setChromeProfileMode').value = settings.chromeProfileMode || 'isolated';
+    el('setChromeProfileName').value = settings.chromeProfileName || 'Default';
     setNum('setMaxInflight', settings.maxInflightQueries);
     setNum('setQpm', settings.maxQueriesPerMinute);
     setNum('setTabGap', settings.minTabGapMs);
@@ -214,21 +231,6 @@ async function refresh() {
     setChecked('setAcknowledge', false);
     el('btnSaveSettings').disabled = true;
     el('settingsHint').textContent = settings.acknowledgedAt ? `Last acknowledged: ${settings.acknowledgedAt}` : 'Not acknowledged yet.';
-
-  // Orchestrator status.
-    const running = Array.isArray(orch?.running) ? orch.running : [];
-    const recent = Array.isArray(orch?.recent) ? orch.recent : [];
-    const orchStatus =
-      running.length === 0
-        ? 'No orchestrators running.'
-        : `Running: ${running.map((r) => `${r.key} (pid ${r.pid})`).join(', ')}`;
-    el('orchStatus').textContent = orchStatus;
-    if (running.length === 1 && running[0].logPath) el('orchWorkspaceHint').textContent = `Log: ${running[0].logPath}`;
-    else if (recent.length) {
-      el('orchWorkspaceHint').textContent = `Last exit: ${recent[0].key} code=${recent[0].exitCode ?? 'null'} signal=${recent[0].signal || 'null'}`;
-    } else {
-      el('orchWorkspaceHint').textContent = '';
-    }
   })().finally(() => {
     refreshInFlight = null;
   });
@@ -276,91 +278,15 @@ async function main() {
     }
   };
 
-  const orchRefresh = async () => {
-    await refresh();
-  };
-  el('btnOrchRefresh').onclick = () => orchRefresh().catch(() => {});
-
-  el('btnOrchStart').onclick = async () => {
-    const key = String(el('orchKey').value || '').trim();
-    const workspace = String(el('orchWorkspace').value || '').trim();
-    if (!key) {
-      el('orchStatus').textContent = 'Enter a project key.';
-      return;
-    }
-    try {
-      if (workspace) await callApi('setWorkspaceForKey', { key, workspace }, { required: true });
-      await callApi('startOrchestrator', { key }, { required: true });
-      await orchRefresh();
-    } catch (e) {
-      el('orchStatus').textContent = `Start failed: ${e?.message || String(e)}`;
-    }
-  };
-
-  el('btnOrchStop').onclick = async () => {
-    const key = String(el('orchKey').value || '').trim();
-    if (!key) {
-      el('orchStatus').textContent = 'Enter a project key.';
-      return;
-    }
-    try {
-      await callApi('stopOrchestrator', { key }, { required: true });
-      await orchRefresh();
-    } catch (e) {
-      el('orchStatus').textContent = `Stop failed: ${e?.message || String(e)}`;
-    }
-  };
-
-  el('btnOrchStopAll').onclick = async () => {
-    try {
-      await callApi('stopAllOrchestrators', undefined, { required: true });
-      await orchRefresh();
-    } catch (e) {
-      el('orchStatus').textContent = `Stop all failed: ${e?.message || String(e)}`;
-    }
-  };
-
-  el('btnOrchCopy').onclick = async () => {
-    const key = String(el('orchKey').value || '').trim();
-    if (!key) {
-      el('orchStatus').textContent = 'Enter a project key first.';
-      return;
-    }
-    const tool = String(el('orchTool').value || 'codex.run').trim();
-    const obj =
-      tool === 'codex.run'
-        ? { agentify_tool: tool, id: uuidv4(), key, mode: 'interactive', args: { prompt: 'Describe the task for Codex here.' } }
-        : tool === 'fs.read'
-          ? { agentify_tool: tool, id: uuidv4(), key, mode: 'batch', args: { path: 'relative/path/to/file.txt', maxBytes: 50000 } }
-          : { agentify_tool: tool, id: uuidv4(), key, mode: 'batch', args: {} };
-    const text = `\`\`\`json\n${JSON.stringify(obj, null, 2)}\n\`\`\``;
-    try {
-      await navigator.clipboard.writeText(text);
-      el('orchStatus').textContent = 'Copied tool JSON to clipboard. Paste it into the ChatGPT thread.';
-    } catch {
-      el('orchStatus').textContent = 'Copy failed. Your browser may block clipboard access; select and copy manually: ' + text;
-    }
-  };
-
-  el('orchKey').onchange = async () => {
-    const key = String(el('orchKey').value || '').trim();
-    if (!key) return;
-    try {
-      const ws = await callApi('getWorkspaceForKey', { key }, { required: true });
-      const root = ws?.workspace?.root || '';
-      if (root) {
-        el('orchWorkspace').value = root;
-        el('orchWorkspaceHint').textContent = `Saved workspace: ${root}`;
-      } else {
-        el('orchWorkspaceHint').textContent = 'No saved workspace for this key yet.';
-      }
-    } catch {}
+  el('setBrowserBackend').onchange = () => {
+    syncChromeProfileFields();
   };
 
   const updateSaveEnabled = () => {
     el('btnSaveSettings').disabled = !el('setAcknowledge').checked;
   };
   el('setAcknowledge').onchange = updateSaveEnabled;
+  syncChromeProfileFields();
 
   el('btnResetSettings').onclick = async () => {
     el('settingsHint').textContent = '';
@@ -380,17 +306,21 @@ async function main() {
       const saved = await callApi(
         'setSettings',
         {
-        maxInflightQueries: num('setMaxInflight', 2),
-        maxQueriesPerMinute: num('setQpm', 12),
-        minTabGapMs: num('setTabGap', 0),
-        minGlobalGapMs: num('setGlobalGap', 0),
-        showTabsByDefault: !!el('setShowTabsDefault').checked,
-        allowAuthPopups: !!el('setAllowAuthPopups').checked,
+          browserBackend: String(el('setBrowserBackend').value || 'electron').trim() || 'electron',
+          chromeProfileMode: String(el('setChromeProfileMode').value || 'isolated').trim() || 'isolated',
+          chromeProfileName: String(el('setChromeProfileName').value || 'Default').trim() || 'Default',
+          maxInflightQueries: num('setMaxInflight', 2),
+          maxQueriesPerMinute: num('setQpm', 12),
+          minTabGapMs: num('setTabGap', 0),
+          minGlobalGapMs: num('setGlobalGap', 0),
+          showTabsByDefault: !!el('setShowTabsDefault').checked,
+          allowAuthPopups: !!el('setAllowAuthPopups').checked,
           acknowledge: true
         },
         { required: true }
       );
-      el('settingsHint').textContent = `Saved.${saved?.acknowledgedAt ? ` ${saved.acknowledgedAt}` : ''}`;
+      const backendChanged = String(saved?.browserBackend || 'electron') !== String(lastState.browserBackend || 'electron');
+      el('settingsHint').textContent = `Saved.${saved?.acknowledgedAt ? ` ${saved.acknowledgedAt}` : ''}${backendChanged ? ' Restart Agentify Desktop to apply backend changes.' : ''}`;
       setChecked('setAcknowledge', false);
       el('btnSaveSettings').disabled = true;
     } catch (e) {
@@ -409,20 +339,6 @@ async function main() {
   } else {
     statusText('Tabs listener unavailable (compat mode). Auto-refresh every 3s.');
     setInterval(() => refresh().catch(() => {}), 3000);
-  }
-
-  const hasOrch =
-    hasApi('getOrchestrators') &&
-    hasApi('startOrchestrator') &&
-    hasApi('stopOrchestrator') &&
-    hasApi('stopAllOrchestrators');
-  if (!hasOrch) {
-    for (const id of ['btnOrchStart', 'btnOrchStop', 'btnOrchStopAll', 'btnOrchRefresh', 'btnOrchCopy', 'orchKey', 'orchWorkspace', 'orchTool']) {
-      try {
-        el(id).disabled = true;
-      } catch {}
-    }
-    el('orchStatus').textContent = 'Orchestrator controls unavailable in this build.';
   }
 
   await refresh();

@@ -66,11 +66,102 @@ The Agentify Control Center opens. Use it to:
 - Show/hide tabs (each tab is a separate window)
 - Create tabs for ChatGPT, Perplexity, Claude, Google AI Studio, Gemini, and Grok
 - Tune automation safety limits (governor)
-- Manage the optional “single-chat emulator” orchestrator
 
 Sign in to your target vendor in the tab window.
 
 If your account uses SSO (Google/Microsoft/Apple), keep **Settings → Allow auth popups** enabled in the Control Center. ChatGPT login often opens provider auth in a popup, and blocking popups can prevent login from completing.
+
+## Browser backend choice
+Agentify Desktop now supports two browser backends:
+
+- `electron` (default): embedded windows managed directly by Agentify.
+- `chrome-cdp`: launches/attaches a real Chrome-family browser via the Chrome DevTools Protocol.
+
+If Google/Microsoft/Apple SSO is fighting Electron, switch to **Settings → Browser backend → Chrome CDP**, save, then restart Agentify Desktop.
+
+`chrome-cdp` notes:
+- Uses a managed browser profile at `~/.agentify-desktop/chrome-user-data/`
+- Default remote debugging port is `9222`
+- Prefers your local Chrome install, but also works with Chromium / Brave / Edge
+- Uses real browser login flows, which is the main reason to choose it
+
+Profile options in the Control Center:
+- `Agentify isolated profile` (default): safest and most predictable
+- `Existing Chrome profile`: reuses your normal Chrome session/profile
+
+If you choose `Existing Chrome profile`, fully quit regular Chrome first, then start Agentify Desktop. If Chrome is already using that profile, Agentify will fail fast with a hint instead of attaching to the wrong browser state.
+
+## First Useful Workflow
+This is the simplest real workflow to prove the product is doing something useful.
+
+1. Start Agentify Desktop:
+```bash
+npm i
+npm run start
+```
+
+2. In the Control Center:
+- set `Browser backend` to `Chrome CDP`
+- keep `Chrome profile mode` as `Agentify isolated profile`
+- click `Save`
+- restart Agentify Desktop if you changed the backend
+
+3. Click `Show default`, then sign in to ChatGPT in the browser window.
+
+4. Register the MCP server in your CLI.
+
+Codex:
+```bash
+codex mcp add agentify-desktop -- node /ABS/PATH/TO/desktop/mcp-server.mjs
+```
+
+Claude Code:
+```bash
+claude mcp add --transport stdio agentify-desktop -- node /ABS/PATH/TO/desktop/mcp-server.mjs
+```
+
+5. In your MCP client, run this exact workflow:
+
+Prompt:
+```text
+Create or reuse an Agentify tab with key repo-triage.
+Use ChatGPT to answer this:
+"Summarize the architecture of this repo in 8 bullets, then list the top 3 risky areas to change first."
+Return the answer and keep the tab key stable for follow-ups.
+```
+
+6. Follow up in the same tab:
+
+Prompt:
+```text
+Use the existing Agentify tab key repo-triage.
+Ask for a test plan for changing one of those risky areas.
+Return the plan as a short checklist.
+```
+
+That proves the core loop:
+- keep a persistent logged-in web session
+- call it from Codex / Claude Code over MCP
+- reuse the same tab/session across multiple requests
+
+Good next workflow:
+- create separate keys like `cmp-chatgpt`, `cmp-claude`, `cmp-gemini`
+- send the same architecture prompt to each
+- compare answers before making changes
+
+Optional overrides:
+```bash
+AGENTIFY_DESKTOP_BROWSER_BACKEND=chrome-cdp npm run start
+AGENTIFY_DESKTOP_CHROME_DEBUG_PORT=9333 npm run start
+AGENTIFY_DESKTOP_CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run start
+```
+
+Equivalent CLI flags:
+```bash
+npm run start -- --browser-backend chrome-cdp
+npm run start -- --chrome-debug-port 9333
+npm run start -- --chrome-binary "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
 
 ## Connect from MCP clients
 Quickstart can register MCP automatically, but manual commands are below if you prefer explicit setup.
@@ -184,42 +275,9 @@ Agentify Desktop includes a built-in governor to reduce accidental high-rate aut
 
 You can adjust these limits in the Control Center after acknowledging the disclaimer.
 
-## Single-chat emulator (experimental)
-Agentify Desktop can optionally run a local “orchestrator” that watches a ChatGPT thread for fenced JSON tool requests, runs Codex locally, and posts results back into the *same* ChatGPT thread. This gives you a “single-chat” orchestration feel without relying on ChatGPT’s built-in tools/MCP mode.
-
-The orchestrator currently invokes Codex CLI directly. Core `agentify_*` MCP tools remain client-agnostic.
-
-### What it does
-- Treats your ChatGPT Web thread as the “mothership” (planning + context).
-- Watches for tool requests you paste as fenced JSON blocks.
-- Runs Codex CLI locally in your workspace (interactive or non-interactive).
-- Posts back: a short outcome + a bounded diff/review packet (so you’re not pasting 200k+ chars every time).
-
-### Quick test (recommended)
-1) Start the app and sign in:
-- Run `./scripts/quickstart.sh --show-tabs`
-- In the Control Center, click **Show default** and sign in to `https://chatgpt.com`
-
-2) Start an orchestrator session:
-- In the Control Center → **Orchestrator**, start an orchestrator for a project `key` (one key per project/workstream).
-
-3) In the ChatGPT thread (same tab/key), paste a fenced JSON request like:
-```json
-{
-  "tool": "codex.run",
-  "mode": "interactive",
-  "args": {
-    "prompt": "Find the README file and add a short troubleshooting section. Then run tests."
-  }
-}
-```
-
-4) Wait for the orchestrator to post results back into the thread.
-
-### Tips
-- Use one stable `key` per project so parallel jobs don’t mix.
-- If the orchestrator can’t find the right workspace root, set it in the Control Center (Workspace/Allowlist), then retry.
-- If you want the orchestrator to post less frequently, keep prompts focused (it posts progress updates on a timer).
+## Not Supported Right Now
+The experimental orchestrator / single-chat emulator is intentionally hidden from the desktop UI and is not supported right now.
+The supported product surface is the local browser-control + MCP workflow described above.
 
 ## Limitations / robustness notes
 - **File upload selectors:** `input[type=file]` selection is best-effort; if ChatGPT changes the upload flow, update `selectors.json` or `~/.agentify-desktop/selectors.override.json`.
@@ -235,6 +293,7 @@ The orchestrator currently invokes Codex CLI directly. Core `agentify_*` MCP too
 - Check 1: In Control Center, enable `Allow auth popups (needed for Google/Microsoft/Apple SSO)`.
 - Check 2: Retry login from a fresh ChatGPT tab (`Create tab` → `ChatGPT` → `Show`).
 - Check 3: If your provider asks for WebAuthn/security key prompts, complete/cancel once and continue; some providers require that step before password/passkey fallback.
+- Check 4: Switch to the `chrome-cdp` backend and restart. This uses a real Chrome-family browser and avoids the embedded Electron auth path entirely.
 
 ## Build installers (unsigned)
 ```bash

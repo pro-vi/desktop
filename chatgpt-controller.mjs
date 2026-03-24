@@ -11,10 +11,6 @@ function jitter(minMs, maxMs) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
 
-async function sleepWithJitter(ms, j = 40) {
-  await sleep(ms + jitter(0, j));
-}
-
 class Mutex {
   #p = Promise.resolve();
   async run(fn) {
@@ -31,9 +27,8 @@ class Mutex {
 }
 
 export class ChatGPTController {
-  constructor({ webContents, loadURL, selectors, onBlocked, onUnblocked, stateDir }) {
-    this.webContents = webContents;
-    this.loadURL = loadURL;
+  constructor({ page, selectors, onBlocked, onUnblocked, stateDir }) {
+    this.page = page;
     this.selectors = selectors;
     this.onBlocked = onBlocked;
     this.onUnblocked = onUnblocked;
@@ -50,15 +45,15 @@ export class ChatGPTController {
   }
 
   async navigate(url) {
-    await this.loadURL(url);
+    await this.page.navigate(url);
   }
 
   async #eval(js) {
-    return await this.webContents.executeJavaScript(js, true);
+    return await this.page.evaluate(js);
   }
 
   async getUrl() {
-    return this.webContents.getURL();
+    return await this.page.getUrl();
   }
 
   async readPageText({ maxChars = 200_000 } = {}) {
@@ -93,6 +88,12 @@ export class ChatGPTController {
       const iframeSrcs = Array.from(document.querySelectorAll('iframe'))
         .map(f => String(f.getAttribute('src') || ''))
         .filter(Boolean);
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
 
       const hasTurnstile = iframeSrcs.some(s => /turnstile/i.test(s)) || !!document.querySelector('iframe[src*=\"turnstile\" i]');
       const hasArkose = iframeSrcs.some(s => /arkoselabs|arkose/i.test(s)) || !!document.querySelector('iframe[src*=\"arkose\" i], iframe[src*=\"arkoselabs\" i]');
@@ -103,13 +104,8 @@ export class ChatGPTController {
       const loginLike = !!document.querySelector('input[type=\"password\"], input[name=\"password\"], input[autocomplete=\"current-password\"]')
         || /log in|sign in|continue with/i.test(bodyText);
 
-      const promptVisible = (() => {
+      const rawPromptVisible = (() => {
         const pickPrompt = (nodes) => {
-          const visible = (n) => {
-            const r = n.getBoundingClientRect();
-            const style = window.getComputedStyle(n);
-            return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-          };
           const editable = (n) => {
             if (!n) return false;
             if (!visible(n)) return false;
@@ -161,6 +157,27 @@ export class ChatGPTController {
         return !!pickPrompt(uniq);
       })();
 
+      const sendVisible = (() => {
+        const labelOf = (n) =>
+          [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('title') || '',
+            n.getAttribute('data-testid') || '',
+            n.textContent || ''
+          ]
+            .join(' ')
+            .replace(/\\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+        return Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.sendButton)})).some((n) => {
+          if (!visible(n)) return false;
+          const label = labelOf(n);
+          if (/stop|cancel|retry|signin|sign in|log in|login|continue with|google|microsoft|apple/.test(label)) return false;
+          return /send|submit|run|go|ask|reply/.test(label) || n.matches('[data-testid=\"send-button\"], [aria-label=\"Send prompt\"], [aria-label=\"Send\"]');
+        });
+      })();
+      const promptVisible = rawPromptVisible && (!loginLike || sendVisible);
+
       const blocked = hasTurnstile || hasArkose || hasVerifyButton || looks403 || (loginLike && !promptVisible);
       const kind = (hasTurnstile || hasArkose || hasVerifyButton) ? 'captcha' : (loginLike ? 'login' : (looks403 ? 'blocked' : null));
       return {
@@ -168,7 +185,7 @@ export class ChatGPTController {
         blocked,
         promptVisible,
         kind,
-        indicators: { hasTurnstile, hasArkose, hasVerifyButton, looks403, loginLike }
+        indicators: { hasTurnstile, hasArkose, hasVerifyButton, looks403, loginLike, rawPromptVisible, sendVisible }
       };
     })()`);
 
@@ -221,44 +238,34 @@ export class ChatGPTController {
   }
 
   async #sendKey(key, { modifiers = [] } = {}) {
-    const wc = this.webContents;
-    wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
-    // Only send a char event for printable single-character keys.
-    const hasCommandModifier = Array.isArray(modifiers) && modifiers.some((m) => m === 'control' || m === 'meta' || m === 'alt');
-    if (typeof key === 'string' && key.length === 1 && !hasCommandModifier) {
-      wc.sendInputEvent({ type: 'char', keyCode: key, modifiers });
-    }
-    wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers });
+    await this.page.sendKey(key, { modifiers });
   }
 
   async #typeHuman(text) {
-    const wc = this.webContents;
     for (const ch of String(text)) {
-      wc.sendInputEvent({ type: 'char', keyCode: ch });
+      await this.page.insertText(ch);
       await sleep(jitter(12, 45));
     }
   }
 
   async #moveMouseTo(x, y) {
-    const wc = this.webContents;
     const from = { ...this.mouse };
     const steps = Math.max(6, Math.min(22, Math.floor(Math.hypot(x - from.x, y - from.y) / 35)));
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const nx = Math.round(from.x + (x - from.x) * t + jitter(-2, 2));
       const ny = Math.round(from.y + (y - from.y) * t + jitter(-2, 2));
-      wc.sendInputEvent({ type: 'mouseMove', x: nx, y: ny, movementX: 0, movementY: 0 });
+      await this.page.moveMouse(nx, ny);
       await sleep(jitter(6, 18));
       this.mouse = { x: nx, y: ny };
     }
   }
 
   async #clickAt(x, y) {
-    const wc = this.webContents;
     await this.#moveMouseTo(x, y);
-    wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    await this.page.mouseDown(x, y, { button: 'left', clickCount: 1 });
     await sleep(jitter(20, 60));
-    wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+    await this.page.mouseUp(x, y, { button: 'left', clickCount: 1 });
   }
 
   async #typePrompt(prompt) {
@@ -513,53 +520,7 @@ export class ChatGPTController {
       return true;
     })()`);
 
-    const wc = this.webContents;
-    const didAttach = !wc.debugger.isAttached();
-    try {
-      if (didAttach) wc.debugger.attach('1.3');
-    } catch {
-      // If debugger attach fails, we can't reliably set file input.
-      const err = new Error('file_upload_unavailable');
-      err.data = { reason: 'debugger_attach_failed' };
-      throw err;
-    }
-
-    try {
-      let lastNodeIds = [];
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const { root } = await wc.debugger.sendCommand('DOM.getDocument', { depth: 12, pierce: true });
-        const q = await wc.debugger.sendCommand('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"]' });
-        const nodeIds = Array.isArray(q?.nodeIds) ? q.nodeIds : [];
-        lastNodeIds = nodeIds;
-        if (!nodeIds.length) {
-          await sleepWithJitter(180);
-          continue;
-        }
-
-        let lastErr = null;
-        // Prefer last input (often the real one appended to the DOM).
-        const tryIds = [...nodeIds].reverse();
-        for (const nodeId of tryIds) {
-          try {
-            await wc.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: absFiles });
-            lastErr = null;
-            break;
-          } catch (e) {
-            lastErr = e;
-          }
-        }
-        if (!lastErr) return;
-        await sleepWithJitter(180);
-      }
-
-      const err = new Error('missing_file_input');
-      err.data = { selector: 'input[type=file]', found: lastNodeIds.length };
-      throw err;
-    } finally {
-      try {
-        if (didAttach && wc.debugger.isAttached()) wc.debugger.detach();
-      } catch {}
-    }
+    await this.page.setFileInputFiles(absFiles);
   }
 
   async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400 } = {}) {
@@ -619,7 +580,10 @@ export class ChatGPTController {
 
       const readyByNodes = (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
-      const done = !generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited);
+      const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
+      const done =
+        (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
+        (!generating && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
       if (done) {
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
