@@ -726,7 +726,8 @@ export class ChatGPTController {
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         });
-        const sendEnabled = send ? !send.disabled : true;
+        const sendEnabled = send ? !send.disabled : false;
+        const sendFound = !!send;
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
         const fallbackMainText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
@@ -734,7 +735,8 @@ export class ChatGPTController {
         const hasContinue = Array.from(document.querySelectorAll('button, a')).some(b => /continue generating/i.test((b.textContent||'').trim()));
         const hasRegenerate = Array.from(document.querySelectorAll('button, a')).some(b => /regenerate/i.test((b.textContent||'').trim()));
         const hasError = /something went wrong|try again|error/i.test(txt) && txt.length < 500;
-        return { stop, sendEnabled, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate };
+        const isThinking = /\bpro thinking\b|\bthinking\.\.\.\b|\bextended pro\b|\breasoning\b/i.test(txt);
+        return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking };
       })()`);
 
       const txt = String(snap?.txt || '');
@@ -743,9 +745,9 @@ export class ChatGPTController {
         lastChange = Date.now();
       }
 
-      // Some providers expose unrelated visible "stop/cancel" controls.
-      // Treat "generating" as stop-visible only when send is not enabled.
-      const generating = !!snap?.stop && !snap?.sendEnabled;
+      // Treat as "generating" when: stop button visible, or send button missing/disabled,
+      // or the page shows a thinking indicator (GPT Pro extended thinking).
+      const generating = (!!snap?.stop && !snap?.sendEnabled) || snap?.isThinking || (!snap?.sendFound && !snap?.sendEnabled);
       if (generating) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
@@ -768,7 +770,7 @@ export class ChatGPTController {
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
       const done =
         (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
-        (!generating && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
+        (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
       if (done) {
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
@@ -801,7 +803,7 @@ export class ChatGPTController {
       await this.#attachFiles(attachments);
       await this.#typePrompt(prompt);
       await this.#clickSend();
-      return await this.#waitForAssistantStable({ timeoutMs: Math.min(timeoutMs, 8 * 60_000) });
+      return await this.#waitForAssistantStable({ timeoutMs: Math.max(timeoutMs, 25 * 60_000) });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
