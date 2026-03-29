@@ -745,9 +745,12 @@ export class ChatGPTController {
         lastChange = Date.now();
       }
 
-      // Treat as "generating" when: stop button visible, or send button missing/disabled,
-      // or the page shows a thinking indicator (GPT Pro extended thinking).
-      const generating = (!!snap?.stop && !snap?.sendEnabled) || snap?.isThinking || (!snap?.sendFound && !snap?.sendEnabled);
+      // Treat as "generating" when: stop button visible and send not enabled,
+      // thinking indicator detected, or stop button visible while send button missing.
+      // A missing send button alone is NOT treated as generating — the selector may
+      // simply not match the current UI. Only block completion when there's active
+      // evidence of generation (stop button or thinking state).
+      const generating = (!!snap?.stop && !snap?.sendEnabled) || snap?.isThinking || (!!snap?.stop && !snap?.sendFound);
       if (generating) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
@@ -768,8 +771,9 @@ export class ChatGPTController {
       const readyByNodes = (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
+      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !snap?.isThinking);
       const done =
-        (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
+        (!generating && stopGoneLongEnough && sendReady && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
         (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
       if (done) {
         const extra = await this.#eval(`(() => {
