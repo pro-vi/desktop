@@ -36,6 +36,7 @@ registerTool(
       model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
+      projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
       bundleName: z.string().optional().describe('Named context bundle to merge into this query before sending.'),
       prompt: z.string().describe('Prompt to send to ChatGPT.'),
       promptPrefix: z.string().optional().describe('Optional reusable instruction block prepended before packed context and prompt.'),
@@ -55,6 +56,7 @@ registerTool(
     model,
     tabId,
     key,
+    projectUrl,
     bundleName,
     prompt,
     promptPrefix,
@@ -81,6 +83,7 @@ registerTool(
         model,
         tabId,
         key,
+        projectUrl,
         bundleName,
         prompt,
         promptPrefix,
@@ -591,16 +594,17 @@ registerTool(
       model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
       key: z.string().optional(),
       name: z.string().optional(),
+      projectUrl: z.string().optional().describe('ChatGPT Project URL. Routes conversations on this tab into the project.'),
       show: z.boolean().optional().describe('Show the tab window immediately.')
     }
   },
-  async ({ model, key, name, show }) => {
+  async ({ model, key, name, projectUrl, show }) => {
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/tabs/create',
-      body: { model, key, name, show: typeof show === 'boolean' ? show : undefined }
+      body: { model, key, name, projectUrl, show: typeof show === 'boolean' ? show : undefined }
     });
     return { content: [{ type: 'text', text: data.tabId || '' }], structuredContent: data };
   }

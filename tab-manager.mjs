@@ -53,7 +53,7 @@ export class TabManager {
     this.browserBackend?.setQuitting?.(this.quitting);
   }
 
-  async createTab({ key = null, name = null, url = 'https://chatgpt.com/', show = false, protectedTab = false, vendorId = null, vendorName = null } = {}) {
+  async createTab({ key = null, name = null, url = 'https://chatgpt.com/', show = false, protectedTab = false, vendorId = null, vendorName = null, projectUrl = null } = {}) {
     return await this.mutex.run(async () => {
       if (key && this.keyToId.has(key)) return this.keyToId.get(key);
       if (this.tabs.size >= this.maxTabs) throw new Error('max_tabs_reached');
@@ -100,6 +100,7 @@ export class TabManager {
         presenter: session.presenter,
         controller,
         protectedTab: !!protectedTab,
+        projectUrl: projectUrl || null,
         createdAt: Date.now(),
         lastUsedAt: Date.now()
       };
@@ -111,19 +112,19 @@ export class TabManager {
     });
   }
 
-  async ensureTab({ key, name, url, vendorId, vendorName, show } = {}) {
+  async ensureTab({ key, name, url, vendorId, vendorName, show, projectUrl } = {}) {
     if (!key) throw new Error('missing_key');
     const existing = this.keyToId.get(key);
     if (existing) {
       const tab = this.tabs.get(existing);
       if (!tab) {
         this.keyToId.delete(key);
-        return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName });
+        return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl });
       }
       if (!tabMatchesVendor(tab, { vendorId, url })) throw new Error('key_vendor_mismatch');
       return existing;
     }
-    return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName });
+    return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl });
   }
 
   listTabs() {
@@ -136,6 +137,7 @@ export class TabManager {
         vendorId: t.vendorId || null,
         vendorName: t.vendorName || null,
         url: t.url || null,
+        projectUrl: t.projectUrl || null,
         protectedTab: !!t.protectedTab,
         createdAt: t.createdAt,
         lastUsedAt: t.lastUsedAt
@@ -151,6 +153,15 @@ export class TabManager {
     if (tab.session?.isClosed?.()) throw new Error('tab_closed');
     tab.lastUsedAt = Date.now();
     return tab.controller;
+  }
+
+  updateTabMeta(id, patch) {
+    const tab = this.tabs.get(id);
+    if (!tab) throw new Error('tab_not_found');
+    if (patch && typeof patch === 'object') {
+      if ('projectUrl' in patch) tab.projectUrl = patch.projectUrl || null;
+    }
+    this.onChanged?.();
   }
 
   getWindowById(id) {

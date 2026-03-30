@@ -43,6 +43,7 @@ export function defaultSettings() {
     // UX defaults.
     showTabsByDefault: false,
     allowAuthPopups: true,
+    defaultProjectUrl: null,
 
     // Acknowledgment for changing settings (UX only; not required for operation).
     acknowledgedAt: null
@@ -80,6 +81,7 @@ export function normalizeSettings(input) {
     minGlobalGapMs: clampMs(s.minGlobalGapMs, { min: 0, max: 10_000, fallback: d.minGlobalGapMs }),
     showTabsByDefault: !!s.showTabsByDefault,
     allowAuthPopups: typeof s.allowAuthPopups === 'boolean' ? s.allowAuthPopups : d.allowAuthPopups,
+    defaultProjectUrl: typeof s.defaultProjectUrl === 'string' && s.defaultProjectUrl.trim() ? s.defaultProjectUrl.trim() : null,
     acknowledgedAt: typeof s.acknowledgedAt === 'string' && s.acknowledgedAt.trim() ? s.acknowledgedAt.trim() : null
   };
   return out;
@@ -139,4 +141,29 @@ export async function writeSettings(settings, stateDir = defaultStateDir()) {
   const normalized = normalizeSettings(settings);
   await atomicWriteFile(settingsPath(stateDir), `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
   return normalized;
+}
+
+// --- Project URL persistence (key → projectUrl map) ---
+
+export function projectsPath(stateDir = defaultStateDir()) {
+  return path.join(stateDir, 'projects.json');
+}
+
+export async function readProjects(stateDir = defaultStateDir()) {
+  try {
+    const raw = JSON.parse(await fs.readFile(projectsPath(stateDir), 'utf8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export async function writeProjects(projects, stateDir = defaultStateDir()) {
+  await ensureStateDir(stateDir);
+  await atomicWriteFile(projectsPath(stateDir), `${JSON.stringify(projects, null, 2)}\n`);
 }

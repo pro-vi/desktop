@@ -21,7 +21,7 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_save_artifacts'"), 'expected agentify_save_artifacts tool');
   assert.ok(src.includes("'agentify_list_artifacts'"), 'expected agentify_list_artifacts tool');
   assert.ok(src.includes('model,'), 'expected model hint to be forwarded to HTTP query');
-  assert.ok(src.includes("body: { model, key, name, show: typeof show === 'boolean' ? show : undefined }"), 'expected model hint on tab_create');
+  assert.ok(src.includes("body: { model, key, name, projectUrl, show: typeof show === 'boolean' ? show : undefined }"), 'expected model hint on tab_create');
   assert.ok(src.includes("body: { model, tabId, key, maxChars: maxChars || 200_000 }"), 'expected model hint on read_page');
   assert.ok(src.includes("body: { model, tabId, key, timeoutMs: timeoutMs || 10 * 60_000 }"), 'expected model hint on ensure_ready');
   assert.ok(src.includes("body: { model, tabId, key, mode: mode || 'all', maxImages: maxImages || 6, maxFiles: maxFiles || 6 }"), 'expected model hint on save_artifacts');

@@ -3,7 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { URL } from 'node:url';
 import crypto from 'node:crypto';
-import { writeToken } from './state.mjs';
+import { writeToken, readProjects, writeProjects } from './state.mjs';
 import { ensureArtifactsDir, listArtifacts, registerArtifact, artifactsRoot } from './artifact-store.mjs';
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
@@ -443,6 +443,19 @@ export function startHttpApi({
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
+  // Persistent key → projectUrl map.
+  let projectUrlsByKey = {};
+  const projectsReady = readProjects(stateDir).then((p) => { projectUrlsByKey = p; }).catch(() => {});
+  function persistProjectUrl(key, projectUrl) {
+    if (!key || !projectUrl) return;
+    if (projectUrlsByKey[key] === projectUrl) return;
+    projectUrlsByKey[key] = projectUrl;
+    writeProjects(projectUrlsByKey, stateDir).catch(() => {});
+  }
+  function getPersistedProjectUrl(key) {
+    return (key && projectUrlsByKey[key]) || null;
+  }
+
   // Governor state (per-desktop instance).
   const inflight = { queries: 0 };
   const activeQueries = new Map(); // tabId -> runtime status
@@ -758,14 +771,21 @@ export function startHttpApi({
         return sendJson(res, 200, { ok: true, deleted: !!deleted });
       }
       if (url.pathname === '/tabs/create' && req.method === 'POST') {
+        await projectsReady;
         const body = await parseBody(req);
         const key = (body.key ? String(body.key).trim() : '') || null;
         const name = (body.name ? String(body.name).trim() : '') || null;
         const show = typeof body.show === 'boolean' ? body.show : envShowTabsDefault() || governor.showTabsByDefault;
         const vendor = resolveVendor({ body, vendors }) || defaultVendor(vendors);
+        const settings = await getSettings?.() || {};
+        const projectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || getPersistedProjectUrl(key) || settings.defaultProjectUrl || null;
         const tabId = key
-          ? await tabs.ensureTab({ key, name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name })
-          : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name });
+          ? await tabs.ensureTab({ key, name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl })
+          : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl });
+        if (projectUrl) {
+          tabs.updateTabMeta(tabId, { projectUrl });
+          if (key) persistProjectUrl(key, projectUrl);
+        }
         if (show) await onShow?.({ tabId }).catch(() => {});
         return sendJson(res, 200, { ok: true, tabId });
       }
@@ -817,6 +837,7 @@ export function startHttpApi({
       }
 
       if (url.pathname === '/query' && req.method === 'POST') {
+        await projectsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
         const timeoutMs = positiveIntOr(body.timeoutMs, 10 * 60_000, 30 * 60_000);
         const prompt = String(body.prompt || '');
@@ -829,6 +850,10 @@ export function startHttpApi({
         const contextPaths = Array.isArray(body.contextPaths) ? body.contextPaths.map(String) : [];
         const promptPrefix = String(body.promptPrefix || '');
         const bundleName = String(body.bundleName || '').trim() || null;
+        const bodyProjectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || null;
+        const tabKey = (body.key ? String(body.key).trim() : '') || null;
+        const settings = await getSettings?.() || {};
+        const projectUrl = bodyProjectUrl || getPersistedProjectUrl(tabKey) || settings.defaultProjectUrl || null;
         const op = {
           id: crypto.randomUUID(),
           kind: 'query',
@@ -848,6 +873,8 @@ export function startHttpApi({
         try {
           tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
+          if (projectUrl) tabs.updateTabMeta(tabId, { projectUrl });
+          if (bodyProjectUrl && tabKey) persistProjectUrl(tabKey, bodyProjectUrl);
           op.tabId = tabId;
           setActiveQuery(tabId, op);
           const tabMeta = getTabMeta(tabs, tabId);
@@ -886,14 +913,27 @@ export function startHttpApi({
             checkAndConsumeQueryBudget({ tabId, governor });
             inflight.queries += 1;
             const controller = tabs.getControllerById(tabId);
-            const result = await runExclusive(controller, async () =>
-              controller.query({
+            const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
+            const result = await runExclusive(controller, async () => {
+              if (effectiveProjectUrl) {
+                // Only navigate if not already within the project. If the tab is
+                // in a conversation inside the project (e.g. /g/g-p-{id}/c/{conv}),
+                // skip navigation to preserve the existing thread context.
+                const currentUrl = await controller.getUrl();
+                const projectBase = effectiveProjectUrl.replace(/\/project\/?$/, '');
+                if (!currentUrl.startsWith(projectBase)) {
+                  patchActiveQuery(tabId, { phase: 'navigating_to_project' });
+                  await controller.navigate(effectiveProjectUrl);
+                  await controller.ensureReady({ timeoutMs });
+                }
+              }
+              return controller.query({
                 prompt: packed.prompt,
                 attachments: packed.attachments,
                 timeoutMs,
                 onProgress: (patch) => patchActiveQuery(tabId, patch)
-              })
-            );
+              });
+            });
             setLastOutcome(tabId, {
               status: 'success',
               label: 'Response received',
