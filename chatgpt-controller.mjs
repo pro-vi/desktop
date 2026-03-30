@@ -735,7 +735,14 @@ export class ChatGPTController {
         const hasContinue = Array.from(document.querySelectorAll('button, a')).some(b => /continue generating/i.test((b.textContent||'').trim()));
         const hasRegenerate = Array.from(document.querySelectorAll('button, a')).some(b => /regenerate/i.test((b.textContent||'').trim()));
         const hasError = /something went wrong|try again|error/i.test(txt) && txt.length < 500;
-        const isThinking = /\bpro thinking\b|\bthinking\.\.\.\b|\bextended pro\b|\breasoning\b/i.test(txt);
+        // Detect thinking state from UI chrome (banners, status elements), NOT from the
+        // assistant response text — responses that mention "reasoning" or "thinking" must
+        // not trigger this. Scan elements outside the assistant message nodes.
+        const thinkingBanner = Array.from(document.querySelectorAll('[class*="think"], [data-testid*="think"], [aria-label*="think"], .sr-only, [role="status"]')).some(el => {
+          if (lastNode && lastNode.contains(el)) return false;
+          return /\bthinking\b|\bpro thinking\b|\bextended pro\b/i.test((el.textContent || '').trim());
+        });
+        const isThinking = thinkingBanner;
         return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking };
       })()`);
 
@@ -807,7 +814,7 @@ export class ChatGPTController {
       await this.#attachFiles(attachments);
       await this.#typePrompt(prompt);
       await this.#clickSend();
-      return await this.#waitForAssistantStable({ timeoutMs: Math.max(timeoutMs, 25 * 60_000) });
+      return await this.#waitForAssistantStable({ timeoutMs });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
