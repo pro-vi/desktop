@@ -51,7 +51,9 @@ File: `chatgpt-controller.mjs`, method `#waitForAssistantStable`:
 
 - [x] Verify that normal (non-Pro) ChatGPT queries still complete correctly — **PASS** (got "4" for "2+2")
 - [x] Regression found & fixed: initial patch treated missing send button as generating, blocking all normal queries
-- [ ] Test with a real GPT Pro extended thinking query
+- [x] Test with a real GPT Pro extended thinking query — **PASS** (waited ~7min, "Thought for 6m 52s", returned full response)
+- [x] `sendVisible: false` after Pro completion is expected — `sendReady` fallback handles it correctly
 - [ ] Verify other vendors (Claude.ai, Gemini, etc.) aren't affected
 - [ ] If working, open PR upstream at agentify-sh/desktop
 - [ ] Consider adding `isThinking` to the response metadata so callers know thinking is in progress
+- [ ] MCP transport timeout: Claude Code's MCP call times out before long queries finish — separate issue from the fix itself
