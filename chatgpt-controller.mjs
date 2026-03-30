@@ -799,8 +799,9 @@ export class ChatGPTController {
       await sleep(pollMs);
     }
 
+    const conversationUrl = await this.getUrl().catch(() => null);
     const err = new Error('timeout_waiting_for_response');
-    err.data = { last };
+    err.data = { last, conversationUrl };
     throw err;
   }
 

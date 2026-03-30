@@ -583,7 +583,8 @@ export function startHttpApi({
         ...base,
         status: 'error',
         label: 'Response timed out',
-        detail: 'The provider did not finish responding in time.'
+        detail: 'The provider did not finish responding in time.',
+        conversationUrl: detail?.conversationUrl || null
       };
     }
     if (message === 'rate_limited') {
