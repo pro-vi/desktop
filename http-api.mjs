@@ -443,17 +443,19 @@ export function startHttpApi({
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
-  // Persistent key → projectUrl map.
-  let projectUrlsByKey = {};
-  const projectsReady = readProjects(stateDir).then((p) => { projectUrlsByKey = p; }).catch(() => {});
-  function persistProjectUrl(key, projectUrl) {
-    if (!key || !projectUrl) return;
-    if (projectUrlsByKey[key] === projectUrl) return;
-    projectUrlsByKey[key] = projectUrl;
-    writeProjects(projectUrlsByKey, stateDir).catch(() => {});
+  // Persistent key → { projectUrl, conversationUrl } map.
+  let keyMetaByKey = {};
+  const projectsReady = readProjects(stateDir).then((p) => { keyMetaByKey = p; }).catch(() => {});
+  function persistKeyMeta(key, patch) {
+    if (!key || !patch) return;
+    const existing = keyMetaByKey[key] || { projectUrl: null, conversationUrl: null };
+    const updated = { ...existing, ...patch };
+    if (existing.projectUrl === updated.projectUrl && existing.conversationUrl === updated.conversationUrl) return;
+    keyMetaByKey[key] = updated;
+    writeProjects(keyMetaByKey, stateDir).catch(() => {});
   }
-  function getPersistedProjectUrl(key) {
-    return (key && projectUrlsByKey[key]) || null;
+  function getPersistedKeyMeta(key) {
+    return (key && keyMetaByKey[key]) || null;
   }
 
   // Governor state (per-desktop instance).
@@ -779,13 +781,14 @@ export function startHttpApi({
         const show = typeof body.show === 'boolean' ? body.show : envShowTabsDefault() || governor.showTabsByDefault;
         const vendor = resolveVendor({ body, vendors }) || defaultVendor(vendors);
         const settings = await getSettings?.() || {};
-        const projectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || getPersistedProjectUrl(key) || settings.defaultProjectUrl || null;
+        const savedMeta = getPersistedKeyMeta(key);
+        const projectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
         const tabId = key
           ? await tabs.ensureTab({ key, name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl })
           : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl });
         if (projectUrl) {
-          tabs.updateTabMeta(tabId, { projectUrl });
-          if (key) persistProjectUrl(key, projectUrl);
+          tabs.updateTabMeta?.(tabId, { projectUrl });
+          if (key) persistKeyMeta(key, { projectUrl });
         }
         if (show) await onShow?.({ tabId }).catch(() => {});
         return sendJson(res, 200, { ok: true, tabId });
@@ -855,7 +858,9 @@ export function startHttpApi({
         const fireAndForget = !!body.fireAndForget;
         const tabKey = (body.key ? String(body.key).trim() : '') || null;
         const settings = await getSettings?.() || {};
-        const projectUrl = bodyProjectUrl || getPersistedProjectUrl(tabKey) || settings.defaultProjectUrl || null;
+        const savedMeta = getPersistedKeyMeta(tabKey);
+        const projectUrl = bodyProjectUrl || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
+        const savedConversationUrl = savedMeta?.conversationUrl || null;
         const op = {
           id: crypto.randomUUID(),
           kind: 'query',
@@ -875,8 +880,8 @@ export function startHttpApi({
         try {
           tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
-          if (projectUrl) tabs.updateTabMeta(tabId, { projectUrl });
-          if (bodyProjectUrl && tabKey) persistProjectUrl(tabKey, bodyProjectUrl);
+          if (projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl });
+          if (bodyProjectUrl && tabKey) persistKeyMeta(tabKey, { projectUrl: bodyProjectUrl });
           op.tabId = tabId;
           setActiveQuery(tabId, op);
           const tabMeta = getTabMeta(tabs, tabId);
@@ -916,15 +921,23 @@ export function startHttpApi({
             inflight.queries += 1;
             const controller = tabs.getControllerById(tabId);
             const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
+            const effectiveKey = tabKey || getTabMeta(tabs, tabId)?.key || null;
             const runQuery = async () => {
               const result = await runExclusive(controller, async () => {
-                if (effectiveProjectUrl) {
-                  const currentUrl = await controller.getUrl();
-                  const projectBase = effectiveProjectUrl.replace(/\/project\/?$/, '');
-                  if (!currentUrl.startsWith(projectBase)) {
-                    patchActiveQuery(tabId, { phase: 'navigating_to_project' });
-                    await controller.navigate(effectiveProjectUrl);
+                if ((savedConversationUrl || effectiveProjectUrl) && typeof controller.getUrl === 'function') {
+                  const currentUrl = await controller.getUrl().catch(() => '');
+                  // Resume saved conversation if available and tab is on base URL (post-restart)
+                  if (savedConversationUrl && (currentUrl === 'https://chatgpt.com/' || currentUrl.endsWith('/project') || currentUrl === '' || currentUrl === 'about:blank')) {
+                    patchActiveQuery(tabId, { phase: 'resuming_conversation' });
+                    await controller.navigate(savedConversationUrl);
                     await controller.ensureReady({ timeoutMs });
+                  } else if (effectiveProjectUrl) {
+                    const projectBase = effectiveProjectUrl.replace(/\/project\/?$/, '');
+                    if (!currentUrl.startsWith(projectBase)) {
+                      patchActiveQuery(tabId, { phase: 'navigating_to_project' });
+                      await controller.navigate(effectiveProjectUrl);
+                      await controller.ensureReady({ timeoutMs });
+                    }
                   }
                 }
                 return controller.query({
@@ -934,10 +947,14 @@ export function startHttpApi({
                   onProgress: (patch) => patchActiveQuery(tabId, patch)
                 });
               });
+              // Capture conversation URL after successful query
+              const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
+              if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { conversationUrl });
               setLastOutcome(tabId, {
                 status: 'success',
                 label: 'Response received',
                 detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
+                conversationUrl,
                 source,
                 kind: 'query',
                 finishedAt: Date.now(),
@@ -1078,11 +1095,25 @@ export function startHttpApi({
       }
 
       if (url.pathname === '/read-page' && req.method === 'POST') {
+        await projectsReady;
         const body = await parseBody(req);
         const maxChars = positiveIntOr(body.maxChars, 200_000, 1_000_000);
         const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
         const controller = tabs.getControllerById(tabId);
-        const text = await runExclusive(controller, async () => controller.readPageText({ maxChars }));
+        const tabKey = (body.key ? String(body.key).trim() : '') || getTabMeta(tabs, tabId)?.key || null;
+        const text = await runExclusive(controller, async () => {
+          // If tab is on base URL after restart, navigate to saved conversation
+          if (tabKey && typeof controller.getUrl === 'function') {
+            const currentUrl = await controller.getUrl().catch(() => '');
+            const meta = getPersistedKeyMeta(tabKey);
+            if (meta?.conversationUrl && meta.conversationUrl !== currentUrl &&
+                (currentUrl === 'https://chatgpt.com/' || currentUrl === 'about:blank' || !currentUrl)) {
+              await controller.navigate(meta.conversationUrl);
+              await controller.ensureReady({ timeoutMs: 30_000 });
+            }
+          }
+          return controller.readPageText({ maxChars });
+        });
         return sendJson(res, 200, { ok: true, tabId, text });
       }
 

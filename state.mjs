@@ -143,7 +143,7 @@ export async function writeSettings(settings, stateDir = defaultStateDir()) {
   return normalized;
 }
 
-// --- Project URL persistence (key → projectUrl map) ---
+// --- Key metadata persistence (key → { projectUrl, conversationUrl }) ---
 
 export function projectsPath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'projects.json');
@@ -155,7 +155,15 @@ export async function readProjects(stateDir = defaultStateDir()) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
     const out = {};
     for (const [k, v] of Object.entries(raw)) {
-      if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+      // Backwards compat: old format stored bare strings (projectUrl only)
+      if (typeof v === 'string' && v.trim()) {
+        out[k] = { projectUrl: v.trim(), conversationUrl: null };
+      } else if (v && typeof v === 'object' && !Array.isArray(v)) {
+        out[k] = {
+          projectUrl: (typeof v.projectUrl === 'string' && v.projectUrl.trim()) ? v.projectUrl.trim() : null,
+          conversationUrl: (typeof v.conversationUrl === 'string' && v.conversationUrl.trim()) ? v.conversationUrl.trim() : null
+        };
+      }
     }
     return out;
   } catch {
