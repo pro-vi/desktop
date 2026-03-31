@@ -309,7 +309,11 @@ export class ChatGPTController {
   async #typeHuman(text) {
     for (const ch of String(text)) {
       this.#throwIfStopRequested();
-      await this.page.insertText(ch);
+      if (ch === '\n') {
+        await this.#sendKey('Return', { modifiers: ['shift'] });
+      } else {
+        await this.page.insertText(ch);
+      }
       await sleep(jitter(12, 45));
     }
   }
