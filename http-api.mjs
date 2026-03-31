@@ -852,6 +852,7 @@ export function startHttpApi({
         const promptPrefix = String(body.promptPrefix || '');
         const bundleName = String(body.bundleName || '').trim() || null;
         const bodyProjectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || null;
+        const fireAndForget = !!body.fireAndForget;
         const tabKey = (body.key ? String(body.key).trim() : '') || null;
         const settings = await getSettings?.() || {};
         const projectUrl = bodyProjectUrl || getPersistedProjectUrl(tabKey) || settings.defaultProjectUrl || null;
@@ -915,35 +916,56 @@ export function startHttpApi({
             inflight.queries += 1;
             const controller = tabs.getControllerById(tabId);
             const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
-            const result = await runExclusive(controller, async () => {
-              if (effectiveProjectUrl) {
-                // Only navigate if not already within the project. If the tab is
-                // in a conversation inside the project (e.g. /g/g-p-{id}/c/{conv}),
-                // skip navigation to preserve the existing thread context.
-                const currentUrl = await controller.getUrl();
-                const projectBase = effectiveProjectUrl.replace(/\/project\/?$/, '');
-                if (!currentUrl.startsWith(projectBase)) {
-                  patchActiveQuery(tabId, { phase: 'navigating_to_project' });
-                  await controller.navigate(effectiveProjectUrl);
-                  await controller.ensureReady({ timeoutMs });
+            const runQuery = async () => {
+              const result = await runExclusive(controller, async () => {
+                if (effectiveProjectUrl) {
+                  const currentUrl = await controller.getUrl();
+                  const projectBase = effectiveProjectUrl.replace(/\/project\/?$/, '');
+                  if (!currentUrl.startsWith(projectBase)) {
+                    patchActiveQuery(tabId, { phase: 'navigating_to_project' });
+                    await controller.navigate(effectiveProjectUrl);
+                    await controller.ensureReady({ timeoutMs });
+                  }
                 }
-              }
-              return controller.query({
-                prompt: packed.prompt,
-                attachments: packed.attachments,
-                timeoutMs,
-                onProgress: (patch) => patchActiveQuery(tabId, patch)
+                return controller.query({
+                  prompt: packed.prompt,
+                  attachments: packed.attachments,
+                  timeoutMs,
+                  onProgress: (patch) => patchActiveQuery(tabId, patch)
+                });
               });
-            });
-            setLastOutcome(tabId, {
-              status: 'success',
-              label: 'Response received',
-              detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
-              source,
-              kind: 'query',
-              finishedAt: Date.now(),
-              durationMs: Math.max(0, Date.now() - op.startedAt)
-            });
+              setLastOutcome(tabId, {
+                status: 'success',
+                label: 'Response received',
+                detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
+                source,
+                kind: 'query',
+                finishedAt: Date.now(),
+                durationMs: Math.max(0, Date.now() - op.startedAt)
+              });
+              return result;
+            };
+
+            if (fireAndForget) {
+              const tabMeta = getTabMeta(tabs, tabId);
+              runQuery().catch((error) => {
+                setLastOutcome(tabId, outcomeFromError(error, op));
+              }).finally(() => {
+                clearActiveQuery(tabId, op.id);
+                inflight.queries = Math.max(0, inflight.queries - 1);
+                clearScope(scope, op.id);
+              });
+              return sendJson(res, 202, {
+                ok: true,
+                async: true,
+                tabId,
+                key: tabMeta?.key || tabKey || null,
+                queryId: op.id,
+                packedContextSummary: packed.context?.summary || null
+              });
+            }
+
+            const result = await runQuery();
             return sendJson(res, 200, {
               ok: true,
               tabId,
@@ -957,11 +979,13 @@ export function startHttpApi({
             setLastOutcome(tabId, outcomeFromError(error, op));
             throw error;
           } finally {
-            clearActiveQuery(tabId, op.id);
-            inflight.queries = Math.max(0, inflight.queries - 1);
+            if (!fireAndForget) {
+              clearActiveQuery(tabId, op.id);
+              inflight.queries = Math.max(0, inflight.queries - 1);
+            }
           }
         } finally {
-          clearScope(scope, op.id);
+          if (!fireAndForget) clearScope(scope, op.id);
         }
       }
 

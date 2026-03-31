@@ -49,7 +49,8 @@ registerTool(
       maxContextChunksPerFile: z.number().optional().describe('Maximum number of chunks to inline for any single file.'),
       maxContextInlineFiles: z.number().optional().describe('Maximum number of text files to inline into the prompt.'),
       maxContextAttachments: z.number().optional().describe('Maximum binary/image files auto-attached from contextPaths.'),
-      timeoutMs: z.number().optional().describe('Maximum time to wait for completion.')
+      timeoutMs: z.number().optional().describe('Maximum time to wait for completion.'),
+      fireAndForget: z.boolean().optional().describe('Return immediately after sending the prompt. Poll agentify_status for completion, then agentify_read_page for the response.')
     }
   },
   async ({
@@ -69,10 +70,12 @@ registerTool(
     maxContextChunksPerFile,
     maxContextInlineFiles,
     maxContextAttachments,
-    timeoutMs
+    timeoutMs,
+    fireAndForget
   }) => {
     const resolvedAttachments = resolveLocalPaths(attachments || []);
     const resolvedContextPaths = resolveLocalPaths(contextPaths || []);
+    const effectiveKey = key || (fireAndForget ? `async-${Date.now().toString(36)}` : undefined);
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
@@ -82,7 +85,7 @@ registerTool(
         source: 'mcp',
         model,
         tabId,
-        key,
+        key: effectiveKey,
         projectUrl,
         bundleName,
         prompt,
@@ -96,9 +99,16 @@ registerTool(
         maxContextChunksPerFile: maxContextChunksPerFile || undefined,
         maxContextInlineFiles: maxContextInlineFiles || undefined,
         maxContextAttachments: maxContextAttachments || undefined,
-        timeoutMs: timeoutMs || 10 * 60_000
+        timeoutMs: timeoutMs || 10 * 60_000,
+        fireAndForget: fireAndForget || undefined
       }
     });
+    if (data.async) {
+      return {
+        content: [{ type: 'text', text: `Query submitted (async). tabId=${data.tabId}, key=${data.key || ''}, queryId=${data.queryId || ''}. Poll agentify_status to check completion, then agentify_read_page to retrieve the response.` }],
+        structuredContent: data
+      };
+    }
     const structuredContent = {
       text: data.result?.text || '',
       codeBlocks: data.result?.codeBlocks || [],
