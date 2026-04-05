@@ -718,19 +718,61 @@ export class ChatGPTController {
     const absFiles = files.map((p) => path.resolve(p));
     for (const f of absFiles) await fs.access(f);
 
-    // Best-effort: click the paperclip/attach UI, then set <input type=file> via DevTools protocol.
+    // Read files into base64 for Blob-based injection.
+    const fileData = await Promise.all(absFiles.map(async (f) => {
+      const buf = await fs.readFile(f);
+      const name = path.basename(f);
+      const ext = path.extname(f).toLowerCase();
+      const mimeMap = { '.md': 'text/markdown', '.txt': 'text/plain', '.json': 'application/json', '.csv': 'text/csv', '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
+      const mime = mimeMap[ext] || 'application/octet-stream';
+      return { name, mime, data: buf.toString('base64') };
+    }));
+
+    // Click the paperclip/attach button to ensure file input exists.
     await this.#eval(`(() => {
-      const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"]'));
+      const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
       const attach = candidates.find(b => /attach|upload|paperclip/i.test((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||'')));
       if (attach) attach.click();
       return true;
     })()`);
+    await sleep(300);
 
-    await this.page.setFileInputFiles(absFiles);
+    // Inject files as Blobs via DataTransfer — this creates real File objects that
+    // React's synthetic event system accepts, unlike CDP setFileInputFiles which
+    // creates filesystem-backed Files that ChatGPT's handlers reject.
+    const injected = await this.#eval(`(async () => {
+      const fileData = ${JSON.stringify(fileData)};
+      const dt = new DataTransfer();
+      for (const { name, mime, data } of fileData) {
+        const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+        dt.items.add(new File([bytes], name, { type: mime, lastModified: Date.now() }));
+      }
+      // Find the most recently added file input (closest to the composer)
+      const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+      const input = inputs[inputs.length - 1];
+      if (!input) return { ok: false, error: 'no_file_input' };
+      // Use Object.defineProperty to set files (direct assignment blocked on some browsers)
+      try {
+        const nativeFilesSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files')?.set;
+        if (nativeFilesSetter) {
+          nativeFilesSetter.call(input, dt.files);
+        } else {
+          input.files = dt.files;
+        }
+      } catch {
+        input.files = dt.files;
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      return { ok: true, count: dt.files.length };
+    })()`);
 
-    // Wait for file upload to complete. ChatGPT disables the send button during
-    // uploads. Poll until the upload indicator disappears or send becomes enabled.
-    // Also detect and dismiss "already uploaded" dialogs and remove stuck attachments.
+    // Fallback to CDP setFileInputFiles if Blob injection didn't find an input
+    if (!injected?.ok) {
+      await this.page.setFileInputFiles(absFiles);
+    }
+
+    // Wait for file upload to complete or detect/dismiss error dialogs.
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
@@ -756,7 +798,6 @@ export class ChatGPTController {
         return { done: send ? !send.disabled : false };
       })()`);
       if (status?.dismissed) {
-        // Dialog was dismissed — remove the stuck attachment chip and continue without it
         await this.#eval(`(() => {
           const closeBtn = document.querySelector('[aria-label*="Remove" i], [aria-label*="Delete" i], [data-testid*="attachment"] [role="button"], [data-testid*="file"] button');
           if (closeBtn) closeBtn.click();
