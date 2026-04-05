@@ -730,24 +730,41 @@ export class ChatGPTController {
 
     // Wait for file upload to complete. ChatGPT disables the send button during
     // uploads. Poll until the upload indicator disappears or send becomes enabled.
+    // Also detect and dismiss "already uploaded" dialogs and remove stuck attachments.
     const sendSel = JSON.stringify(this.selectors.sendButton);
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       this.#throwIfStopRequested();
       await sleep(500);
-      const uploadDone = await this.#eval(`(() => {
-        // Check for upload progress indicators
-        const uploading = document.querySelector('[data-testid*="upload" i], [aria-label*="uploading" i], [class*="upload-progress" i], [class*="uploading" i]');
-        if (uploading) return false;
+      const status = await this.#eval(`(() => {
+        // Dismiss "already uploaded" or other error dialogs
+        const dialogBtn = Array.from(document.querySelectorAll('button')).find(b => {
+          const txt = (b.textContent || '').trim().toLowerCase();
+          return txt === 'ok' || txt === 'dismiss' || txt === 'got it';
+        });
+        const hasDialog = !!document.querySelector('[role="dialog"], [role="alertdialog"], [data-testid*="modal"]');
+        if (hasDialog && dialogBtn) {
+          dialogBtn.click();
+          return { dismissed: true };
+        }
         // Check if send button is present and enabled
         const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
           const r = n.getBoundingClientRect();
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         });
-        return send ? !send.disabled : false;
+        return { done: send ? !send.disabled : false };
       })()`);
-      if (uploadDone) break;
+      if (status?.dismissed) {
+        // Dialog was dismissed — remove the stuck attachment chip and continue without it
+        await this.#eval(`(() => {
+          const closeBtn = document.querySelector('[aria-label*="Remove" i], [aria-label*="Delete" i], [data-testid*="attachment"] [role="button"], [data-testid*="file"] button');
+          if (closeBtn) closeBtn.click();
+        })()`);
+        await sleep(300);
+        break;
+      }
+      if (status?.done) break;
     }
   }
 
