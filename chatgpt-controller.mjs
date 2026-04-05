@@ -307,7 +307,26 @@ export class ChatGPTController {
   }
 
   async #typeHuman(text) {
-    for (const ch of String(text)) {
+    const str = String(text);
+    // For large prompts (>500 chars), bulk-insert lines to avoid spending
+    // minutes typing character-by-character. Split on newlines and use
+    // Shift+Enter between lines to prevent triggering send.
+    if (str.length > 500) {
+      const lines = str.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        this.#throwIfStopRequested();
+        if (lines[i].length > 0) {
+          await this.page.insertText(lines[i]);
+        }
+        if (i < lines.length - 1) {
+          await this.#sendKey('Return', { modifiers: ['shift'] });
+        }
+        // Brief pause every 50 lines to let the UI catch up
+        if (i > 0 && i % 50 === 0) await sleep(jitter(30, 80));
+      }
+      return;
+    }
+    for (const ch of str) {
       this.#throwIfStopRequested();
       if (ch === '\n') {
         await this.#sendKey('Return', { modifiers: ['shift'] });
@@ -710,7 +729,7 @@ export class ChatGPTController {
     await this.page.setFileInputFiles(absFiles);
   }
 
-  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400 } = {}) {
+  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, preSendCount = 0, preSendText = '' } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const stopSel = JSON.stringify(this.selectors.stopButton);
@@ -718,6 +737,7 @@ export class ChatGPTController {
     const start = Date.now();
     let last = '';
     let lastChange = Date.now();
+    let newResponseSeen = preSendCount === 0; // If no prior messages, any response is new
     let stopGoneAt = null;
     let continueClicks = 0;
 
@@ -756,6 +776,16 @@ export class ChatGPTController {
         lastChange = Date.now();
       }
 
+      // Detect whether we've seen a NEW response (not pre-existing page content).
+      // A new response is indicated by: more assistant nodes than before send,
+      // or different text than the pre-send last message, or a stop button appearing.
+      if (!newResponseSeen) {
+        if ((snap?.count || 0) > preSendCount || snap?.stop || snap?.isThinking || txt !== preSendText) {
+          newResponseSeen = true;
+          lastChange = Date.now(); // Reset stability timer for the new response
+        }
+      }
+
       // Treat as "generating" when: stop button visible and send not enabled,
       // thinking indicator detected, or stop button visible while send button missing.
       // A missing send button alone is NOT treated as generating — the selector may
@@ -783,9 +813,9 @@ export class ChatGPTController {
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
       const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !snap?.isThinking);
-      const done =
+      const done = newResponseSeen && (
         (!generating && stopGoneLongEnough && sendReady && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
-        (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
+        (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackWaited)));
       if (done) {
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
@@ -818,8 +848,16 @@ export class ChatGPTController {
       await this.ensureReady({ timeoutMs });
       await this.#attachFiles(attachments);
       await this.#typePrompt(prompt);
+      // Snapshot existing assistant messages before sending, so #waitForAssistantStable
+      // can distinguish pre-existing responses from the new one.
+      const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+      const preSend = await this.#eval(`(() => {
+        const nodes = Array.from(document.querySelectorAll(${assistantSel}));
+        const lastNode = nodes[nodes.length - 1];
+        return { count: nodes.length, lastText: (lastNode?.innerText || '').trim() };
+      })()`);
       await this.#clickSend();
-      return await this.#waitForAssistantStable({ timeoutMs });
+      return await this.#waitForAssistantStable({ timeoutMs, preSendCount: preSend?.count || 0, preSendText: preSend?.lastText || '' });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
