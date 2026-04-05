@@ -70,6 +70,8 @@ function mapErrorToHttp(error) {
   if (msg === 'watch_folder_cannot_be_filesystem_root') return { code: 400, body: { error: 'watch_folder_cannot_be_filesystem_root' } };
   if (msg === 'watch_folder_not_found') return { code: 404, body: { error: 'watch_folder_not_found' } };
   if (msg === 'prompt_too_large') return { code: 400, body: { error: 'prompt_too_large' } };
+  if (msg === 'missing_staged_prompt') return { code: 409, body: { error: 'missing_staged_prompt', data: error?.data || null } };
+  if (msg === 'send_not_triggered') return { code: 409, body: { error: 'send_not_triggered', data: error?.data || null } };
   if (msg === 'missing_tabId') return { code: 400, body: { error: 'missing_tabId' } };
   if (msg === 'missing_key') return { code: 400, body: { error: 'missing_key' } };
   if (msg === 'tab_busy') return { code: 409, body: { error: 'tab_busy', data: error?.data || null } };
@@ -587,6 +589,22 @@ export function startHttpApi({
         label: 'Response timed out',
         detail: 'The provider did not finish responding in time.',
         conversationUrl: detail?.conversationUrl || null
+      };
+    }
+    if (message === 'missing_staged_prompt') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Prompt not staged',
+        detail: 'The prompt never appeared in the active composer.'
+      };
+    }
+    if (message === 'send_not_triggered') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Prompt not sent',
+        detail: 'The provider UI never acknowledged the send action.'
       };
     }
     if (message === 'rate_limited') {

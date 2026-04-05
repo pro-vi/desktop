@@ -439,7 +439,7 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
-  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120 } = {}) {
+  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, initialPromptLen = 0 } = {}) {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea);
@@ -457,6 +457,32 @@ export class ChatGPTController {
         const send = Array.from(document.querySelectorAll(${sendSel})).find(visible);
         const sendDisabled = !!send && !!send.disabled;
 
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const score = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
         const promptCandidates = Array.from(document.querySelectorAll(${promptSel}));
         const fallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
         const uniq = [];
@@ -466,22 +492,27 @@ export class ChatGPTController {
           seen.add(n);
           uniq.push(n);
         }
-        let promptLen = -1;
+        let prompt = null;
+        let best = -Infinity;
         for (const n of uniq) {
-          if (!visible(n)) continue;
-          if (n.matches('textarea, input')) {
-            promptLen = String(n.value || '').trim().length;
-            break;
+          if (!editable(n)) continue;
+          const s = score(n);
+          if (s > best) {
+            best = s;
+            prompt = n;
           }
-          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox') {
-            promptLen = String(n.innerText || n.textContent || '').trim().length;
-            break;
-          }
+        }
+        let promptLen = -1;
+        if (prompt?.matches('textarea, input')) {
+          promptLen = String(prompt.value || '').trim().length;
+        } else if (prompt && (prompt.isContentEditable || prompt.getAttribute('contenteditable') === 'true' || prompt.getAttribute('role') === 'textbox')) {
+          promptLen = String(prompt.innerText || prompt.textContent || '').trim().length;
         }
         return { stopVisible, sendDisabled, promptLen };
       })()`);
 
-      if (snap?.stopVisible || snap?.sendDisabled || snap?.promptLen === 0) return true;
+      const promptChanged = Number.isFinite(initialPromptLen) && initialPromptLen > 0 && snap?.promptLen >= 0 && snap.promptLen < initialPromptLen;
+      if (snap?.stopVisible || snap?.sendDisabled || promptChanged) return true;
       await sleep(pollMs);
     }
     return false;
@@ -565,12 +596,18 @@ export class ChatGPTController {
         return best;
       };
       const prompt = pickPrompt();
+      const promptLen = prompt
+        ? prompt.matches('textarea, input')
+          ? String(prompt.value || '').trim().length
+          : String(prompt.innerText || prompt.textContent || '').trim().length
+        : 0;
       const composerRoot =
         prompt?.closest('form') ||
         prompt?.closest('[data-testid*=\"composer\" i], [data-testid*=\"prompt\" i], [data-testid*=\"chat-input\" i], [aria-label*=\"message\" i], [aria-label*=\"prompt\" i]') ||
         prompt?.closest('main') ||
         null;
       const promptRect = prompt ? prompt.getBoundingClientRect() : null;
+      if (!prompt || promptLen <= 0) return { ok:false, error:'missing_staged_prompt', host };
       const score = (n) => {
         const r = n.getBoundingClientRect();
         const label = labelOf(n);
@@ -616,11 +653,17 @@ export class ChatGPTController {
         ok:true,
         rect: { x: r.x, y: r.y, w: r.width, h: r.height },
         requestSubmit: !!prompt?.closest('form'),
-        host
+        host,
+        promptLen
       };
     })()`);
     if (!res?.ok) {
       const err = new Error(res?.error || 'send_failed');
+      err.data = res;
+      throw err;
+    }
+    if (Number.isFinite(res?.promptLen) && res.promptLen <= 0) {
+      const err = new Error('missing_staged_prompt');
       err.data = res;
       throw err;
     }
@@ -631,7 +674,7 @@ export class ChatGPTController {
       const cx = Math.round(res.rect.x + res.rect.w / 2);
       const cy = Math.round(res.rect.y + res.rect.h / 2);
       await this.#clickAt(cx, cy);
-      sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120 });
+      sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
     }
 
     if (!sent && !res?.fallbackEnter) {
@@ -651,6 +694,25 @@ export class ChatGPTController {
           if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
           return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
         };
+        const score = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
         const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
         const fallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
         const uniq = [];
@@ -660,7 +722,17 @@ export class ChatGPTController {
           seen.add(n);
           uniq.push(n);
         }
-        const prompt = uniq.find(editable) || document.activeElement;
+        let prompt = null;
+        let best = -Infinity;
+        for (const n of uniq) {
+          if (!editable(n)) continue;
+          const s = score(n);
+          if (s > best) {
+            best = s;
+            prompt = n;
+          }
+        }
+        prompt = prompt || document.activeElement;
         const form = prompt?.closest?.('form') || null;
         if (form && typeof form.requestSubmit === 'function') {
           const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
@@ -676,7 +748,7 @@ export class ChatGPTController {
         }
         return false;
       })()`);
-      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120 });
+      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
     }
 
     if (!sent) {
@@ -700,7 +772,7 @@ export class ChatGPTController {
         this.#throwIfStopRequested();
         await sleep(jitter(25, 90));
         await this.#sendKey(key, { modifiers });
-        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120 });
+        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
         if (sent) break;
       }
     }
@@ -809,7 +881,7 @@ export class ChatGPTController {
     }
   }
 
-  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, preSendCount = 0, preSendText = '' } = {}) {
+  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, preSendCount = 0, preSendText = '', preSendPageText = '' } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const stopSel = JSON.stringify(this.selectors.stopButton);
@@ -817,9 +889,10 @@ export class ChatGPTController {
     const start = Date.now();
     let last = '';
     let lastChange = Date.now();
-    let newResponseSeen = preSendCount === 0; // If no prior messages, any response is new
+    let newResponseSeen = false;
     let stopGoneAt = null;
     let continueClicks = 0;
+    let generationObserved = false;
 
     while (Date.now() - start < timeoutMs) {
       this.#throwIfStopRequested();
@@ -847,10 +920,13 @@ export class ChatGPTController {
           return /\bthinking\b|\bpro thinking\b|\bextended pro\b/i.test((el.textContent || '').trim());
         });
         const isThinking = thinkingBanner;
-        return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking };
+        return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking, pageText: fallbackMainText };
       })()`);
 
       const txt = String(snap?.txt || '');
+      const pageText = String(snap?.pageText || '');
+      const assistantAdvanced = (snap?.count || 0) > preSendCount || ((snap?.count || 0) > 0 && txt !== preSendText);
+      const pageChanged = pageText !== preSendPageText;
       if (txt !== last) {
         last = txt;
         lastChange = Date.now();
@@ -859,8 +935,10 @@ export class ChatGPTController {
       // Detect whether we've seen a NEW response (not pre-existing page content).
       // A new response is indicated by: more assistant nodes than before send,
       // or different text than the pre-send last message, or a stop button appearing.
+      if (snap?.stop || snap?.isThinking) generationObserved = true;
+
       if (!newResponseSeen) {
-        if ((snap?.count || 0) > preSendCount || snap?.stop || snap?.isThinking || txt !== preSendText) {
+        if (assistantAdvanced || snap?.stop || snap?.isThinking || (preSendCount === 0 && pageChanged)) {
           newResponseSeen = true;
           lastChange = Date.now(); // Reset stability timer for the new response
         }
@@ -893,9 +971,10 @@ export class ChatGPTController {
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
       const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !snap?.isThinking);
+      const fallbackReady = fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
       const done = newResponseSeen && (
-        (!generating && stopGoneLongEnough && sendReady && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
-        (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackWaited)));
+        (!generating && stopGoneLongEnough && sendReady && stable && txt.length > 0 && (readyByNodes || fallbackReady)) ||
+        (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackReady)));
       if (done) {
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
@@ -934,10 +1013,16 @@ export class ChatGPTController {
       const preSend = await this.#eval(`(() => {
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
-        return { count: nodes.length, lastText: (lastNode?.innerText || '').trim() };
+        const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
+        return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
       })()`);
       await this.#clickSend();
-      return await this.#waitForAssistantStable({ timeoutMs, preSendCount: preSend?.count || 0, preSendText: preSend?.lastText || '' });
+      return await this.#waitForAssistantStable({
+        timeoutMs,
+        preSendCount: preSend?.count || 0,
+        preSendText: preSend?.lastText || '',
+        preSendPageText: preSend?.pageText || ''
+      });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
