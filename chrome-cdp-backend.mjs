@@ -414,6 +414,22 @@ class ChromeCdpPageAdapter {
       for (const nodeId of [...nodeIds].reverse()) {
         try {
           await this.client.send('DOM.setFileInputFiles', { nodeId, files }, this.sessionId);
+          // Dispatch change event to trigger React's synthetic event handlers.
+          try {
+            const { object } = await this.client.send('DOM.resolveNode', { nodeId }, this.sessionId);
+            if (object?.objectId) {
+              await this.client.send('Runtime.callFunctionOn', {
+                objectId: object.objectId,
+                functionDeclaration: `function() {
+                  const ev = new Event('change', { bubbles: true });
+                  this.dispatchEvent(ev);
+                  const inputEv = new Event('input', { bubbles: true });
+                  this.dispatchEvent(inputEv);
+                }`,
+                returnByValue: true
+              }, this.sessionId);
+            }
+          } catch {}
           lastErr = null;
           break;
         } catch (error) {

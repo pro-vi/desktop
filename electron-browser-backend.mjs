@@ -92,6 +92,23 @@ class ElectronPageAdapter {
         for (const nodeId of [...nodeIds].reverse()) {
           try {
             await wc.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files });
+            // Dispatch change event to trigger React's synthetic event handlers.
+            // CDP setFileInputFiles may not always fire the event that React listens for.
+            try {
+              const { object } = await wc.debugger.sendCommand('DOM.resolveNode', { nodeId });
+              if (object?.objectId) {
+                await wc.debugger.sendCommand('Runtime.callFunctionOn', {
+                  objectId: object.objectId,
+                  functionDeclaration: `function() {
+                    const ev = new Event('change', { bubbles: true });
+                    this.dispatchEvent(ev);
+                    const inputEv = new Event('input', { bubbles: true });
+                    this.dispatchEvent(inputEv);
+                  }`,
+                  returnByValue: true
+                });
+              }
+            } catch {}
             lastErr = null;
             break;
           } catch (error) {

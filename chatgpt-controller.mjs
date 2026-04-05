@@ -727,6 +727,28 @@ export class ChatGPTController {
     })()`);
 
     await this.page.setFileInputFiles(absFiles);
+
+    // Wait for file upload to complete. ChatGPT disables the send button during
+    // uploads. Poll until the upload indicator disappears or send becomes enabled.
+    const sendSel = JSON.stringify(this.selectors.sendButton);
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      this.#throwIfStopRequested();
+      await sleep(500);
+      const uploadDone = await this.#eval(`(() => {
+        // Check for upload progress indicators
+        const uploading = document.querySelector('[data-testid*="upload" i], [aria-label*="uploading" i], [class*="upload-progress" i], [class*="uploading" i]');
+        if (uploading) return false;
+        // Check if send button is present and enabled
+        const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
+          const r = n.getBoundingClientRect();
+          const style = window.getComputedStyle(n);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        });
+        return send ? !send.disabled : false;
+      })()`);
+      if (uploadDone) break;
+    }
   }
 
   async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, preSendCount = 0, preSendText = '' } = {}) {
