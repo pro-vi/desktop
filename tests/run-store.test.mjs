@@ -86,3 +86,34 @@ test('run-store: finalize is exact-once for terminal state', async () => {
   assert.equal(second.detail, 'user_stop');
   assert.equal(second.finishedAt, first.finishedAt);
 });
+
+test('run-store: queued writes keep finalized runs terminal on disk', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-queue-'));
+  let writeCount = 0;
+  const store = createRunStore(stateDir, {
+    writeFile: async (filePath, data) => {
+      writeCount += 1;
+      if (writeCount === 2) await new Promise((resolve) => setTimeout(resolve, 25));
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, data, 'utf8');
+    }
+  });
+  await store.load();
+  await store.create({
+    id: 'run-4',
+    kind: 'query',
+    source: 'http',
+    status: 'running',
+    startedAt: Date.now()
+  });
+
+  await Promise.all([
+    store.patch('run-4', { phase: 'waiting_for_response', status: 'running' }),
+    store.finalize('run-4', { status: 'success', detail: 'done' })
+  ]);
+
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', 'run-4.json'), 'utf8'));
+  assert.equal(persisted.status, 'success');
+  assert.equal(persisted.detail, 'done');
+  assert.equal(typeof persisted.finishedAt, 'number');
+});

@@ -784,6 +784,11 @@ export function startHttpApi({
       });
     }
     const rows = Array.isArray(tabs.listTabs?.()) ? tabs.listTabs() : [];
+    const advisoryTab = run?.tabId ? rows.find((item) => String(item?.id || '') === String(run.tabId || '')) || null : null;
+    if (advisoryTab) {
+      if (run?.projectUrl) tabs.updateTabMeta?.(advisoryTab.id, { projectUrl: run.projectUrl });
+      return advisoryTab.id;
+    }
     const vendorTab = vendor
       ? rows.find((item) => {
         if (!listedTabMatchesVendor(item, vendor)) return false;
@@ -794,11 +799,6 @@ export function startHttpApi({
     if (vendorTab) {
       if (run?.projectUrl) tabs.updateTabMeta?.(vendorTab.id, { projectUrl: run.projectUrl });
       return vendorTab.id;
-    }
-    const advisoryTab = run?.tabId ? rows.find((item) => String(item?.id || '') === String(run.tabId || '')) || null : null;
-    if (advisoryTab) {
-      if (run?.projectUrl) tabs.updateTabMeta?.(advisoryTab.id, { projectUrl: run.projectUrl });
-      return advisoryTab.id;
     }
     if (vendor) {
       return await tabs.createTab({

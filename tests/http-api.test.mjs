@@ -526,6 +526,114 @@ test('http-api: runs open saved conversations and retry exact materialized repla
   assert.equal(retriedRun.data.run.source, 'mcp');
 });
 
+test('http-api: unkeyed run reopen and retry prefer the recorded tab over another vendor tab', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-unkeyed-'));
+  const currentUrls = new Map([
+    ['t-old', 'about:blank'],
+    ['t-new', 'https://chatgpt.com/c/unrelated-thread']
+  ]);
+  const oldCalls = { navigate: [], ensureReady: [], query: [] };
+  const newCalls = { navigate: [], ensureReady: [], query: [] };
+  const controllers = {
+    't-old': {
+      runExclusive: async (fn) => await fn(),
+      navigate: async (to) => {
+        oldCalls.navigate.push(to);
+        currentUrls.set('t-old', to);
+      },
+      ensureReady: async ({ timeoutMs }) => {
+        oldCalls.ensureReady.push(timeoutMs);
+        return { ok: true };
+      },
+      query: async (args) => {
+        oldCalls.query.push(args);
+        currentUrls.set('t-old', `https://chatgpt.com/c/original-${oldCalls.query.length}`);
+        return { text: `old ${oldCalls.query.length}`, codeBlocks: [], meta: {} };
+      },
+      getUrl: async () => currentUrls.get('t-old')
+    },
+    't-new': {
+      runExclusive: async (fn) => await fn(),
+      navigate: async (to) => {
+        newCalls.navigate.push(to);
+        currentUrls.set('t-new', to);
+      },
+      ensureReady: async ({ timeoutMs }) => {
+        newCalls.ensureReady.push(timeoutMs);
+        return { ok: true };
+      },
+      query: async (args) => {
+        newCalls.query.push(args);
+        currentUrls.set('t-new', `https://chatgpt.com/c/new-${newCalls.query.length}`);
+        return { text: `new ${newCalls.query.length}`, codeBlocks: [], meta: {} };
+      },
+      getUrl: async () => currentUrls.get('t-new')
+    }
+  };
+  const listedTabs = [
+    { id: 't-new', key: null, vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null },
+    { id: 't-old', key: null, vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }
+  ];
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async () => 't-old',
+    createTab: async () => 't-created',
+    updateTabMeta: () => {},
+    closeTab: async () => true,
+    getControllerById: (tabId) => controllers[tabId]
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't-old',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrls.get(tabId) || '', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const queried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'unkeyed base prompt' }
+  });
+  assert.equal(queried.res.status, 200);
+  const runId = queried.data.runId;
+  assert.equal(oldCalls.query.length, 1);
+  assert.equal(newCalls.query.length, 0);
+
+  currentUrls.set('t-old', 'about:blank');
+  const opened = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/open',
+    body: { runId }
+  });
+  assert.equal(opened.res.status, 200);
+  assert.equal(opened.data.tabId, 't-old');
+  assert.equal(oldCalls.navigate.at(-1), 'https://chatgpt.com/c/original-1');
+  assert.equal(newCalls.navigate.length, 0);
+
+  currentUrls.set('t-old', 'about:blank');
+  const retried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId }
+  });
+  assert.equal(retried.res.status, 200);
+  assert.equal(retried.data.tabId, 't-old');
+  assert.equal(oldCalls.query.length, 2);
+  assert.equal(newCalls.query.length, 0);
+});
+
 test('http-api: same-tab query/send requests are rejected while a run is already active', async (t) => {
   let releaseQuery = null;
   const controller = {

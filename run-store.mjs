@@ -89,14 +89,26 @@ function toSummary(run) {
   return record;
 }
 
-export function createRunStore(stateDir) {
+export function createRunStore(stateDir, { writeFile = atomicWriteFile } = {}) {
   const records = new Map();
+  const writeQueues = new Map();
+
+  function enqueueRunOp(runId, fn) {
+    const id = assertRunId(runId);
+    const previous = writeQueues.get(id) || Promise.resolve();
+    const next = previous.catch(() => {}).then(fn);
+    const settled = next.finally(() => {
+      if (writeQueues.get(id) === settled) writeQueues.delete(id);
+    });
+    writeQueues.set(id, settled);
+    return settled;
+  }
 
   async function writeRecord(record) {
     const next = normalizeRun(record);
     if (!next.id) throw new Error('missing_run_id');
     records.set(next.id, next);
-    await atomicWriteFile(runPath(stateDir, next.id), `${JSON.stringify(next, null, 2)}\n`);
+    await writeFile(runPath(stateDir, next.id), `${JSON.stringify(next, null, 2)}\n`);
     return safeClone(next);
   }
 
@@ -123,40 +135,46 @@ export function createRunStore(stateDir) {
   async function create(record) {
     const next = normalizeRun(record);
     if (!next.id) throw new Error('missing_run_id');
-    if (records.has(next.id)) return safeClone(records.get(next.id));
-    return await writeRecord(next);
+    return await enqueueRunOp(next.id, async () => {
+      if (records.has(next.id)) return safeClone(records.get(next.id));
+      return await writeRecord(next);
+    });
   }
 
   async function patch(runId, patchData = {}) {
     const id = assertRunId(runId);
-    const current = records.get(id);
-    if (!current) throw new Error('run_not_found');
-    if (current.finishedAt && !('archivedAt' in patchData)) return safeClone(current);
-    const next = normalizeRun({
-      ...current,
-      ...(patchData || {}),
-      id,
-      startedAt: current.startedAt,
-      updatedAt: Date.now()
+    return await enqueueRunOp(id, async () => {
+      const current = records.get(id);
+      if (!current) throw new Error('run_not_found');
+      if (current.finishedAt && !('archivedAt' in patchData)) return safeClone(current);
+      const next = normalizeRun({
+        ...current,
+        ...(patchData || {}),
+        id,
+        startedAt: current.startedAt,
+        updatedAt: Date.now()
+      });
+      return await writeRecord(next);
     });
-    return await writeRecord(next);
   }
 
   async function finalize(runId, patchData = {}) {
     const id = assertRunId(runId);
-    const current = records.get(id);
-    if (!current) throw new Error('run_not_found');
-    if (current.finishedAt) return safeClone(current);
-    const finishedAt = Date.now();
-    const next = normalizeRun({
-      ...current,
-      ...(patchData || {}),
-      id,
-      finishedAt,
-      updatedAt: finishedAt,
-      durationMs: Math.max(0, finishedAt - current.startedAt)
+    return await enqueueRunOp(id, async () => {
+      const current = records.get(id);
+      if (!current) throw new Error('run_not_found');
+      if (current.finishedAt) return safeClone(current);
+      const finishedAt = Date.now();
+      const next = normalizeRun({
+        ...current,
+        ...(patchData || {}),
+        id,
+        finishedAt,
+        updatedAt: finishedAt,
+        durationMs: Math.max(0, finishedAt - current.startedAt)
+      });
+      return await writeRecord(next);
     });
-    return await writeRecord(next);
   }
 
   async function archive(runId) {
