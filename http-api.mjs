@@ -8,6 +8,7 @@ import { ensureArtifactsDir, listArtifacts, registerArtifact, artifactsRoot } fr
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
+import { createRunStore } from './run-store.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -462,6 +463,9 @@ export function startHttpApi({
     return (key && keyMetaByKey[key]) || null;
   }
 
+  const runStore = createRunStore(stateDir);
+  const runsReady = runStore.load();
+
   // Governor state (per-desktop instance).
   const inflight = { queries: 0 };
   const activeQueries = new Map(); // tabId -> runtime status
@@ -652,6 +656,77 @@ export function startHttpApi({
     };
   };
 
+  const logicalQueryRequest = ({
+    body,
+    prompt,
+    promptPrefix,
+    attachments,
+    contextPaths,
+    bundleName,
+    timeoutMs,
+    source,
+    fireAndForget,
+    projectUrl
+  }) => ({
+    prompt: String(prompt || ''),
+    promptPrefix: String(promptPrefix || ''),
+    attachments: Array.isArray(attachments) ? attachments.map(String) : [],
+    contextPaths: Array.isArray(contextPaths) ? contextPaths.map(String) : [],
+    bundleName: String(bundleName || '').trim() || null,
+    timeoutMs: Number(timeoutMs) || null,
+    source: String(source || 'http'),
+    fireAndForget: !!fireAndForget,
+    key: body?.key ? String(body.key).trim() : null,
+    tabId: body?.tabId ? String(body.tabId).trim() : null,
+    vendorId: body?.vendorId ? String(body.vendorId).trim() : (body?.model ? String(body.model).trim() : null),
+    model: body?.model ? String(body.model).trim() : null,
+    projectUrl: String(projectUrl || '').trim() || null
+  });
+
+  const materializedReplay = ({ packed, timeoutMs }) => ({
+    prompt: String(packed?.prompt || ''),
+    attachments: Array.isArray(packed?.attachments) ? packed.attachments.map(String) : [],
+    timeoutMs: Number(timeoutMs) || null
+  });
+
+  const durableRunPatchFromActive = async (item) => {
+    if (!item?.id || item?.kind !== 'query') return;
+    try {
+      await runStore.patch(item.id, {
+        status: item.blocked ? 'blocked' : 'running',
+        phase: item.phase || null,
+        tabId: item.tabId || null,
+        key: item.key || null,
+        vendorId: item.vendorId || null,
+        vendorName: item.vendorName || null,
+        projectUrl: item.projectUrl || null,
+        promptPreview: item.promptPreview || null,
+        blocked: !!item.blocked,
+        blockedKind: item.blockedKind || null,
+        blockedTitle: item.blockedTitle || null,
+        stopRequested: !!item.stopRequested,
+        stopRequestedAt: item.stopRequestedAt || null
+      });
+    } catch {}
+  };
+
+  const durableRunFinalizeFromOutcome = async (runId, outcome) => {
+    if (!runId || !outcome) return null;
+    try {
+      return await runStore.finalize(runId, {
+        status: outcome.status || 'error',
+        label: outcome.label || null,
+        detail: outcome.detail || null,
+        blocked: !!outcome.blocked,
+        blockedKind: outcome.blockedKind || null,
+        blockedTitle: outcome.blockedKind ? blockedLabelForKind(outcome.blockedKind) : null,
+        conversationUrl: outcome.conversationUrl || null
+      });
+    } catch {
+      return null;
+    }
+  };
+
   const runtimeSnapshot = () => ({
     inflightQueries: inflight.queries,
     activeQueries: Array.from(activeQueries.values())
@@ -670,7 +745,9 @@ export function startHttpApi({
 
   const setActiveQuery = (tabId, item) => {
     if (!tabId || !item) return;
-    activeQueries.set(tabId, { ...item, updatedAt: Date.now() });
+    const next = { ...item, updatedAt: Date.now() };
+    activeQueries.set(tabId, next);
+    durableRunPatchFromActive(next);
     emitRuntimeChanged();
   };
 
@@ -726,6 +803,7 @@ export function startHttpApi({
     if (!current) return null;
     const next = { ...current, ...(patch || {}), updatedAt: Date.now() };
     activeQueries.set(tabId, next);
+    durableRunPatchFromActive(next);
     emitRuntimeChanged();
     return next;
   };
@@ -881,6 +959,7 @@ export function startHttpApi({
 
       if (url.pathname === '/query' && req.method === 'POST') {
         await projectsReady;
+        await runsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
         const timeoutMs = positiveIntOr(body.timeoutMs, 10 * 60_000, 30 * 60_000);
         const prompt = String(body.prompt || '');
@@ -916,14 +995,51 @@ export function startHttpApi({
         };
         reserveScope(scope, op);
         let tabId = null;
+        let runCreated = false;
         try {
           tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
           if (projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl });
           if (bodyProjectUrl && tabKey) persistKeyMeta(tabKey, { projectUrl: bodyProjectUrl });
           op.tabId = tabId;
-          setActiveQuery(tabId, op);
           const tabMeta = getTabMeta(tabs, tabId);
+          const effectiveKey = tabKey || tabMeta?.key || null;
+          const activeOp = {
+            ...op,
+            key: effectiveKey,
+            vendorId: tabMeta?.vendorId || null,
+            vendorName: tabMeta?.vendorName || null,
+            projectUrl: projectUrl || null
+          };
+          await runStore.create({
+            id: op.id,
+            kind: 'query',
+            source,
+            status: 'running',
+            phase: op.phase,
+            tabId,
+            key: effectiveKey,
+            vendorId: tabMeta?.vendorId || null,
+            vendorName: tabMeta?.vendorName || null,
+            projectUrl: projectUrl || null,
+            conversationUrl: savedConversationUrl || null,
+            promptPreview: op.promptPreview,
+            startedAt: op.startedAt,
+            logicalRequest: logicalQueryRequest({
+              body,
+              prompt,
+              promptPrefix,
+              attachments,
+              contextPaths,
+              bundleName,
+              timeoutMs,
+              source,
+              fireAndForget,
+              projectUrl
+            })
+          });
+          runCreated = true;
+          setActiveQuery(tabId, activeOp);
           const vendorBudget = contextBudgetForVendor(tabMeta?.vendorId || 'chatgpt');
           try {
             patchActiveQuery(tabId, { phase: 'preparing_context', blocked: false, blockedKind: null });
@@ -960,7 +1076,11 @@ export function startHttpApi({
             inflight.queries += 1;
             const controller = tabs.getControllerById(tabId);
             const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
-            const effectiveKey = tabKey || getTabMeta(tabs, tabId)?.key || null;
+            await runStore.patch(op.id, {
+              materializedReplay: materializedReplay({ packed, timeoutMs }),
+              packedContextSummary: packed.context?.summary || null,
+              packedContextBudget: effectiveBudget
+            });
             const runQuery = async () => {
               const result = await runExclusive(controller, async () => {
                 if ((savedConversationUrl || effectiveProjectUrl) && typeof controller.getUrl === 'function') {
@@ -989,7 +1109,7 @@ export function startHttpApi({
               // Capture conversation URL after successful query
               const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
               if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { conversationUrl });
-              setLastOutcome(tabId, {
+              const outcome = {
                 status: 'success',
                 label: 'Response received',
                 detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
@@ -998,14 +1118,18 @@ export function startHttpApi({
                 kind: 'query',
                 finishedAt: Date.now(),
                 durationMs: Math.max(0, Date.now() - op.startedAt)
-              });
+              };
+              setLastOutcome(tabId, outcome);
+              await durableRunFinalizeFromOutcome(op.id, outcome);
               return result;
             };
 
             if (fireAndForget) {
               const tabMeta = getTabMeta(tabs, tabId);
               runQuery().catch((error) => {
-                setLastOutcome(tabId, outcomeFromError(error, op));
+                const outcome = outcomeFromError(error, op);
+                setLastOutcome(tabId, outcome);
+                return durableRunFinalizeFromOutcome(op.id, outcome);
               }).finally(() => {
                 clearActiveQuery(tabId, op.id);
                 inflight.queries = Math.max(0, inflight.queries - 1);
@@ -1017,6 +1141,7 @@ export function startHttpApi({
                 tabId,
                 key: tabMeta?.key || tabKey || null,
                 queryId: op.id,
+                runId: op.id,
                 packedContextSummary: packed.context?.summary || null
               });
             }
@@ -1025,6 +1150,7 @@ export function startHttpApi({
             return sendJson(res, 200, {
               ok: true,
               tabId,
+              runId: op.id,
               result,
               packedContext: packed.context,
               packedContextSummary: packed.context?.summary || null,
@@ -1032,7 +1158,9 @@ export function startHttpApi({
               bundle
             });
           } catch (error) {
-            setLastOutcome(tabId, outcomeFromError(error, op));
+            const outcome = outcomeFromError(error, op);
+            setLastOutcome(tabId, outcome);
+            if (runCreated) await durableRunFinalizeFromOutcome(op.id, outcome);
             throw error;
           } finally {
             if (!fireAndForget) {

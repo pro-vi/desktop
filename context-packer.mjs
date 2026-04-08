@@ -52,6 +52,10 @@ function extnameLower(filePath) {
   return path.extname(String(filePath || '')).toLowerCase();
 }
 
+function isMissingPathError(error) {
+  return !!error && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
+}
+
 function normalizeAbsoluteInputPath(value, { cwd = process.cwd() } = {}) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -162,10 +166,22 @@ function sampleLooksText(buf) {
 
 async function walkPath(absPath, out, { maxFiles }) {
   if (out.length >= maxFiles) return;
-  const st = await fs.lstat(absPath);
+  let st = null;
+  try {
+    st = await fs.lstat(absPath);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
   if (st.isSymbolicLink()) return;
   if (st.isDirectory()) {
-    const entries = await fs.readdir(absPath, { withFileTypes: true });
+    let entries = [];
+    try {
+      entries = await fs.readdir(absPath, { withFileTypes: true });
+    } catch (error) {
+      if (isMissingPathError(error)) return;
+      throw error;
+    }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (out.length >= maxFiles) break;
@@ -270,6 +286,7 @@ export async function prepareQueryContext({
     const abs = path.resolve(cwd, item);
     roots.push({ input: item, path: abs });
     try {
+      await fs.lstat(abs);
       await walkPath(abs, files, { maxFiles });
     } catch (error) {
       if (error && error.code === 'ENOENT') {
@@ -306,7 +323,16 @@ export async function prepareQueryContext({
       continue;
     }
 
-    const sample = await readSample(file.absPath, Math.min(file.size || maxFileChars, maxFileChars));
+    let sample = null;
+    try {
+      sample = await readSample(file.absPath, Math.min(file.size || maxFileChars, maxFileChars));
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        omitted.push({ path: named, reason: 'vanished' });
+        continue;
+      }
+      throw error;
+    }
     if (!sampleLooksText(sample)) {
       if (attachedFiles.length < maxAttachmentFiles && file.size <= maxBinaryAttachmentBytes && !attachedSet.has(file.absPath)) {
         attachedFiles.push({ path: file.absPath, reason: 'context-binary-sampled', size: file.size });

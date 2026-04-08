@@ -20,6 +20,16 @@ async function req({ port, token, method, pth, body, headers = {} }) {
   return { res, data };
 }
 
+async function waitFor(check, { timeoutMs = 1_000, intervalMs = 10 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('wait_for_timeout');
+}
+
 test('http-api: health is public and returns serverId', async (t) => {
   const tabs = { listTabs: () => [], ensureTab: async () => 't1', createTab: async () => 't1', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
@@ -214,6 +224,112 @@ test('http-api: status surfaces source, phase, blocked state, and last outcome f
   assert.equal(st2.data.runtime?.lastOutcomes?.[0]?.status, 'success');
   assert.equal(st2.data.runtime?.lastOutcomes?.[0]?.source, 'mcp');
   assert.equal(st2.data.runtime?.lastOutcomes?.[0]?.label, 'Response received');
+});
+
+test('http-api: query returns runId and persists durable run state', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-sync-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => ({ text: 'durable answer', codeBlocks: [], meta: {} }),
+    getUrl: async () => 'https://chatgpt.com/c/durable-run'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'make this durable', source: 'mcp' }
+  });
+  assert.equal(response.res.status, 200);
+  assert.equal(typeof response.data.runId, 'string');
+
+  const runPath = path.join(stateDir, 'runs', `${response.data.runId}.json`);
+  const persisted = JSON.parse(await fs.readFile(runPath, 'utf8'));
+  assert.equal(persisted.id, response.data.runId);
+  assert.equal(persisted.kind, 'query');
+  assert.equal(persisted.status, 'success');
+  assert.equal(persisted.source, 'mcp');
+  assert.equal(persisted.logicalRequest?.prompt, 'make this durable');
+  assert.equal(persisted.materializedReplay?.prompt, 'make this durable');
+  assert.equal(persisted.conversationUrl, 'https://chatgpt.com/c/durable-run');
+  assert.equal(persisted.promptPreview, 'make this durable');
+  assert.equal(typeof persisted.finishedAt, 'number');
+});
+
+test('http-api: fire-and-forget query finalizes durable run on async error', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-async-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => {
+      const err = new Error('timeout_waiting_for_response');
+      err.data = { conversationUrl: 'https://chatgpt.com/c/slow-run' };
+      throw err;
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'let this fail later', fireAndForget: true }
+  });
+  assert.equal(response.res.status, 202);
+  assert.equal(response.data.async, true);
+  assert.equal(typeof response.data.runId, 'string');
+
+  const runPath = path.join(stateDir, 'runs', `${response.data.runId}.json`);
+  const persisted = await waitFor(async () => {
+    try {
+      const run = JSON.parse(await fs.readFile(runPath, 'utf8'));
+      return run.finishedAt ? run : null;
+    } catch {
+      return null;
+    }
+  });
+  assert.equal(persisted.status, 'error');
+  assert.equal(persisted.label, 'Response timed out');
+  assert.equal(persisted.conversationUrl, 'https://chatgpt.com/c/slow-run');
+  assert.equal(typeof persisted.finishedAt, 'number');
 });
 
 test('http-api: same-tab query/send requests are rejected while a run is already active', async (t) => {
