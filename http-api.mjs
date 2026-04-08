@@ -77,6 +77,9 @@ function mapErrorToHttp(error) {
   if (msg === 'send_not_triggered') return { code: 409, body: { error: 'send_not_triggered', data: error?.data || null } };
   if (msg === 'missing_tabId') return { code: 400, body: { error: 'missing_tabId' } };
   if (msg === 'missing_key') return { code: 400, body: { error: 'missing_key' } };
+  if (msg === 'missing_run_id') return { code: 400, body: { error: 'missing_run_id' } };
+  if (msg === 'run_not_found') return { code: 404, body: { error: 'run_not_found' } };
+  if (msg === 'run_not_retryable') return { code: 409, body: { error: 'run_not_retryable' } };
   if (msg === 'tab_busy') return { code: 409, body: { error: 'tab_busy', data: error?.data || null } };
   if (msg === 'key_vendor_mismatch') return { code: 409, body: { error: 'key_vendor_mismatch' } };
   if (msg === 'tab_not_found') return { code: 404, body: { error: 'tab_not_found' } };
@@ -444,7 +447,8 @@ export function startHttpApi({
   onScanWatchFolder,
   getStatus,
   getSettings,
-  onRuntimeChanged
+  onRuntimeChanged,
+  onRunsChanged
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
@@ -464,7 +468,39 @@ export function startHttpApi({
   }
 
   const runStore = createRunStore(stateDir);
-  const runsReady = runStore.load();
+  const runsSnapshot = ({ includeArchived = false, limit = 100 } = {}) => runStore.list({ includeArchived, limit });
+  const emitRunsChanged = () => {
+    try {
+      onRunsChanged?.(runsSnapshot());
+    } catch {}
+  };
+  const runsReady = runStore.load().then(() => {
+    emitRunsChanged();
+  });
+
+  const createRunRecord = async (record) => {
+    const created = await runStore.create(record);
+    emitRunsChanged();
+    return created;
+  };
+
+  const patchRunRecord = async (runId, patchData) => {
+    const patched = await runStore.patch(runId, patchData);
+    emitRunsChanged();
+    return patched;
+  };
+
+  const finalizeRunRecord = async (runId, patchData) => {
+    const finalized = await runStore.finalize(runId, patchData);
+    emitRunsChanged();
+    return finalized;
+  };
+
+  const archiveRunRecord = async (runId) => {
+    const archived = await runStore.archive(runId);
+    emitRunsChanged();
+    return archived;
+  };
 
   // Governor state (per-desktop instance).
   const inflight = { queries: 0 };
@@ -692,7 +728,7 @@ export function startHttpApi({
   const durableRunPatchFromActive = async (item) => {
     if (!item?.id || item?.kind !== 'query') return;
     try {
-      await runStore.patch(item.id, {
+      await patchRunRecord(item.id, {
         status: item.blocked ? 'blocked' : 'running',
         phase: item.phase || null,
         tabId: item.tabId || null,
@@ -713,7 +749,7 @@ export function startHttpApi({
   const durableRunFinalizeFromOutcome = async (runId, outcome) => {
     if (!runId || !outcome) return null;
     try {
-      return await runStore.finalize(runId, {
+      return await finalizeRunRecord(runId, {
         status: outcome.status || 'error',
         label: outcome.label || null,
         detail: outcome.detail || null,
@@ -726,6 +762,87 @@ export function startHttpApi({
       return null;
     }
   };
+
+  const vendorForId = (vendorId) => {
+    const token = normalizeVendorToken(vendorId || '');
+    if (!token) return defaultVendor(vendors);
+    return vendors.find((item) => normalizeVendorToken(item?.id || '') === token) || defaultVendor(vendors);
+  };
+
+  const resolveRunTab = async ({ run, show = false } = {}) => {
+    const vendor = vendorForId(run?.vendorId);
+    const key = String(run?.key || '').trim() || null;
+    if (key) {
+      return await tabs.ensureTab({
+        key,
+        name: key,
+        show,
+        url: vendor?.url,
+        vendorId: vendor?.id || run?.vendorId || null,
+        vendorName: vendor?.name || run?.vendorName || null,
+        projectUrl: run?.projectUrl || null
+      });
+    }
+    const rows = Array.isArray(tabs.listTabs?.()) ? tabs.listTabs() : [];
+    const vendorTab = vendor
+      ? rows.find((item) => {
+        if (!listedTabMatchesVendor(item, vendor)) return false;
+        if (!run?.projectUrl) return true;
+        return String(item?.projectUrl || '').trim() === String(run.projectUrl || '').trim();
+      }) || rows.find((item) => listedTabMatchesVendor(item, vendor)) || null
+      : null;
+    if (vendorTab) {
+      if (run?.projectUrl) tabs.updateTabMeta?.(vendorTab.id, { projectUrl: run.projectUrl });
+      return vendorTab.id;
+    }
+    const advisoryTab = run?.tabId ? rows.find((item) => String(item?.id || '') === String(run.tabId || '')) || null : null;
+    if (advisoryTab) {
+      if (run?.projectUrl) tabs.updateTabMeta?.(advisoryTab.id, { projectUrl: run.projectUrl });
+      return advisoryTab.id;
+    }
+    if (vendor) {
+      return await tabs.createTab({
+        name: run?.vendorName || vendor.name || vendor.id,
+        show,
+        url: vendor.url,
+        vendorId: vendor.id,
+        vendorName: vendor.name,
+        projectUrl: run?.projectUrl || null
+      });
+    }
+    return defaultTabId;
+  };
+
+  const ensureRunLocation = async ({ controller, tabId, timeoutMs, conversationUrl, projectUrl }) => {
+    const targetConversation = String(conversationUrl || '').trim() || null;
+    const targetProject = String(projectUrl || '').trim() || null;
+    const currentUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => '') : '';
+    if (targetConversation && currentUrl !== targetConversation) {
+      patchActiveQuery(tabId, { phase: 'resuming_conversation' });
+      await controller.navigate(targetConversation);
+      if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
+      return;
+    }
+    if (targetProject) {
+      const projectBase = targetProject.replace(/\/project\/?$/, '');
+      if (!currentUrl.startsWith(projectBase)) {
+        patchActiveQuery(tabId, { phase: 'navigating_to_project' });
+        await controller.navigate(targetProject);
+        if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
+      }
+    }
+  };
+
+  const successOutcomeForResult = ({ result, op, conversationUrl }) => ({
+    status: 'success',
+    label: 'Response received',
+    detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
+    conversationUrl: conversationUrl || null,
+    source: op?.source || 'http',
+    kind: op?.kind || 'query',
+    finishedAt: Date.now(),
+    durationMs: Math.max(0, Date.now() - Number(op?.startedAt || Date.now()))
+  });
 
   const runtimeSnapshot = () => ({
     inflightQueries: inflight.queries,
@@ -820,6 +937,177 @@ export function startHttpApi({
     if (expectedId && current.id !== expectedId) return;
     activeQueries.delete(tabId);
     emitRuntimeChanged();
+  };
+
+  const getRunRecordOrThrow = (runId) => {
+    const id = String(runId || '').trim();
+    if (!id) throw new Error('missing_run_id');
+    const run = runStore.get(id);
+    if (!run) throw new Error('run_not_found');
+    return run;
+  };
+
+  const listRunsAction = async ({ includeArchived = false, limit = 100 } = {}) => {
+    await runsReady;
+    return runsSnapshot({ includeArchived, limit });
+  };
+
+  const openRunAction = async ({ runId, timeoutMs = 30_000, show = true } = {}) => {
+    await runsReady;
+    const run = getRunRecordOrThrow(runId);
+    const tabId = await resolveRunTab({ run, show: false });
+    if (run.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: run.projectUrl });
+    const controller = tabs.getControllerById(tabId);
+    await runExclusive(controller, async () => {
+      await ensureRunLocation({
+        controller,
+        tabId,
+        timeoutMs,
+        conversationUrl: run.conversationUrl || null,
+        projectUrl: run.projectUrl || null
+      });
+    });
+    if (show) await onShow?.({ tabId }).catch(() => {});
+    return { ok: true, tabId, run };
+  };
+
+  const retryRunAction = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
+    await runsReady;
+    const original = getRunRecordOrThrow(runId);
+    const replay = original.materializedReplay || null;
+    if (!replay?.prompt) throw new Error('run_not_retryable');
+    const effectiveTimeoutMs = positiveIntOr(timeoutMs, replay.timeoutMs || 10 * 60_000, 30 * 60_000);
+    const scope = original.key
+      ? `key:${original.key}`
+      : original.vendorId
+        ? `vendor:${original.vendorId}`
+        : original.tabId
+          ? `tab:${original.tabId}`
+          : `run:${original.id}`;
+    assertScopeNotBusy(scope);
+    const op = {
+      id: crypto.randomUUID(),
+      kind: 'query',
+      tabId: null,
+      startedAt: Date.now(),
+      promptPreview: original.promptPreview || trimPreview(replay.prompt),
+      source,
+      phase: 'resolving_tab',
+      stopRequested: false,
+      stopRequestedAt: null,
+      blocked: false,
+      blockedKind: null,
+      scope
+    };
+    reserveScope(scope, op);
+    let tabId = null;
+    let runCreated = false;
+    try {
+      tabId = await resolveRunTab({ run: original, show });
+      assertTabNotBusy(tabId);
+      if (original.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: original.projectUrl });
+      op.tabId = tabId;
+      const tabMeta = getTabMeta(tabs, tabId);
+      const effectiveKey = original.key || tabMeta?.key || null;
+      await createRunRecord({
+        id: op.id,
+        kind: 'query',
+        source,
+        status: 'running',
+        phase: op.phase,
+        tabId,
+        key: effectiveKey,
+        vendorId: tabMeta?.vendorId || original.vendorId || null,
+        vendorName: tabMeta?.vendorName || original.vendorName || null,
+        projectUrl: original.projectUrl || null,
+        conversationUrl: original.conversationUrl || null,
+        promptPreview: op.promptPreview,
+        startedAt: op.startedAt,
+        retryOf: original.id,
+        logicalRequest: {
+          ...(original.logicalRequest || {}),
+          source,
+          fireAndForget: !!fireAndForget,
+          timeoutMs: effectiveTimeoutMs,
+          key: effectiveKey,
+          tabId,
+          vendorId: tabMeta?.vendorId || original.vendorId || null,
+          projectUrl: original.projectUrl || null
+        },
+        materializedReplay: {
+          prompt: String(replay.prompt || ''),
+          attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
+          timeoutMs: effectiveTimeoutMs
+        },
+        packedContextSummary: original.packedContextSummary || null,
+        packedContextBudget: original.packedContextBudget || null
+      });
+      runCreated = true;
+      setActiveQuery(tabId, {
+        ...op,
+        key: effectiveKey,
+        vendorId: tabMeta?.vendorId || original.vendorId || null,
+        vendorName: tabMeta?.vendorName || original.vendorName || null,
+        projectUrl: original.projectUrl || null
+      });
+      checkAndConsumeQueryBudget({ tabId, governor: await getGovernor() });
+      inflight.queries += 1;
+      const controller = tabs.getControllerById(tabId);
+      const executeRetry = async () => {
+        const result = await runExclusive(controller, async () => {
+          await ensureRunLocation({
+            controller,
+            tabId,
+            timeoutMs: effectiveTimeoutMs,
+            conversationUrl: original.conversationUrl || null,
+            projectUrl: original.projectUrl || null
+          });
+          return controller.query({
+            prompt: String(replay.prompt || ''),
+            attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
+            timeoutMs: effectiveTimeoutMs,
+            onProgress: (patch) => patchActiveQuery(tabId, patch)
+          });
+        });
+        const conversationUrl = typeof controller.getUrl === 'function'
+          ? await controller.getUrl().catch(() => original.conversationUrl || null)
+          : original.conversationUrl || null;
+        if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { projectUrl: original.projectUrl || null, conversationUrl });
+        const outcome = successOutcomeForResult({ result, op, conversationUrl });
+        setLastOutcome(tabId, outcome);
+        await durableRunFinalizeFromOutcome(op.id, outcome);
+        return result;
+      };
+
+      if (fireAndForget) {
+        executeRetry().catch((error) => {
+          const outcome = outcomeFromError(error, op);
+          setLastOutcome(tabId, outcome);
+          return durableRunFinalizeFromOutcome(op.id, outcome);
+        }).finally(() => {
+          clearActiveQuery(tabId, op.id);
+          inflight.queries = Math.max(0, inflight.queries - 1);
+          clearScope(scope, op.id);
+        });
+        return { ok: true, async: true, tabId, runId: op.id, retryOf: original.id };
+      }
+
+      const result = await executeRetry();
+      return { ok: true, tabId, runId: op.id, retryOf: original.id, result };
+    } catch (error) {
+      if (tabId) {
+        const outcome = outcomeFromError(error, op);
+        setLastOutcome(tabId, outcome);
+        if (runCreated) await durableRunFinalizeFromOutcome(op.id, outcome);
+      }
+      throw error;
+    } finally {
+      if (!fireAndForget && tabId) {
+        clearActiveQuery(tabId, op.id);
+        inflight.queries = Math.max(0, inflight.queries - 1);
+      }
+      if (!fireAndForget) clearScope(scope, op.id);
+    }
   };
 
   const server = http.createServer(async (req, res) => {
@@ -1011,7 +1299,7 @@ export function startHttpApi({
             vendorName: tabMeta?.vendorName || null,
             projectUrl: projectUrl || null
           };
-          await runStore.create({
+          await createRunRecord({
             id: op.id,
             kind: 'query',
             source,
@@ -1076,7 +1364,7 @@ export function startHttpApi({
             inflight.queries += 1;
             const controller = tabs.getControllerById(tabId);
             const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
-            await runStore.patch(op.id, {
+            await patchRunRecord(op.id, {
               materializedReplay: materializedReplay({ packed, timeoutMs }),
               packedContextSummary: packed.context?.summary || null,
               packedContextBudget: effectiveBudget
@@ -1109,16 +1397,7 @@ export function startHttpApi({
               // Capture conversation URL after successful query
               const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
               if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { conversationUrl });
-              const outcome = {
-                status: 'success',
-                label: 'Response received',
-                detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
-                conversationUrl,
-                source,
-                kind: 'query',
-                finishedAt: Date.now(),
-                durationMs: Math.max(0, Date.now() - op.startedAt)
-              };
+              const outcome = successOutcomeForResult({ result, op, conversationUrl });
               setLastOutcome(tabId, outcome);
               await durableRunFinalizeFromOutcome(op.id, outcome);
               return result;
@@ -1259,6 +1538,55 @@ export function startHttpApi({
           activeQuery: activeQueries.get(tabId) || active || null,
           runtime: runtimeSnapshot()
         });
+      }
+
+      if (url.pathname === '/runs/list' && (req.method === 'GET' || req.method === 'POST')) {
+        const body = req.method === 'POST' ? await parseBody(req) : {};
+        const includeArchived = body.includeArchived === true || String(url.searchParams.get('includeArchived') || '').trim().toLowerCase() === 'true';
+        const limit = positiveIntOr(body.limit || url.searchParams.get('limit'), 100, 500);
+        const runs = await listRunsAction({ includeArchived, limit });
+        return sendJson(res, 200, { ok: true, runs });
+      }
+
+      if (url.pathname === '/runs/get' && req.method === 'POST') {
+        await runsReady;
+        const body = await parseBody(req);
+        const run = getRunRecordOrThrow(body.runId);
+        return sendJson(res, 200, { ok: true, run });
+      }
+
+      if (url.pathname === '/runs/archive' && req.method === 'POST') {
+        await runsReady;
+        const body = await parseBody(req);
+        const archived = await archiveRunRecord(String(body.runId || '').trim());
+        return sendJson(res, 200, {
+          ok: true,
+          runId: archived.id,
+          archivedAt: archived.archivedAt || null
+        });
+      }
+
+      if (url.pathname === '/runs/open' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const timeoutMs = positiveIntOr(body.timeoutMs, 30_000, 30 * 60_000);
+        const opened = await openRunAction({
+          runId: body.runId,
+          timeoutMs,
+          show: body.show !== false
+        });
+        return sendJson(res, 200, opened);
+      }
+
+      if (url.pathname === '/runs/retry' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const retried = await retryRunAction({
+          runId: body.runId,
+          timeoutMs: body.timeoutMs,
+          fireAndForget: !!body.fireAndForget,
+          show: !!body.show,
+          source: requestSourceForBody(body)
+        });
+        return sendJson(res, retried.async ? 202 : 200, retried);
       }
 
       if (url.pathname === '/read-page' && req.method === 'POST') {
@@ -1416,6 +1744,23 @@ export function startHttpApi({
   });
 
   server.getRuntimeState = () => runtimeSnapshot();
+  server.listRuns = async ({ includeArchived = false, limit = 100 } = {}) => {
+    return await listRunsAction({ includeArchived, limit });
+  };
+  server.getRun = async ({ runId }) => {
+    await runsReady;
+    return getRunRecordOrThrow(runId);
+  };
+  server.archiveRun = async ({ runId }) => {
+    await runsReady;
+    return await archiveRunRecord(String(runId || '').trim());
+  };
+  server.openRun = async ({ runId, timeoutMs = 30_000, show = true } = {}) => {
+    return await openRunAction({ runId, timeoutMs, show });
+  };
+  server.retryRun = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
+    return await retryRunAction({ runId, timeoutMs, fireAndForget, show, source });
+  };
   server.stopActiveQuery = async ({ tabId }) => {
     const active = patchActiveQuery(tabId, { stopRequested: true, stopRequestedAt: Date.now() }) || null;
     const controller = tabs.getControllerById(tabId);

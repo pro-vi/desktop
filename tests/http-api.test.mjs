@@ -332,6 +332,200 @@ test('http-api: fire-and-forget query finalizes durable run on async error', asy
   assert.equal(typeof persisted.finishedAt, 'number');
 });
 
+test('http-api: runs list/get/archive expose durable query history', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-list-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => ({ text: 'history answer', codeBlocks: [], meta: {} }),
+    getUrl: async () => 'https://chatgpt.com/c/history-run'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const queried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'keep this durable' }
+  });
+  assert.equal(queried.res.status, 200);
+  const runId = queried.data.runId;
+
+  const listed = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: {} });
+  assert.equal(listed.res.status, 200);
+  assert.equal(Array.isArray(listed.data.runs), true);
+  assert.equal(listed.data.runs.some((item) => item.id === runId), true);
+  assert.equal('logicalRequest' in listed.data.runs[0], false);
+
+  const fetched = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId } });
+  assert.equal(fetched.res.status, 200);
+  assert.equal(fetched.data.run.id, runId);
+  assert.equal(fetched.data.run.logicalRequest.prompt, 'keep this durable');
+  assert.equal(fetched.data.run.materializedReplay.prompt, 'keep this durable');
+
+  const archived = await req({ port, token: 'secret', method: 'POST', pth: '/runs/archive', body: { runId } });
+  assert.equal(archived.res.status, 200);
+  assert.equal(archived.data.runId, runId);
+  assert.equal(typeof archived.data.archivedAt, 'number');
+
+  const listedAfterArchive = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: {} });
+  assert.equal(listedAfterArchive.res.status, 200);
+  assert.equal(listedAfterArchive.data.runs.some((item) => item.id === runId), false);
+
+  const listedArchived = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/list',
+    body: { includeArchived: true }
+  });
+  assert.equal(listedArchived.res.status, 200);
+  assert.equal(listedArchived.data.runs.some((item) => item.id === runId), true);
+});
+
+test('http-api: runs open saved conversations and retry exact materialized replay', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-actions-'));
+  const contextDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-context-'));
+  await fs.writeFile(path.join(contextDir, 'notes.txt'), 'context from disk\n', 'utf8');
+
+  let currentUrl = 'about:blank';
+  const queryCalls = [];
+  const navigateCalls = [];
+  const ensureReadyCalls = [];
+  const listedTabs = [{ id: 't0', key: 'retry-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => {
+      navigateCalls.push(to);
+      currentUrl = to;
+    },
+    ensureReady: async ({ timeoutMs }) => {
+      ensureReadyCalls.push(timeoutMs);
+      return { ok: true };
+    },
+    query: async (args) => {
+      queryCalls.push(args);
+      currentUrl = `https://chatgpt.com/c/thread-${queryCalls.length}`;
+      return { text: `answer ${queryCalls.length}`, codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => currentUrl
+  };
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl }) => {
+      const existing = listedTabs.find((item) => item.key === key);
+      if (existing) {
+        existing.vendorId = vendorId || existing.vendorId;
+        existing.vendorName = vendorName || existing.vendorName;
+        existing.projectUrl = projectUrl || existing.projectUrl || null;
+        return existing.id;
+      }
+      const created = { id: `tab-${key}`, key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      listedTabs.push(created);
+      return created.id;
+    },
+    createTab: async ({ vendorId, vendorName, projectUrl }) => {
+      const created = { id: `tab-${listedTabs.length + 1}`, key: null, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      listedTabs.push(created);
+      return created.id;
+    },
+    updateTabMeta: (tabId, patch) => {
+      const row = listedTabs.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrl, blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const queried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      key: 'retry-key',
+      prompt: 'base prompt',
+      promptPrefix: 'Pinned note',
+      contextPaths: [contextDir]
+    }
+  });
+  assert.equal(queried.res.status, 200);
+  const originalRunId = queried.data.runId;
+  assert.equal(queryCalls.length, 1);
+
+  currentUrl = 'about:blank';
+  const opened = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/open',
+    body: { runId: originalRunId }
+  });
+  assert.equal(opened.res.status, 200);
+  assert.equal(opened.data.tabId, 't0');
+  assert.equal(navigateCalls.at(-1), 'https://chatgpt.com/c/thread-1');
+  assert.equal(ensureReadyCalls.at(-1), 30_000);
+
+  currentUrl = 'about:blank';
+  const retried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: originalRunId, source: 'mcp' }
+  });
+  assert.equal(retried.res.status, 200);
+  assert.equal(typeof retried.data.runId, 'string');
+  assert.equal(retried.data.retryOf, originalRunId);
+  assert.equal(queryCalls.length, 2);
+  assert.equal(queryCalls[1].prompt, queryCalls[0].prompt);
+  assert.deepEqual(queryCalls[1].attachments, queryCalls[0].attachments);
+  assert.equal(navigateCalls.at(-1), 'https://chatgpt.com/c/thread-1');
+  assert.equal(ensureReadyCalls.at(-1), 10 * 60_000);
+
+  const retriedRun = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: retried.data.runId }
+  });
+  assert.equal(retriedRun.res.status, 200);
+  assert.equal(retriedRun.data.run.retryOf, originalRunId);
+  assert.equal(retriedRun.data.run.materializedReplay.prompt, queryCalls[0].prompt);
+  assert.equal(retriedRun.data.run.source, 'mcp');
+});
+
 test('http-api: same-tab query/send requests are rejected while a run is already active', async (t) => {
   let releaseQuery = null;
   const controller = {
