@@ -20,6 +20,11 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_list_bundles'"), 'expected agentify_list_bundles tool');
   assert.ok(src.includes("'agentify_save_artifacts'"), 'expected agentify_save_artifacts tool');
   assert.ok(src.includes("'agentify_list_artifacts'"), 'expected agentify_list_artifacts tool');
+  assert.ok(src.includes("'agentify_list_runs'"), 'expected agentify_list_runs tool');
+  assert.ok(src.includes("'agentify_get_run'"), 'expected agentify_get_run tool');
+  assert.ok(src.includes("'agentify_open_run'"), 'expected agentify_open_run tool');
+  assert.ok(src.includes("'agentify_retry_run'"), 'expected agentify_retry_run tool');
+  assert.ok(src.includes("'agentify_archive_run'"), 'expected agentify_archive_run tool');
   assert.ok(src.includes('model,'), 'expected model hint to be forwarded to HTTP query');
   assert.ok(src.includes("body: { model, key, name, projectUrl, show: typeof show === 'boolean' ? show : undefined }"), 'expected model hint on tab_create');
   assert.ok(src.includes("body: { model, tabId, key, maxChars: maxChars || 200_000 }"), 'expected model hint on read_page');
@@ -31,6 +36,7 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes('resolveLocalPaths(attachments || [])'), 'expected attachments to be normalized relative to MCP cwd');
   assert.ok(src.includes('resolveLocalPaths(contextPaths || [])'), 'expected contextPaths to be normalized relative to MCP cwd');
   assert.ok(src.includes("source: 'mcp'"), 'expected MCP calls to mark runtime source');
+  assert.ok(src.includes("path: '/runs/retry'"), 'expected retry_run to forward to retry endpoint');
   assert.ok(src.includes('folderPath: z.string()'), 'expected add_watch_folder to use folderPath field name');
   assert.ok(src.includes("throw new Error('missing_watch_folder_path')"), 'expected blank watch-folder path guard');
   assert.ok(src.includes('maxContextChunkChars: z.number().optional()'), 'expected maxContextChunkChars input');

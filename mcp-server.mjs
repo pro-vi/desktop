@@ -105,11 +105,12 @@ registerTool(
     });
     if (data.async) {
       return {
-        content: [{ type: 'text', text: `Query submitted (async). tabId=${data.tabId}, key=${data.key || ''}, queryId=${data.queryId || ''}. Poll agentify_status to check completion, then agentify_read_page to retrieve the response.` }],
+        content: [{ type: 'text', text: `Query submitted (async). tabId=${data.tabId}, key=${data.key || ''}, queryId=${data.queryId || ''}, runId=${data.runId || ''}. Poll agentify_get_run for durable state, then agentify_read_page to retrieve the response.` }],
         structuredContent: data
       };
     }
     const structuredContent = {
+      runId: data.runId || null,
       text: data.result?.text || '',
       codeBlocks: data.result?.codeBlocks || [],
       meta: data.result?.meta || null,
@@ -253,6 +254,137 @@ registerTool(
       body: { model, tabId, key, vendorId }
     });
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }], structuredContent: data };
+  }
+);
+
+registerTool(
+  'agentify_list_runs',
+  {
+    description: 'List durable provider runs captured by Agentify Desktop.',
+    inputSchema: {
+      includeArchived: z.boolean().optional().describe('Include archived runs in the response.'),
+      limit: z.number().optional().describe('Maximum number of runs to return.')
+    }
+  },
+  async ({ includeArchived, limit }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/runs/list',
+      body: { includeArchived: !!includeArchived, limit: limit || 100 }
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(data.runs || [], null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
+  'agentify_get_run',
+  {
+    description: 'Fetch the full durable record for a run, including replay payload and final outcome.',
+    inputSchema: {
+      runId: z.string().describe('Durable run id.')
+    }
+  },
+  async ({ runId }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/runs/get',
+      body: { runId }
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(data.run || null, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
+  'agentify_open_run',
+  {
+    description: 'Open a durable run in the desktop UI, preferring its saved conversation URL and project context.',
+    inputSchema: {
+      runId: z.string().describe('Durable run id.'),
+      timeoutMs: z.number().optional().describe('Maximum time to wait while reopening the run context.'),
+      show: z.boolean().optional().describe('Show the tab window after reopening the run context.')
+    }
+  },
+  async ({ runId, timeoutMs, show }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/runs/open',
+      body: {
+        runId,
+        timeoutMs: timeoutMs || 30_000,
+        show: typeof show === 'boolean' ? show : undefined
+      }
+    });
+    return {
+      content: [{ type: 'text', text: data.tabId || 'ok' }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
+  'agentify_retry_run',
+  {
+    description: 'Retry a durable run by replaying its stored packed prompt and resolved attachments.',
+    inputSchema: {
+      runId: z.string().describe('Durable run id.'),
+      timeoutMs: z.number().optional().describe('Maximum time to wait for the retried run.'),
+      fireAndForget: z.boolean().optional().describe('Queue the retry and return immediately.'),
+      show: z.boolean().optional().describe('Show the tab window before retrying.')
+    }
+  },
+  async ({ runId, timeoutMs, fireAndForget, show }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/runs/retry',
+      body: {
+        runId,
+        timeoutMs: timeoutMs || undefined,
+        fireAndForget: !!fireAndForget,
+        show: !!show,
+        source: 'mcp'
+      }
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
+  'agentify_archive_run',
+  {
+    description: 'Archive a durable run so it disappears from the default inbox view.',
+    inputSchema: {
+      runId: z.string().describe('Durable run id.')
+    }
+  },
+  async ({ runId }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/runs/archive',
+      body: { runId }
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ runId: data.runId || runId, archivedAt: data.archivedAt || null }, null, 2) }],
+      structuredContent: data
+    };
   }
 );
 
