@@ -184,6 +184,11 @@ async function main() {
       if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:tabsChanged');
     } catch {}
   };
+  const emitRunsChanged = () => {
+    try {
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:runsChanged');
+    } catch {}
+  };
   browserBackend = await createBrowserBackend({
     kind: browserBackendKind,
     stateDir,
@@ -387,6 +392,38 @@ async function main() {
     const tabId = String(args?.tabId || '').trim() || defaultTabId;
     return await server?.stopActiveQuery?.({ tabId });
   });
+  ipcMain.handle('agentify:getRuns', async (_evt, args) => {
+    const includeArchived = !!args?.includeArchived;
+    const limit = Number(args?.limit) || 100;
+    const runs = await server?.listRuns?.({ includeArchived, limit }) || [];
+    return { ok: true, runs };
+  });
+  ipcMain.handle('agentify:openRun', async (_evt, args) => {
+    const runId = String(args?.runId || '').trim();
+    if (!runId) throw new Error('missing_run_id');
+    return await server?.openRun?.({ runId, timeoutMs: args?.timeoutMs, show: args?.show !== false });
+  });
+  ipcMain.handle('agentify:retryRun', async (_evt, args) => {
+    const runId = String(args?.runId || '').trim();
+    if (!runId) throw new Error('missing_run_id');
+    return await server?.retryRun?.({
+      runId,
+      timeoutMs: args?.timeoutMs,
+      fireAndForget: !!args?.fireAndForget,
+      show: !!args?.show,
+      source: 'ui'
+    });
+  });
+  ipcMain.handle('agentify:archiveRun', async (_evt, args) => {
+    const runId = String(args?.runId || '').trim();
+    if (!runId) throw new Error('missing_run_id');
+    const archived = await server?.archiveRun?.({ runId });
+    return {
+      ok: true,
+      runId: archived?.id || runId,
+      archivedAt: archived?.archivedAt || null
+    };
+  });
 
   ipcMain.handle('agentify:openStateDir', async () => {
     const result = await shell.openPath(stateDir);
@@ -584,6 +621,9 @@ async function main() {
         onScanWatchFolder: async () => await watchFolders.scan(),
         onRuntimeChanged: async () => {
           emitTabsChanged();
+        },
+        onRunsChanged: async () => {
+          emitRunsChanged();
         },
         getStatus: async ({ tabId }) => {
           const controller = tabId ? tabs.getControllerById(tabId) : tabs.getControllerById(defaultTabId);

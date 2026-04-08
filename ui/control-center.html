@@ -106,6 +106,21 @@
         </section>
 
         <section class="card">
+          <div class="cardTitle">Run Inbox</div>
+          <div class="hint">
+            Durable history for provider jobs. Open the saved thread, replay the exact packed prompt, or archive runs you no longer need in view.
+          </div>
+          <div class="row compactRow">
+            <label class="checkbox">
+              <input id="showArchivedRuns" type="checkbox" />
+              <span>Show archived runs</span>
+            </label>
+          </div>
+          <div id="runsEmpty" class="empty">No durable runs yet. Long-running jobs will show up here after the first query finishes or blocks.</div>
+          <div id="runsList" class="tabs"></div>
+        </section>
+
+        <section class="card">
           <div class="cardTitle">Watch Folders</div>
           <div class="hint">
             Watched folders are local drop zones. Files you drag there are indexed as artifacts so you can reuse them in later prompts.

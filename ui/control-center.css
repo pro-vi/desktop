@@ -161,6 +161,9 @@ input::placeholder { color: rgba(233,236,242,0.45); }
   margin-top: 10px;
   gap: 10px;
 }
+.compactRow {
+  margin-top: 8px;
+}
 
 .btnRow { display: flex; gap: 8px; }
 

@@ -52,6 +52,33 @@ function fmtOutcomeStatus(status) {
   return 'Last run';
 }
 
+function fmtRunStatus(status) {
+  const key = String(status || '').trim().toLowerCase();
+  if (key === 'success') return 'Succeeded';
+  if (key === 'error') return 'Failed';
+  if (key === 'blocked') return 'Blocked';
+  if (key === 'stopped') return 'Stopped';
+  if (key === 'running') return 'Running';
+  if (key === 'queued') return 'Queued';
+  if (key === 'archived') return 'Archived';
+  return 'Run';
+}
+
+function badgeClassForRunStatus(status) {
+  const key = String(status || '').trim().toLowerCase();
+  if (key === 'success') return 'ok';
+  if (key === 'running') return 'ok';
+  if (key === 'stopped') return 'info';
+  if (key === 'archived') return 'dim';
+  if (key === 'queued') return 'dim';
+  return 'warn';
+}
+
+function isLiveRun(run) {
+  const key = String(run?.status || '').trim().toLowerCase();
+  return !run?.finishedAt && (key === 'queued' || key === 'running' || key === 'blocked');
+}
+
 function num(id, fallback) {
   const v = Number(el(id).value);
   return Number.isFinite(v) ? v : fallback;
@@ -165,6 +192,11 @@ async function refresh() {
   refreshInFlight = (async () => {
     const state = (await callApi('getState', undefined, { fallback: lastState })) || lastState;
     const settings = (await callApi('getSettings', undefined, { fallback: defaultSettings() })) || defaultSettings();
+    const runsData = (await callApi(
+      'getRuns',
+      { includeArchived: !!el('showArchivedRuns').checked, limit: 100 },
+      { fallback: { runs: [] } }
+    )) || { runs: [] };
     const watchFoldersData = (await callApi('listWatchFolders', undefined, { fallback: { folders: [] } })) || { folders: [] };
     lastState = { ...defaultState(), ...state };
 
@@ -349,6 +381,123 @@ async function refresh() {
       list.appendChild(row);
     }
 
+    const runs = Array.isArray(runsData.runs) ? runsData.runs : [];
+    const runsList = el('runsList');
+    const runsEmpty = el('runsEmpty');
+    runsList.innerHTML = '';
+    if (!runs.length) {
+      runsEmpty.textContent = el('showArchivedRuns').checked
+        ? 'No runs match the current filter.'
+        : 'No durable runs yet. Long-running jobs will show up here after the first query finishes or blocks.';
+      runsEmpty.style.display = 'block';
+    } else {
+      runsEmpty.style.display = 'none';
+    }
+
+    for (const run of runs) {
+      const row = document.createElement('div');
+      row.className = 'tab';
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = run.promptPreview || run.label || run.id;
+
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      const vendorLabel = run.vendorName || run.vendorId || 'Unknown vendor';
+      const keyLabel = run.key ? `key=${run.key}` : fmtSource(run.source);
+      const updated = run.updatedAt ? fmtTime(run.updatedAt) : '';
+      sub.textContent = `${vendorLabel} • ${keyLabel}${updated ? ` • updated ${updated}` : ''}`;
+      meta.appendChild(title);
+      meta.appendChild(sub);
+
+      const statusRow = document.createElement('div');
+      statusRow.className = 'statusRow';
+      const addBadge = (label, className = 'dim') => {
+        const badge = document.createElement('span');
+        badge.className = `badge ${className}`.trim();
+        badge.textContent = label;
+        statusRow.appendChild(badge);
+      };
+      addBadge(fmtRunStatus(run.status), badgeClassForRunStatus(run.status));
+      if (run.source) addBadge(fmtSource(run.source), 'info');
+      if (run.phase && !run.finishedAt) addBadge(fmtPhase(run.phase), run.blocked ? 'warn' : 'dim');
+      if (run.retryOf) addBadge('Retry', 'info');
+      if (run.archivedAt) addBadge('Archived', 'dim');
+      meta.appendChild(statusRow);
+
+      if (run.blockedTitle) {
+        const blocked = document.createElement('div');
+        blocked.className = 'sub';
+        blocked.textContent = run.blockedTitle;
+        meta.appendChild(blocked);
+      } else if (run.detail) {
+        const detail = document.createElement('div');
+        detail.className = 'sub';
+        detail.textContent = `${run.label || fmtRunStatus(run.status)}: ${run.detail}`;
+        meta.appendChild(detail);
+      }
+
+      const controls = document.createElement('div');
+      controls.className = 'controls';
+
+      const btnOpen = document.createElement('button');
+      btnOpen.className = 'btn secondary tabActionBtn';
+      btnOpen.textContent = 'Open';
+      btnOpen.title = 'Open the saved run context';
+      btnOpen.onclick = async () => {
+        try {
+          const out = await callApi('openRun', { runId: run.id, show: true }, { required: true });
+          statusText(`Opened run ${run.id} on ${out?.tabId || 'tab'}`);
+        } catch (e) {
+          statusText(`Open run failed: ${e?.message || String(e)}`);
+        } finally {
+          await refresh();
+        }
+      };
+
+      const btnRetry = document.createElement('button');
+      btnRetry.className = 'btn secondary tabActionBtn';
+      btnRetry.textContent = 'Retry';
+      btnRetry.title = 'Replay the stored packed prompt and attachments';
+      btnRetry.disabled = isLiveRun(run);
+      btnRetry.onclick = async () => {
+        try {
+          const out = await callApi('retryRun', { runId: run.id, fireAndForget: true }, { required: true });
+          statusText(out?.async ? `Retry queued: ${out.runId}` : `Retry finished: ${out?.runId || run.id}`);
+        } catch (e) {
+          statusText(`Retry failed: ${e?.message || String(e)}`);
+        } finally {
+          await refresh();
+        }
+      };
+
+      const btnArchive = document.createElement('button');
+      btnArchive.className = 'btn secondary tabActionBtn destructive';
+      btnArchive.textContent = run.archivedAt ? 'Archived' : 'Archive';
+      btnArchive.title = 'Hide this run from the default inbox view';
+      btnArchive.disabled = !!run.archivedAt || isLiveRun(run);
+      btnArchive.onclick = async () => {
+        try {
+          const out = await callApi('archiveRun', { runId: run.id }, { required: true });
+          statusText(`Archived run ${out?.runId || run.id}`);
+        } catch (e) {
+          statusText(`Archive failed: ${e?.message || String(e)}`);
+        } finally {
+          await refresh();
+        }
+      };
+
+      controls.appendChild(btnOpen);
+      controls.appendChild(btnRetry);
+      controls.appendChild(btnArchive);
+      row.appendChild(meta);
+      row.appendChild(controls);
+      runsList.appendChild(row);
+    }
+
     const watchFolders = Array.isArray(watchFoldersData.folders) ? watchFoldersData.folders : [];
     const watchList = el('watchFoldersList');
     const watchEmpty = el('watchFoldersEmpty');
@@ -415,9 +564,10 @@ async function refresh() {
         ? `Chrome CDP${lastState.browser?.profileMode === 'existing' ? ' (existing profile)' : ''}${lastState.browser?.debugPort ? `:${lastState.browser.debugPort}` : ''}`
         : 'Electron';
     const runningSummary = ` • Running: ${activeQueries.length}`;
+    const runsSummary = ` • Runs: ${runs.length}`;
     const liveSummary = hasLiveUpdates ? 'Live updates on' : 'Polling every 3s';
     const refreshedSummary = lastRefreshAt ? ` • Refreshed ${new Date(lastRefreshAt).toLocaleTimeString()}` : '';
-    statusText(`Backend: ${browserSummary} • Tabs: ${tabs.length}${runningSummary} • ${liveSummary}${refreshedSummary} • State: ${lastState.stateDir || ''}`);
+    statusText(`Backend: ${browserSummary} • Tabs: ${tabs.length}${runningSummary}${runsSummary} • ${liveSummary}${refreshedSummary} • State: ${lastState.stateDir || ''}`);
 
   // Settings UI.
     el('setBrowserBackend').value = settings.browserBackend || 'electron';
@@ -510,6 +660,9 @@ async function main() {
       statusText(`Open default tab failed: ${e?.message || String(e)}`);
     }
   };
+  el('showArchivedRuns').onchange = () => {
+    refresh().catch((e) => statusText(`Run refresh failed: ${e?.message || String(e)}`));
+  };
 
   el('btnCreate').onclick = async () => {
     const vendorId = String(el('vendorSelect').value || '').trim() || 'chatgpt';
@@ -576,19 +729,25 @@ async function main() {
     }
   };
 
-  if (hasApi('onTabsChanged')) {
-    try {
-      const b = getBridge();
-      hasLiveUpdates = true;
+  let liveBound = false;
+  try {
+    const b = getBridge();
+    if (hasApi('onTabsChanged')) {
       b?.onTabsChanged?.(() => refresh().catch(() => {}));
-    } catch (e) {
-      hasLiveUpdates = false;
-      statusText(`Tabs listener unavailable: ${e?.message || String(e)}`);
-      setInterval(() => refresh().catch(() => {}), 3000);
+      liveBound = true;
     }
-  } else {
+    if (hasApi('onRunsChanged')) {
+      b?.onRunsChanged?.(() => refresh().catch(() => {}));
+      liveBound = true;
+    }
+  } catch (e) {
+    liveBound = false;
+    statusText(`Live listener unavailable: ${e?.message || String(e)}`);
+  }
+  hasLiveUpdates = liveBound;
+  if (!liveBound) {
     hasLiveUpdates = false;
-    statusText('Tabs listener unavailable (compat mode). Auto-refresh every 3s.');
+    statusText('Live listeners unavailable (compat mode). Auto-refresh every 3s.');
     setInterval(() => refresh().catch(() => {}), 3000);
   }
 
