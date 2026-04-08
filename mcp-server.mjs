@@ -33,7 +33,7 @@ registerTool(
     description:
       'Send a prompt to the local Agentify Desktop session (ChatGPT web) and return the latest assistant response. If a CAPTCHA/login challenge appears, the desktop window will ask for user intervention and resume automatically.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
@@ -129,7 +129,7 @@ registerTool(
   {
     description: 'Read text content from the active tab in the local Agentify Desktop window.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
       maxChars: z.number().optional().describe('Maximum characters to return.')
@@ -152,7 +152,7 @@ registerTool(
   {
     description: 'Navigate the Agentify Desktop browser window to a URL (local UI automation).',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
       url: z.string().describe('URL to navigate to.')
@@ -171,7 +171,7 @@ registerTool(
     description:
       'Wait until ChatGPT is ready for input (e.g., after login/CAPTCHA). Triggers local user handoff if needed and resumes when the prompt textarea is visible.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
       timeoutMs: z.number().optional().describe('Maximum time to wait for readiness.')
@@ -214,7 +214,7 @@ registerTool(
   {
     description: 'Get current URL and blocked/ready status for the Agentify Desktop window.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to inspect.'),
       key: z.string().optional().describe('Stable tab key to inspect.'),
       vendorId: z.string().optional().describe('Target vendor id to inspect.')
@@ -238,7 +238,7 @@ registerTool(
   {
     description: 'Break-glass stop for a running query/send on a tab. Best-effort: requests cancellation and clicks the provider stop button if visible.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to stop.'),
       key: z.string().optional().describe('Stable tab key to stop.'),
       vendorId: z.string().optional().describe('Target vendor id to stop.')
@@ -262,7 +262,7 @@ registerTool(
     description:
       'Generate images via ChatGPT web UI (best-effort): sends the prompt, then downloads any images from the latest assistant message to a local folder and returns file paths.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
       prompt: z.string().describe('Prompt to send to ChatGPT for image generation.'),
@@ -298,7 +298,7 @@ registerTool(
     description:
       'Download images from the latest assistant message (best-effort). Useful if you generated images manually in the UI or via agentify_query.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
       maxImages: z.number().optional().describe('Maximum images to download.')
@@ -512,7 +512,7 @@ registerTool(
     description:
       'Save the latest assistant-generated images/files from a tab to the local artifacts folder. Returns local paths you can reuse as attachments in the next prompt.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; uses the existing tab.'),
       mode: z.enum(['images', 'files', 'all']).optional().describe('What to save from the latest assistant response.'),
@@ -540,7 +540,7 @@ registerTool(
   {
     description: 'List locally saved artifacts for a tab/session so you can reuse their paths in later prompts.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to inspect.'),
       key: z.string().optional().describe('Stable tab key to inspect.'),
       limit: z.number().optional().describe('Maximum number of artifacts to return.')
@@ -566,7 +566,7 @@ registerTool(
   {
     description: 'Open the local artifacts folder in Finder/Explorer for the whole app or for a specific tab/session.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id whose artifacts folder should open.'),
       key: z.string().optional().describe('Stable tab key whose artifacts folder should open.')
     }
@@ -601,7 +601,7 @@ registerTool(
   {
     description: 'Create (or ensure) a tab/session for a given key.',
     inputSchema: {
-      model: z.string().optional().describe('Target model/provider hint (e.g., "chatgpt").'),
+      model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       key: z.string().optional(),
       name: z.string().optional(),
       projectUrl: z.string().optional().describe('ChatGPT Project URL. Routes conversations on this tab into the project.'),

@@ -11,6 +11,13 @@ function jitter(minMs, maxMs) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
 
+function clipText(value, max = 240) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3))}...`;
+}
+
 function blockedTitle(kind) {
   if (kind === 'login') return 'Needs sign-in';
   if (kind === 'captcha') return 'Needs CAPTCHA';
@@ -522,6 +529,7 @@ export class ChatGPTController {
     await this.#emitProgress({ phase: 'sending_prompt' });
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const stopSel = JSON.stringify(this.selectors.stopButton);
+    let lastSendDebug = null;
     const res = await this.#eval(`(() => {
       const stop = Array.from(document.querySelectorAll(${stopSel})).find((n) => {
         const r = n.getBoundingClientRect();
@@ -554,6 +562,26 @@ export class ChatGPTController {
           .replace(/\\s+/g, ' ')
           .trim()
           .toLowerCase();
+      const describeControl = (n) => {
+        if (!n) return null;
+        return {
+          label: labelOf(n) || null,
+          testId: n.getAttribute('data-testid') || null,
+          ariaLabel: n.getAttribute('aria-label') || null,
+          type: n.getAttribute('type') || null
+        };
+      };
+      const looksVoiceLike = (n) => {
+        const label = labelOf(n);
+        return (
+          /voice|microphone|mic|audio|dictat|transcrib|record|speak|listen|read aloud/.test(label) ||
+          n.matches('[data-testid*=\"voice\" i], [data-testid*=\"mic\" i], [data-testid*=\"audio\" i], [aria-label*=\"voice\" i], [aria-label*=\"microphone\" i], [aria-label*=\"audio\" i]')
+        );
+      };
+      const looksPositiveSend = (n) => {
+        const label = labelOf(n);
+        return n.matches(${sendSel}) || /send|submit|run|go|ask|reply/.test(label);
+      };
       const promptScore = (n) => {
         const r = n.getBoundingClientRect();
         const label = [
@@ -608,10 +636,15 @@ export class ChatGPTController {
         null;
       const promptRect = prompt ? prompt.getBoundingClientRect() : null;
       if (!prompt || promptLen <= 0) return { ok:false, error:'missing_staged_prompt', host };
+      const form = prompt?.closest('form') || null;
+      const submitter = form
+        ? Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n) && !looksVoiceLike(n))
+        : null;
       const score = (n) => {
         const r = n.getBoundingClientRect();
         const label = labelOf(n);
         let s = 0;
+        if (looksVoiceLike(n)) s -= 400;
         if (n.matches(${sendSel})) s += 120;
         if (/send|submit|run|go|ask|reply/.test(label)) s += 90;
         if (/stop|cancel|retry|signin|sign in|log in|google/.test(label)) s -= 140;
@@ -641,20 +674,26 @@ export class ChatGPTController {
       let best = -Infinity;
       for (const n of pool) {
         if (!visible(n) || disabled(n)) continue;
+        if (looksVoiceLike(n)) continue;
+        if (!looksPositiveSend(n)) continue;
         const s = score(n);
         if (s > best) {
           best = s;
           btn = n;
         }
       }
-      if (!btn) return { ok:true, fallbackEnter:true, requestSubmit: !!prompt?.closest('form'), host };
+      if (!btn) return { ok:true, fallbackEnter:true, requestSubmit: !!submitter, host, promptLen };
       const r = btn.getBoundingClientRect();
       return {
         ok:true,
         rect: { x: r.x, y: r.y, w: r.width, h: r.height },
-        requestSubmit: !!prompt?.closest('form'),
+        requestSubmit: !!submitter,
         host,
-        promptLen
+        promptLen,
+        button: describeControl(btn),
+        submitter: describeControl(submitter),
+        composerHasForm: !!form,
+        candidateCount: pool.length
       };
     })()`);
     if (!res?.ok) {
@@ -667,19 +706,123 @@ export class ChatGPTController {
       err.data = res;
       throw err;
     }
+    lastSendDebug = {
+      stage: 'choose_action',
+      host: String(res?.host || '') || null,
+      promptLen: Number.isFinite(res?.promptLen) ? res.promptLen : null,
+      fallbackEnter: !!res?.fallbackEnter,
+      requestSubmit: !!res?.requestSubmit,
+      candidateCount: Number.isFinite(res?.candidateCount) ? res.candidateCount : null,
+      composerHasForm: !!res?.composerHasForm,
+      button: res?.button || null,
+      submitter: res?.submitter || null
+    };
+    await this.#emitProgress({ sendDebug: lastSendDebug });
 
     let sent = false;
+    if (res?.requestSubmit) {
+      this.#throwIfStopRequested();
+      const submitted = await this.#eval(`(() => {
+        const visible = (n) => {
+          if (!n) return false;
+          const r = n.getBoundingClientRect();
+          const style = window.getComputedStyle(n);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const disabled = (n) => !!n.disabled || String(n.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const score = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
+        const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
+        const fallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
+        const uniq = [];
+        const seen = new Set();
+        for (const n of [...promptCandidates, ...fallback]) {
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          uniq.push(n);
+        }
+        let prompt = null;
+        let best = -Infinity;
+        for (const n of uniq) {
+          if (!editable(n)) continue;
+          const s = score(n);
+          if (s > best) {
+            best = s;
+            prompt = n;
+          }
+        }
+        const form = prompt?.closest?.('form') || null;
+        if (!form || typeof form.requestSubmit !== 'function') return false;
+        const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
+        if (!submitBtn) return false;
+        form.requestSubmit(submitBtn);
+        return true;
+      })()`);
+      lastSendDebug = {
+        ...lastSendDebug,
+        stage: 'request_submit',
+        submitted: !!submitted
+      };
+      await this.#emitProgress({ sendDebug: lastSendDebug });
+      sent = await this.#waitForSendSignal({ timeoutMs: 1800, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+      lastSendDebug = {
+        ...lastSendDebug,
+        stage: 'request_submit_result',
+        acknowledged: !!sent
+      };
+      await this.#emitProgress({ sendDebug: lastSendDebug });
+    }
+
     if (res?.rect?.w > 0 && res?.rect?.h > 0) {
       this.#throwIfStopRequested();
       const cx = Math.round(res.rect.x + res.rect.w / 2);
       const cy = Math.round(res.rect.y + res.rect.h / 2);
-      await this.#clickAt(cx, cy);
-      sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+      if (!sent) {
+        lastSendDebug = {
+          ...lastSendDebug,
+          stage: 'click_button',
+          click: { x: cx, y: cy },
+          button: res?.button || lastSendDebug?.button || null
+        };
+        await this.#emitProgress({ sendDebug: lastSendDebug });
+        await this.#clickAt(cx, cy);
+        sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+        lastSendDebug = {
+          ...lastSendDebug,
+          stage: 'click_result',
+          acknowledged: !!sent
+        };
+        await this.#emitProgress({ sendDebug: lastSendDebug });
+      }
     }
 
     if (!sent && !res?.fallbackEnter) {
       this.#throwIfStopRequested();
-      await this.#eval(`(() => {
+      const submitAttempt = await this.#eval(`(() => {
         const visible = (n) => {
           if (!n) return false;
           const r = n.getBoundingClientRect();
@@ -736,8 +879,10 @@ export class ChatGPTController {
         const form = prompt?.closest?.('form') || null;
         if (form && typeof form.requestSubmit === 'function') {
           const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
-          form.requestSubmit(submitBtn || undefined);
-          return true;
+          if (submitBtn) {
+            form.requestSubmit(submitBtn);
+            return true;
+          }
         }
         const submitBtn = form
           ? Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n))
@@ -748,7 +893,19 @@ export class ChatGPTController {
         }
         return false;
       })()`);
+      lastSendDebug = {
+        ...lastSendDebug,
+        stage: 'secondary_submit',
+        submitted: !!submitAttempt
+      };
+      await this.#emitProgress({ sendDebug: lastSendDebug });
       sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+      lastSendDebug = {
+        ...lastSendDebug,
+        stage: 'secondary_submit_result',
+        acknowledged: !!sent
+      };
+      await this.#emitProgress({ sendDebug: lastSendDebug });
     }
 
     if (!sent) {
@@ -768,18 +925,88 @@ export class ChatGPTController {
         combos.push(['Enter', ['alt']]);
       }
 
+      await this.#eval(`(() => {
+        const visible = (n) => {
+          if (!n) return false;
+          const r = n.getBoundingClientRect();
+          const style = window.getComputedStyle(n);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const score = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
+        const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
+        const fallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
+        const uniq = [];
+        const seen = new Set();
+        for (const n of [...promptCandidates, ...fallback]) {
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          uniq.push(n);
+        }
+        let prompt = null;
+        let best = -Infinity;
+        for (const n of uniq) {
+          if (!editable(n)) continue;
+          const s = score(n);
+          if (s > best) {
+            best = s;
+            prompt = n;
+          }
+        }
+        prompt?.focus?.();
+        return !!prompt;
+      })()`);
       for (const [key, modifiers] of combos) {
         this.#throwIfStopRequested();
+        lastSendDebug = {
+          ...lastSendDebug,
+          stage: 'keypress',
+          key,
+          modifiers
+        };
+        await this.#emitProgress({ sendDebug: lastSendDebug });
         await sleep(jitter(25, 90));
         await this.#sendKey(key, { modifiers });
         sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+        lastSendDebug = {
+          ...lastSendDebug,
+          stage: 'keypress_result',
+          key,
+          modifiers,
+          acknowledged: !!sent
+        };
+        await this.#emitProgress({ sendDebug: lastSendDebug });
         if (sent) break;
       }
     }
 
     if (!sent) {
       const err = new Error('send_not_triggered');
-      err.data = { host: res?.host || null };
+      err.data = { host: res?.host || null, sendDebug: lastSendDebug || null };
       throw err;
     }
   }
@@ -788,7 +1015,15 @@ export class ChatGPTController {
     if (!files?.length) return;
     await this.#emitProgress({ phase: 'uploading_files' });
     const absFiles = files.map((p) => path.resolve(p));
+    const expectedNames = absFiles.map((file) => path.basename(file));
     for (const f of absFiles) await fs.access(f);
+    await this.#emitProgress({
+      attachmentDebug: {
+        stage: 'prepare',
+        count: absFiles.length,
+        files: expectedNames
+      }
+    });
 
     // Read files into base64 for Blob-based injection.
     const fileData = await Promise.all(absFiles.map(async (f) => {
@@ -800,13 +1035,93 @@ export class ChatGPTController {
       return { name, mime, data: buf.toString('base64') };
     }));
 
-    // Click the paperclip/attach button to ensure file input exists.
-    await this.#eval(`(() => {
-      const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+    // Click the composer-scoped paperclip/attach button to ensure the right file input exists.
+    const attachOpen = await this.#eval(`(() => {
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const editable = (n) => {
+        if (!n) return false;
+        if (!visible(n)) return false;
+        if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+        if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+        return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+      };
+      const scorePrompt = (n) => {
+        const r = n.getBoundingClientRect();
+        const label = [
+          n.getAttribute('aria-label') || '',
+          n.getAttribute('placeholder') || '',
+          n.getAttribute('name') || '',
+          n.getAttribute('id') || '',
+          n.getAttribute('data-testid') || ''
+        ].join(' ').toLowerCase();
+        let s = 0;
+        if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+        if (n.matches('textarea')) s += 50;
+        if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+        if (n.getAttribute('role') === 'textbox') s += 25;
+        if (r.width >= 260 && r.height >= 26) s += 20;
+        s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+        s += Math.max(0, r.y / 8);
+        return s;
+      };
+      const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
+      const promptFallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
+      const promptPool = [];
+      const seenPrompt = new Set();
+      for (const n of [...promptCandidates, ...promptFallback]) {
+        if (!n || seenPrompt.has(n)) continue;
+        seenPrompt.add(n);
+        promptPool.push(n);
+      }
+      let prompt = null;
+      let bestPrompt = -Infinity;
+      for (const n of promptPool) {
+        if (!editable(n)) continue;
+        const s = scorePrompt(n);
+        if (s > bestPrompt) {
+          bestPrompt = s;
+          prompt = n;
+        }
+      }
+      const composerRoot =
+        prompt?.closest('form') ||
+        prompt?.closest('[data-testid*=\"composer\" i], [data-testid*=\"prompt\" i], [data-testid*=\"chat-input\" i], [aria-label*=\"message\" i], [aria-label*=\"prompt\" i]') ||
+        prompt?.closest('main') ||
+        document.body;
+      const candidates = Array.from((composerRoot || document).querySelectorAll('button, [role="button"]'));
       const attach = candidates.find(b => /attach|upload|paperclip/i.test((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||'')));
-      if (attach) attach.click();
-      return true;
+      if (attach) {
+        attach.click();
+        return {
+          ok: true,
+          source: 'composer',
+          label: ((attach.getAttribute('aria-label') || '') + ' ' + (attach.textContent || '')).trim() || null
+        };
+      }
+      const globalCandidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const fallbackAttach = globalCandidates.find(b => /attach|upload|paperclip/i.test((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||'')));
+      if (fallbackAttach) {
+        fallbackAttach.click();
+        return {
+          ok: true,
+          source: 'global',
+          label: ((fallbackAttach.getAttribute('aria-label') || '') + ' ' + (fallbackAttach.textContent || '')).trim() || null
+        };
+      }
+      return { ok: false, source: 'none', label: null };
     })()`);
+    await this.#emitProgress({
+      attachmentDebug: {
+        stage: 'open_picker',
+        source: attachOpen?.source || 'unknown',
+        buttonLabel: clipText(attachOpen?.label || '')
+      }
+    });
     await sleep(300);
 
     // Inject files as Blobs via DataTransfer — this creates real File objects that
@@ -819,8 +1134,64 @@ export class ChatGPTController {
         const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
         dt.items.add(new File([bytes], name, { type: mime, lastModified: Date.now() }));
       }
-      // Find the most recently added file input (closest to the composer)
-      const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const editable = (n) => {
+        if (!n) return false;
+        if (!visible(n)) return false;
+        if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+        if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+        return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+      };
+      const scorePrompt = (n) => {
+        const r = n.getBoundingClientRect();
+        const label = [
+          n.getAttribute('aria-label') || '',
+          n.getAttribute('placeholder') || '',
+          n.getAttribute('name') || '',
+          n.getAttribute('id') || '',
+          n.getAttribute('data-testid') || ''
+        ].join(' ').toLowerCase();
+        let s = 0;
+        if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+        if (n.matches('textarea')) s += 50;
+        if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+        if (n.getAttribute('role') === 'textbox') s += 25;
+        if (r.width >= 260 && r.height >= 26) s += 20;
+        s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+        s += Math.max(0, r.y / 8);
+        return s;
+      };
+      const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
+      const promptFallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
+      const promptPool = [];
+      const seenPrompt = new Set();
+      for (const n of [...promptCandidates, ...promptFallback]) {
+        if (!n || seenPrompt.has(n)) continue;
+        seenPrompt.add(n);
+        promptPool.push(n);
+      }
+      let prompt = null;
+      let bestPrompt = -Infinity;
+      for (const n of promptPool) {
+        if (!editable(n)) continue;
+        const s = scorePrompt(n);
+        if (s > bestPrompt) {
+          bestPrompt = s;
+          prompt = n;
+        }
+      }
+      const composerRoot =
+        prompt?.closest('form') ||
+        prompt?.closest('[data-testid*=\"composer\" i], [data-testid*=\"prompt\" i], [data-testid*=\"chat-input\" i], [aria-label*=\"message\" i], [aria-label*=\"prompt\" i]') ||
+        prompt?.closest('main') ||
+        document.body;
+      const localInputs = Array.from((composerRoot || document).querySelectorAll('input[type="file"]'));
+      const inputs = localInputs.length ? localInputs : Array.from(document.querySelectorAll('input[type="file"]'));
       const input = inputs[inputs.length - 1];
       if (!input) return { ok: false, error: 'no_file_input' };
       // Use Object.defineProperty to set files (direct assignment blocked on some browsers)
@@ -836,49 +1207,216 @@ export class ChatGPTController {
       }
       input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
       input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-      return { ok: true, count: dt.files.length };
+      return {
+        ok: true,
+        count: dt.files.length,
+        inputSource: localInputs.length ? 'composer' : 'global',
+        localInputCount: localInputs.length,
+        totalInputCount: inputs.length
+      };
     })()`);
+    await this.#emitProgress({
+      attachmentDebug: {
+        stage: 'inject_files',
+        ok: !!injected?.ok,
+        inputSource: injected?.inputSource || (injected?.ok ? 'unknown' : 'none'),
+        localInputCount: Number.isFinite(injected?.localInputCount) ? injected.localInputCount : null,
+        totalInputCount: Number.isFinite(injected?.totalInputCount) ? injected.totalInputCount : null,
+        injectedCount: Number.isFinite(injected?.count) ? injected.count : null,
+        fallbackToCdp: !injected?.ok
+      }
+    });
 
     // Fallback to CDP setFileInputFiles if Blob injection didn't find an input
     if (!injected?.ok) {
       await this.page.setFileInputFiles(absFiles);
+      await this.#emitProgress({
+        attachmentDebug: {
+          stage: 'inject_files',
+          ok: true,
+          inputSource: 'cdp_fallback',
+          localInputCount: null,
+          totalInputCount: null,
+          injectedCount: absFiles.length,
+          fallbackToCdp: true
+        }
+      });
     }
 
     // Wait for file upload to complete or detect/dismiss error dialogs.
     const sendSel = JSON.stringify(this.selectors.sendButton);
+    const expectedNamesJson = JSON.stringify(expectedNames);
     const deadline = Date.now() + 30_000;
+    let lastStatus = null;
+    let lastUploadSig = null;
     while (Date.now() < deadline) {
       this.#throwIfStopRequested();
       await sleep(500);
       const status = await this.#eval(`(() => {
-        // Dismiss "already uploaded" or other error dialogs
-        const dialogBtn = Array.from(document.querySelectorAll('button')).find(b => {
-          const txt = (b.textContent || '').trim().toLowerCase();
-          return txt === 'ok' || txt === 'dismiss' || txt === 'got it';
-        });
-        const hasDialog = !!document.querySelector('[role="dialog"], [role="alertdialog"], [data-testid*="modal"]');
-        if (hasDialog && dialogBtn) {
-          dialogBtn.click();
-          return { dismissed: true };
-        }
-        // Check if send button is present and enabled
-        const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
+        const visible = (n) => {
+          if (!n) return false;
           const r = n.getBoundingClientRect();
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const scorePrompt = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
+        const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
+        const promptFallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
+        const promptPool = [];
+        const seenPrompt = new Set();
+        for (const n of [...promptCandidates, ...promptFallback]) {
+          if (!n || seenPrompt.has(n)) continue;
+          seenPrompt.add(n);
+          promptPool.push(n);
+        }
+        let prompt = null;
+        let bestPrompt = -Infinity;
+        for (const n of promptPool) {
+          if (!editable(n)) continue;
+          const s = scorePrompt(n);
+          if (s > bestPrompt) {
+            bestPrompt = s;
+            prompt = n;
+          }
+        }
+        const composerRoot =
+          prompt?.closest('form') ||
+          prompt?.closest('[data-testid*=\"composer\" i], [data-testid*=\"prompt\" i], [data-testid*=\"chat-input\" i], [aria-label*=\"message\" i], [aria-label*=\"prompt\" i]') ||
+          prompt?.closest('main') ||
+          document.body;
+
+        // Dismiss "already uploaded" or other error dialogs.
+        const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], [data-testid*="modal"]');
+        const dialogText = (dialog?.innerText || '').trim();
+        const dialogBtn = Array.from((dialog || document).querySelectorAll('button, [role="button"]')).find(b => {
+          const txt = (b.textContent || '').trim().toLowerCase();
+          return txt === 'ok' || txt === 'dismiss' || txt === 'got it';
         });
-        return { done: send ? !send.disabled : false };
+        if (dialog && dialogBtn) {
+          dialogBtn.click();
+          return { dismissed: true, dialogText, pending: false, pendingText: '', chipCount: 0, done: false };
+        }
+
+        const root = composerRoot || document;
+        const send = Array.from(root.querySelectorAll(${sendSel})).find(visible) || Array.from(document.querySelectorAll(${sendSel})).find(visible);
+        const sendReady = send ? !send.disabled : false;
+        const expectedNames = ${expectedNamesJson};
+        const attachmentNodes = Array.from(root.querySelectorAll('[data-testid*="attachment" i], [data-testid*="file" i], [data-testid*="upload" i], [role="progressbar"], progress'));
+        const attachmentControlNodes = Array.from(root.querySelectorAll(
+          '[aria-label*="remove" i], [aria-label*="delete" i], [data-testid*="attachment" i] button, [data-testid*="file" i] button'
+        )).filter(visible);
+        const liveNodes = Array.from(root.querySelectorAll('[role="status"], [aria-live], [data-testid*="upload" i], [aria-label*="upload" i], [class*="upload" i], [class*="progress" i]'));
+        const attachmentText = attachmentNodes
+          .map((n) => (n?.innerText || n?.textContent || '').trim())
+          .filter(Boolean)
+          .join(' ');
+        const pendingText = [...attachmentNodes, ...liveNodes]
+          .map((n) => (n?.innerText || n?.textContent || '').trim())
+          .filter(Boolean)
+          .join(' ');
+        const pending = /upload|processing|analyz|pending|scanning|\b\d{1,3}%\b/i.test(pendingText);
+        const errorText = /already uploaded|upload failed|failed to upload|couldn't upload|unsupported|too large|too many files/i.test(pendingText) ? pendingText : '';
+        const chipCount = attachmentNodes.length;
+        const attachmentControlCount = attachmentControlNodes.length;
+        const matchedNames = expectedNames.filter((name) => attachmentText.includes(name));
+        const done = !pending && (
+          matchedNames.length >= expectedNames.length ||
+          attachmentControlCount >= expectedNames.length
+        );
+        return { dismissed: false, done, pending, pendingText, dialogText, chipCount, attachmentControlCount, errorText, matchedNames };
       })()`);
+      lastStatus = status;
+      const uploadSig = JSON.stringify({
+        dismissed: !!status?.dismissed,
+        done: !!status?.done,
+        pending: !!status?.pending,
+        pendingText: clipText(status?.pendingText || '', 160),
+        dialogText: clipText(status?.dialogText || '', 160),
+        chipCount: Number.isFinite(status?.chipCount) ? status.chipCount : null,
+        attachmentControlCount: Number.isFinite(status?.attachmentControlCount) ? status.attachmentControlCount : null,
+        errorText: clipText(status?.errorText || '', 160),
+        matchedNames: Array.isArray(status?.matchedNames) ? status.matchedNames : []
+      });
+      if (uploadSig !== lastUploadSig) {
+        lastUploadSig = uploadSig;
+        await this.#emitProgress({
+          attachmentDebug: {
+            stage: 'wait_upload',
+            dismissed: !!status?.dismissed,
+            done: !!status?.done,
+            pending: !!status?.pending,
+            pendingText: clipText(status?.pendingText || '', 160) || null,
+            dialogText: clipText(status?.dialogText || '', 160) || null,
+            chipCount: Number.isFinite(status?.chipCount) ? status.chipCount : null,
+            attachmentControlCount: Number.isFinite(status?.attachmentControlCount) ? status.attachmentControlCount : null,
+            errorText: clipText(status?.errorText || '', 160) || null,
+            matchedNames: Array.isArray(status?.matchedNames) ? status.matchedNames : []
+          }
+        });
+      }
       if (status?.dismissed) {
         await this.#eval(`(() => {
           const closeBtn = document.querySelector('[aria-label*="Remove" i], [aria-label*="Delete" i], [data-testid*="attachment"] [role="button"], [data-testid*="file"] button');
           if (closeBtn) closeBtn.click();
         })()`);
         await sleep(300);
-        break;
+        const err = new Error('attachment_upload_failed');
+        err.data = { reason: 'dialog', detail: clipText(status?.dialogText || '', 160) || null };
+        throw err;
       }
-      if (status?.done) break;
+      if (status?.errorText) {
+        const err = new Error('attachment_upload_failed');
+        err.data = { reason: 'upload_error', detail: clipText(status.errorText, 160) };
+        throw err;
+      }
+      if (status?.done) {
+        await this.#emitProgress({
+          attachmentDebug: {
+            stage: 'upload_done',
+            pending: false,
+            chipCount: Number.isFinite(status?.chipCount) ? status.chipCount : null,
+            attachmentControlCount: Number.isFinite(status?.attachmentControlCount) ? status.attachmentControlCount : null,
+            pendingText: clipText(status?.pendingText || '', 160) || null,
+            matchedNames: Array.isArray(status?.matchedNames) ? status.matchedNames : []
+          }
+        });
+        return;
+      }
     }
+    const err = new Error('attachment_upload_stalled');
+    err.data = {
+      pending: !!lastStatus?.pending,
+      pendingText: clipText(lastStatus?.pendingText || '', 160) || null,
+      chipCount: Number.isFinite(lastStatus?.chipCount) ? lastStatus.chipCount : null,
+      attachmentControlCount: Number.isFinite(lastStatus?.attachmentControlCount) ? lastStatus.attachmentControlCount : null,
+      matchedNames: Array.isArray(lastStatus?.matchedNames) ? lastStatus.matchedNames : []
+    };
+    throw err;
   }
 
   async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, preSendCount = 0, preSendText = '', preSendPageText = '' } = {}) {

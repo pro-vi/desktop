@@ -70,6 +70,8 @@ function mapErrorToHttp(error) {
   if (msg === 'watch_folder_cannot_be_filesystem_root') return { code: 400, body: { error: 'watch_folder_cannot_be_filesystem_root' } };
   if (msg === 'watch_folder_not_found') return { code: 404, body: { error: 'watch_folder_not_found' } };
   if (msg === 'prompt_too_large') return { code: 400, body: { error: 'prompt_too_large' } };
+  if (msg === 'attachment_upload_failed') return { code: 409, body: { error: 'attachment_upload_failed', data: error?.data || null } };
+  if (msg === 'attachment_upload_stalled') return { code: 409, body: { error: 'attachment_upload_stalled', data: error?.data || null } };
   if (msg === 'missing_staged_prompt') return { code: 409, body: { error: 'missing_staged_prompt', data: error?.data || null } };
   if (msg === 'send_not_triggered') return { code: 409, body: { error: 'send_not_triggered', data: error?.data || null } };
   if (msg === 'missing_tabId') return { code: 400, body: { error: 'missing_tabId' } };
@@ -591,6 +593,24 @@ export function startHttpApi({
         conversationUrl: detail?.conversationUrl || null
       };
     }
+    if (message === 'attachment_upload_failed') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Attachment rejected',
+        detail: detail?.detail ? `The provider rejected the attachment: ${detail.detail}` : 'The provider rejected the attachment before send.',
+        attachmentDebug: detail || null
+      };
+    }
+    if (message === 'attachment_upload_stalled') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Attachment stalled',
+        detail: detail?.pendingText ? `Attachment never finished uploading: ${detail.pendingText}` : 'Attachment never finished uploading.',
+        attachmentDebug: detail || null
+      };
+    }
     if (message === 'missing_staged_prompt') {
       return {
         ...base,
@@ -604,7 +624,8 @@ export function startHttpApi({
         ...base,
         status: 'error',
         label: 'Prompt not sent',
-        detail: 'The provider UI never acknowledged the send action.'
+        detail: 'The provider UI never acknowledged the send action.',
+        sendDebug: detail?.sendDebug || null
       };
     }
     if (message === 'rate_limited') {
