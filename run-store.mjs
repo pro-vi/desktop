@@ -72,7 +72,8 @@ function normalizeRun(input = {}) {
     logicalRequest: normalizeObject(input.logicalRequest),
     materializedReplay: normalizeObject(input.materializedReplay),
     packedContextSummary: normalizeObject(input.packedContextSummary),
-    packedContextBudget: normalizeObject(input.packedContextBudget)
+    packedContextBudget: normalizeObject(input.packedContextBudget),
+    researchMeta: normalizeObject(input.researchMeta)
   };
 }
 
@@ -86,7 +87,26 @@ function toSummary(run) {
   const record = normalizeRun(run);
   delete record.logicalRequest;
   delete record.materializedReplay;
+  delete record.researchMeta;
   return record;
+}
+
+function mergeResearchMeta(current, patchData) {
+  const currentMeta = normalizeObject(current?.researchMeta);
+  const nextMeta = normalizeObject(patchData?.researchMeta);
+  if (!nextMeta) return currentMeta;
+  return {
+    ...(currentMeta || {}),
+    ...nextMeta,
+    activation: {
+      ...((currentMeta && currentMeta.activation) || {}),
+      ...((nextMeta && nextMeta.activation) || {})
+    },
+    outputManifest: {
+      ...((currentMeta && currentMeta.outputManifest) || {}),
+      ...((nextMeta && nextMeta.outputManifest) || {})
+    }
+  };
 }
 
 export function createRunStore(stateDir, { writeFile = atomicWriteFile } = {}) {
@@ -150,6 +170,7 @@ export function createRunStore(stateDir, { writeFile = atomicWriteFile } = {}) {
       const next = normalizeRun({
         ...current,
         ...(patchData || {}),
+        researchMeta: mergeResearchMeta(current, patchData),
         id,
         startedAt: current.startedAt,
         updatedAt: Date.now()
@@ -168,6 +189,7 @@ export function createRunStore(stateDir, { writeFile = atomicWriteFile } = {}) {
       const next = normalizeRun({
         ...current,
         ...(patchData || {}),
+        researchMeta: mergeResearchMeta(current, patchData),
         id,
         finishedAt,
         updatedAt: finishedAt,

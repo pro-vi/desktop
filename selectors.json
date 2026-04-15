@@ -3,5 +3,15 @@
   "sendButton": "button[data-testid=\"send-button\"], button[data-testid*=\"send\" i], button[data-testid*=\"submit\" i], button[aria-label=\"Send prompt\"], button[aria-label=\"Send\"], button[aria-label*=\"send message\" i], button[aria-label*=\"submit\" i], button[aria-label*=\"run\" i], button[title*=\"run\" i], button[type=\"submit\"], [role=\"button\"][aria-label*=\"send\" i], [role=\"button\"][aria-label*=\"run\" i]",
   "stopButton": "button[data-testid=\"stop-button\"], button[data-testid*=\"stop\" i], button[aria-label=\"Stop generating\"], button[aria-label=\"Stop\"], button[aria-label*=\"stop response\" i], button[aria-label*=\"cancel\" i]",
   "assistantMessage": "[data-message-author-role=\"assistant\"], model-response, .model-response-text, [data-test-id=\"model-response\"], [data-response-author=\"model\"], article[data-testid*=\"answer\" i], [data-testid*=\"assistant\" i], [data-testid=\"chat-message\"], [data-is-assistant=\"true\"]",
-  "composerRoot": "form, main"
+  "composerRoot": "form, main",
+  "composerMenuButton": "button[data-testid=\"composer-plus-btn\"], button#composer-plus-btn, button[aria-label*=\"files and more\" i], [role=\"button\"][aria-label*=\"files and more\" i]",
+  "composerMenu": "[role=\"menu\"], [role=\"listbox\"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]",
+  "composerMenuItem": "[role=\"menuitem\"], [role=\"option\"], [data-radix-collection-item]",
+  "researchModeButton": "button[aria-label*=\"research\" i], button[title*=\"research\" i], button[data-testid*=\"tool\" i], button[data-testid*=\"research\" i], [role=\"button\"][aria-label*=\"research\" i], [role=\"button\"][aria-label*=\"tools\" i]",
+  "researchModeMenu": "[role=\"menu\"], [role=\"listbox\"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state]",
+  "researchModeOption": "button[aria-label*=\"deep research\" i], [role=\"button\"][aria-label*=\"deep research\" i], [role=\"menuitem\"][aria-label*=\"deep research\" i], [role=\"option\"][aria-label*=\"deep research\" i], [data-testid*=\"deep-research\" i]",
+  "researchModeActive": "[aria-pressed=\"true\"][aria-label*=\"deep research\" i], [aria-checked=\"true\"][aria-label*=\"deep research\" i], [aria-selected=\"true\"][aria-label*=\"deep research\" i], [data-state=\"active\"][aria-label*=\"deep research\" i], [data-state=\"on\"][aria-label*=\"deep research\" i]",
+  "researchExportButton": "button[aria-label=\"Export\"][aria-haspopup=\"menu\"], button[aria-label*=\"export\" i][aria-haspopup=\"menu\"], button[aria-label*=\"export\" i][aria-expanded], button[aria-label*=\"export\" i], button[title*=\"export\" i], button[aria-label*=\"download\" i], button[title*=\"download\" i], [role=\"button\"][aria-label*=\"export\" i], [role=\"button\"][aria-label*=\"download\" i], [data-testid*=\"export\" i], [data-testid*=\"download\" i]",
+  "researchExportMenu": "[role=\"menu\"], [role=\"listbox\"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state]",
+  "researchExportMarkdownOption": "button[aria-label*=\"markdown\" i], [role=\"button\"][aria-label*=\"markdown\" i], [role=\"menuitem\"][aria-label*=\"markdown\" i], [role=\"option\"][aria-label*=\"markdown\" i], a[download$=\".md\" i], [data-testid*=\"markdown\" i]"
 }

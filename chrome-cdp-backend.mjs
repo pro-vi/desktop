@@ -303,6 +303,28 @@ class ChromeCdpPageAdapter {
     this.minimized = false;
   }
 
+  async #withDeepResearchTarget(fn) {
+    const targets = await this.client.send('Target.getTargets').catch(() => null);
+    const matches = (targets?.targetInfos || []).filter((target) =>
+      /connector_openai_deep_research\.web-sandbox\.oaiusercontent\.com/i.test(String(target?.url || ''))
+    );
+    const info = matches.find((target) => String(target?.parentId || '').trim() === this.targetId)
+      || (matches.length === 1 ? matches[0] : null);
+    const targetId = String(info?.targetId || '').trim();
+    if (!targetId) return null;
+
+    const attach = await this.client.send('Target.attachToTarget', { targetId, flatten: true }).catch(() => null);
+    const childSessionId = String(attach?.sessionId || '').trim();
+    if (!childSessionId) return null;
+    try {
+      await this.client.send('Page.enable', {}, childSessionId).catch(() => {});
+      await this.client.send('Runtime.enable', {}, childSessionId).catch(() => {});
+      return await fn(childSessionId, info);
+    } finally {
+      await this.client.send('Target.detachFromTarget', { sessionId: childSessionId }).catch(() => {});
+    }
+  }
+
   markClosed() {
     this.closed = true;
   }
@@ -346,6 +368,21 @@ class ChromeCdpPageAdapter {
       this.sessionId
     );
     return result?.result?.value;
+  }
+
+  async evaluateDeepResearch(js) {
+    return await this.#withDeepResearchTarget(async (childSessionId) => {
+      const result = await this.client.send(
+        'Runtime.evaluate',
+        {
+          expression: String(js || ''),
+          awaitPromise: true,
+          returnByValue: true
+        },
+        childSessionId
+      );
+      return result?.result?.value;
+    });
   }
 
   async getUrl() {
@@ -396,6 +433,129 @@ class ChromeCdpPageAdapter {
 
   async mouseUp(x, y, { button = 'left', clickCount = 1 } = {}) {
     await this.client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount }, this.sessionId);
+  }
+
+  async waitForDownload({ timeoutMs = 15_000, outDir } = {}) {
+    const targetDir = String(outDir || '').trim();
+    if (!targetDir) return null;
+    await fs.mkdir(targetDir, { recursive: true });
+
+    const startedAt = Date.now();
+    const beforeNames = new Set(await fs.readdir(targetDir).catch(() => []));
+    const findDownloadedFile = async (suggestedName = null) => {
+      if (suggestedName) {
+        const exactPath = path.join(targetDir, suggestedName);
+        try {
+          await fs.access(exactPath);
+          return exactPath;
+        } catch {}
+      }
+
+      const rows = await fs.readdir(targetDir, { withFileTypes: true }).catch(() => []);
+      const candidates = [];
+      for (const row of rows) {
+        if (!row?.isFile?.()) continue;
+        const filePath = path.join(targetDir, row.name);
+        let stat = null;
+        try {
+          stat = await fs.stat(filePath);
+        } catch {
+          continue;
+        }
+        if (!beforeNames.has(row.name) || Number(stat?.mtimeMs || 0) >= startedAt - 1_000) {
+          candidates.push({ filePath, mtimeMs: Number(stat?.mtimeMs || 0) });
+        }
+      }
+      candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      return candidates[0]?.filePath || null;
+    };
+
+    let behaviorConfigured = true;
+    try {
+      await this.client.send('Browser.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: targetDir,
+        eventsEnabled: true
+      });
+    } catch {
+      behaviorConfigured = false;
+      try {
+        await this.client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: targetDir }, this.sessionId);
+      } catch {}
+    }
+
+    if (!behaviorConfigured) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const filePath = await findDownloadedFile(null);
+        if (filePath) {
+          return {
+            path: filePath,
+            name: path.basename(filePath),
+            mime: null,
+            source: null
+          };
+        }
+        await sleep(200);
+      }
+      return null;
+    }
+
+    return await new Promise((resolve) => {
+      let guid = null;
+      let suggestedFilename = null;
+      let sourceUrl = null;
+      let timer = null;
+
+      const cleanup = () => {
+        try { offBegin?.(); } catch {}
+        try { offProgress?.(); } catch {}
+        if (timer) clearTimeout(timer);
+      };
+
+      const finish = async (state) => {
+        cleanup();
+        if (state && state !== 'completed') {
+          resolve(null);
+          return;
+        }
+        await sleep(150);
+        const filePath = await findDownloadedFile(suggestedFilename);
+        if (!filePath) {
+          resolve(null);
+          return;
+        }
+        resolve({
+          path: filePath,
+          name: path.basename(filePath),
+          mime: null,
+          source: sourceUrl
+        });
+      };
+
+      const offBegin = this.client.on('Browser.downloadWillBegin', (params) => {
+        if (guid) return;
+        guid = String(params?.guid || '').trim() || guid;
+        suggestedFilename = String(params?.suggestedFilename || '').trim() || suggestedFilename;
+        sourceUrl = String(params?.url || '').trim() || sourceUrl;
+      });
+
+      const offProgress = this.client.on('Browser.downloadProgress', (params) => {
+        const eventGuid = String(params?.guid || '').trim();
+        if (guid && eventGuid && eventGuid !== guid) return;
+        if (!guid && eventGuid) guid = eventGuid;
+        const state = String(params?.state || '').trim().toLowerCase();
+        if (state === 'completed') {
+          void finish('completed');
+        } else if (state === 'canceled' || state === 'interrupted') {
+          void finish(state);
+        }
+      });
+
+      timer = setTimeout(() => {
+        void finish('timeout');
+      }, Math.max(1, Number(timeoutMs) || 0));
+    });
   }
 
   async setFileInputFiles(files) {

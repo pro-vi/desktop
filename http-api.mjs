@@ -4,7 +4,14 @@ import path from 'node:path';
 import { URL } from 'node:url';
 import crypto from 'node:crypto';
 import { writeToken, readProjects, writeProjects } from './state.mjs';
-import { ensureArtifactsDir, listArtifacts, registerArtifact, artifactsRoot } from './artifact-store.mjs';
+import {
+  ensureArtifactsDir,
+  ensureRunArtifactsDir,
+  listArtifacts,
+  registerArtifact,
+  artifactsRoot,
+  assertArtifactFileReady
+} from './artifact-store.mjs';
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
@@ -92,6 +99,8 @@ function mapErrorToHttp(error) {
   if (msg === 'timeout_waiting_for_response') return { code: 408, body: { error: 'timeout_waiting_for_response', data: error?.data || null } };
   if (msg === 'artifacts_folder_open_failed') return { code: 500, body: { error: 'artifacts_folder_open_failed', data: error?.data || null } };
   if (msg === 'artifact_save_failed') return { code: 500, body: { error: 'artifact_save_failed', data: error?.data || null } };
+  if (msg === 'research_requires_chatgpt') return { code: 409, body: { error: 'research_requires_chatgpt', data: error?.data || null } };
+  if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   return null;
 }
 
@@ -153,11 +162,16 @@ function normalizeVendorToken(value) {
     .replace(/[^a-z0-9]+/g, '');
 }
 
+function builtinChatGPTVendor() {
+  return { id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/' };
+}
+
 function resolveVendor({ body, vendors = [] } = {}) {
   const raw = String(body?.vendorId || body?.model || '').trim();
   if (!raw) return null;
   const token = normalizeVendorToken(raw);
   const rows = Array.isArray(vendors) ? vendors : [];
+  if (!rows.length && token === 'chatgpt') return builtinChatGPTVendor();
   const found = rows.find((item) => {
     const id = normalizeVendorToken(item?.id || '');
     const name = normalizeVendorToken(item?.name || '');
@@ -173,7 +187,7 @@ function resolveVendor({ body, vendors = [] } = {}) {
 
 function defaultVendor(vendors = []) {
   const rows = Array.isArray(vendors) ? vendors : [];
-  return rows.find((item) => String(item?.id || '').trim() === 'chatgpt') || rows[0] || null;
+  return rows.find((item) => String(item?.id || '').trim() === 'chatgpt') || rows[0] || builtinChatGPTVendor();
 }
 
 function listedTabMatchesVendor(tab, vendor) {
@@ -293,6 +307,140 @@ function contextBudgetForVendor(vendorId) {
   return presets[key] || presets.chatgpt;
 }
 
+function defaultResearchMeta({ tabId = null, outputDir = null } = {}) {
+  return {
+    activation: {
+      requested: true,
+      activated: false,
+      error: null,
+      tabId: tabId || null,
+      conversationUrl: null,
+      debug: null
+    },
+    outputManifest: {
+      dir: outputDir || null,
+      responsePath: null,
+      exportedMarkdownPath: null,
+      files: []
+    }
+  };
+}
+
+function cloneResearchMeta(researchMeta, { tabId = null, outputDir = null } = {}) {
+  const base = defaultResearchMeta({ tabId, outputDir });
+  if (!researchMeta || typeof researchMeta !== 'object' || Array.isArray(researchMeta)) return base;
+  const activationInput = researchMeta.activation && typeof researchMeta.activation === 'object' ? researchMeta.activation : {};
+  const outputInput = researchMeta.outputManifest && typeof researchMeta.outputManifest === 'object' ? researchMeta.outputManifest : {};
+  return {
+    activation: {
+      requested: activationInput.requested !== false,
+      activated: !!activationInput.activated,
+      error: activationInput.error ? String(activationInput.error) : null,
+      tabId: String(activationInput.tabId || tabId || '').trim() || null,
+      conversationUrl: String(activationInput.conversationUrl || '').trim() || null,
+      debug: activationInput.debug && typeof activationInput.debug === 'object'
+        ? JSON.parse(JSON.stringify(activationInput.debug))
+        : null
+    },
+    outputManifest: {
+      dir: String(outputInput.dir || outputDir || '').trim() || null,
+      responsePath: String(outputInput.responsePath || '').trim() || null,
+      exportedMarkdownPath: String(outputInput.exportedMarkdownPath || '').trim() || null,
+      files: Array.isArray(outputInput.files)
+        ? outputInput.files
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => ({ ...item }))
+        : []
+    }
+  };
+}
+
+function responseMarkdownContent(text) {
+  const body = String(text || '');
+  return body.endsWith('\n') ? body : `${body}\n`;
+}
+
+function looksLikeResearchPlaceholder(text) {
+  const raw = String(text || '');
+  const compact = raw.replace(/\u0000/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!compact) return true;
+  const hasChromeTabs = /\bdeep research\b/.test(compact) && /\bapps\b/.test(compact) && /\bsites\b/.test(compact);
+  const hasFooter = /chatgpt can make mistakes\.?\s*check important info\.?/.test(compact);
+  const hasTranscript = /\byou said:\b/.test(compact) && /\bchatgpt said:\b/.test(compact);
+  return (hasChromeTabs || hasTranscript) && hasFooter && compact.length <= 700;
+}
+
+async function writeResearchResponseFile({ outDir, text }) {
+  await fs.mkdir(outDir, { recursive: true });
+  const responsePath = path.join(outDir, 'response.md');
+  await fs.writeFile(responsePath, responseMarkdownContent(text), 'utf8');
+  return responsePath;
+}
+
+async function collectRegisteredArtifacts({
+  stateDir,
+  tabId,
+  tabKey = null,
+  vendorId = null,
+  runId = null,
+  outDir,
+  candidates = []
+}) {
+  const realOutDir = await fs.realpath(outDir);
+  const prepared = [];
+  for (const item of Array.isArray(candidates) ? candidates : []) {
+    if (!item || typeof item !== 'object') continue;
+    const rawPath = String(item.filePath || '').trim();
+    if (!rawPath) {
+      const err = new Error('artifact_save_failed');
+      err.data = { reason: 'missing_artifact_path', kind: item?.kind || null };
+      throw err;
+    }
+    let ready = null;
+    try {
+      ready = await assertArtifactFileReady(rawPath);
+    } catch (error) {
+      const err = new Error('artifact_save_failed');
+      err.data = { reason: String(error?.message || 'artifact_invalid'), kind: item?.kind || null, filePath: path.resolve(rawPath) };
+      throw err;
+    }
+    try {
+      assertWithin({ filePath: ready.realFilePath || ready.filePath, allowedRoots: [realOutDir] });
+    } catch (error) {
+      if (String(error?.message || '') === 'path_not_allowed') {
+        const err = new Error('artifact_save_failed');
+        err.data = { reason: 'artifact_outside_output_dir', kind: item?.kind || null, filePath: ready.filePath, outDir };
+        throw err;
+      }
+      throw error;
+    }
+    prepared.push({
+      ...item,
+      readyFilePath: ready.filePath
+    });
+  }
+  const saved = [];
+  for (const item of prepared) {
+    const record = await registerArtifact({
+      stateDir,
+      tabId,
+      tabKey,
+      vendorId,
+      kind: item.kind || 'file',
+      filePath: item.readyFilePath,
+      originalName: item.originalName || null,
+      mime: item.mime || null,
+      source: item.source || null,
+      meta: {
+        ...(item.meta && typeof item.meta === 'object' ? item.meta : {}),
+        runId: runId || null
+      }
+    });
+    saved.push(record);
+  }
+  return saved;
+}
+
 async function saveArtifactsForTab({
   stateDir,
   tabs,
@@ -346,74 +494,66 @@ async function saveArtifactsForTab({
     }
   }
 
-  for (const item of candidates) {
-    if (!String(item?.filePath || '').trim()) {
-      const err = new Error('artifact_save_failed');
-      err.data = { reason: 'missing_artifact_path', kind: item?.kind || null };
-      throw err;
-    }
-    const filePath = path.resolve(String(item.filePath).trim());
-    let stat = null;
-    let realFilePath = null;
-    try {
-      stat = await fs.lstat(filePath);
-      if (!stat.isSymbolicLink()) {
-        realFilePath = await fs.realpath(filePath);
-      }
-    } catch (error) {
-      if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
-        const err = new Error('artifact_save_failed');
-        err.data = { reason: 'missing_artifact_file', kind: item?.kind || null, filePath };
-        throw err;
-      }
-      throw error;
-    }
-    if (stat.isSymbolicLink()) {
-      const err = new Error('artifact_save_failed');
-      err.data = { reason: 'artifact_symlink_not_allowed', kind: item?.kind || null, filePath };
-      throw err;
-    }
-    if (!stat.isFile()) {
-      const err = new Error('artifact_save_failed');
-      err.data = { reason: 'artifact_path_not_file', kind: item?.kind || null, filePath };
-      throw err;
-    }
-    if (Number(stat.nlink || 1) > 1) {
-      const err = new Error('artifact_save_failed');
-      err.data = { reason: 'artifact_link_count_not_allowed', kind: item?.kind || null, filePath };
-      throw err;
-    }
-    try {
-      assertWithin({ filePath: realFilePath || filePath, allowedRoots: [realOutDir] });
-    } catch (error) {
-      if (String(error?.message || '') === 'path_not_allowed') {
-        const err = new Error('artifact_save_failed');
-        err.data = { reason: 'artifact_outside_output_dir', kind: item?.kind || null, filePath, outDir };
-        throw err;
-      }
-      throw error;
-    }
-  }
-
-  const saved = [];
-  for (const item of candidates) {
-    saved.push(
-      await registerArtifact({
-        stateDir,
-        tabId,
-        tabKey: meta?.key || null,
-        vendorId: meta?.vendorId || null,
-        kind: item.kind,
-        filePath: item.filePath,
-        originalName: item.originalName,
-        mime: item.mime,
-        source: item.source,
-        meta: item.meta
-      })
-    );
-  }
+  const saved = await collectRegisteredArtifacts({
+    stateDir,
+    tabId,
+    tabKey: meta?.key || null,
+    vendorId: meta?.vendorId || null,
+    outDir: realOutDir,
+    candidates
+  });
 
   return { dir: outDir, items: saved };
+}
+
+async function exportResearchArtifactsForTab({
+  stateDir,
+  tabs,
+  tabId,
+  controller,
+  maxFiles = 6,
+  timeoutMs = 20_000
+}) {
+  const meta = getTabMeta(tabs, tabId);
+  const outDir = await ensureArtifactsDir({
+    stateDir,
+    tabId,
+    tabKey: meta?.key || null,
+    vendorId: meta?.vendorId || null
+  });
+  const realOutDir = await fs.realpath(outDir);
+  const exported = typeof controller.exportResearchReport === 'function'
+    ? await controller.exportResearchReport({ maxFiles, outDir, timeoutMs })
+    : {
+        files: await controller.downloadLastAssistantFiles({ maxFiles, outDir, linkMode: 'export' }),
+        exportedMarkdownPath: null,
+        state: null
+      };
+  const candidates = [];
+  for (const item of exported?.files || []) {
+    candidates.push({
+      kind: 'file',
+      filePath: item?.path,
+      originalName: item?.name || null,
+      mime: item?.mime || null,
+      source: item?.source || null,
+      meta: { role: 'download' }
+    });
+  }
+  const saved = await collectRegisteredArtifacts({
+    stateDir,
+    tabId,
+    tabKey: meta?.key || null,
+    vendorId: meta?.vendorId || null,
+    outDir: realOutDir,
+    candidates
+  });
+  return {
+    dir: outDir,
+    items: saved,
+    exportState: exported?.state || null,
+    exportedMarkdownPath: exported?.exportedMarkdownPath || null
+  };
 }
 
 function mergeQueryInputs({ bundle, promptPrefix, attachments, contextPaths }) {
@@ -684,6 +824,45 @@ export function startHttpApi({
         detail: 'Another run is already active on this tab.'
       };
     }
+    if (message === 'research_requires_chatgpt') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'ChatGPT required',
+        detail: 'Research runs only support ChatGPT in this build.'
+      };
+    }
+    if (message === 'research_mode_activation_failed') {
+      const triggerAction = detail?.trigger?.action ? String(detail.trigger.action) : null;
+      const triggerLabel = detail?.trigger?.label ? trimPreview(detail.trigger.label, 60) : null;
+      const stateMenuOpen = typeof detail?.state?.menuOpen === 'boolean' ? detail.state.menuOpen : null;
+      const stateDialog = detail?.state?.dialogText ? trimPreview(detail.state.dialogText, 80) : null;
+      const stateComposerHint = Array.isArray(detail?.state?.composerHints) && detail.state.composerHints.length
+        ? trimPreview(detail.state.composerHints.join(' | '), 100)
+        : null;
+      const debugSuffix = [triggerAction, triggerLabel, stateMenuOpen === null ? null : `menuOpen=${stateMenuOpen}`, stateDialog, stateComposerHint]
+        .filter(Boolean)
+        .join('; ');
+      return {
+        ...base,
+        status: 'error',
+        label: 'Deep Research unavailable',
+        detail: detail?.reason
+          ? `ChatGPT Deep Research could not be activated: ${detail.reason}${debugSuffix ? ` (${debugSuffix})` : ''}`
+          : 'ChatGPT Deep Research could not be activated on this tab.'
+      };
+    }
+    if (message === 'research_output_incomplete') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Research output incomplete',
+        detail: detail?.preview
+          ? `Deep Research finished, but the captured output still looked like placeholder UI text: ${detail.preview}`
+          : 'Deep Research finished, but the final report could not be captured cleanly.',
+        conversationUrl: detail?.conversationUrl || null
+      };
+    }
     return {
       ...base,
       status: 'error',
@@ -719,14 +898,38 @@ export function startHttpApi({
     projectUrl: String(projectUrl || '').trim() || null
   });
 
-  const materializedReplay = ({ packed, timeoutMs }) => ({
+  const logicalResearchRequest = ({
+    body,
+    prompt,
+    attachments,
+    contextPaths,
+    bundleName,
+    timeoutMs,
+    source,
+    projectUrl
+  }) => ({
+    prompt: String(prompt || ''),
+    attachments: Array.isArray(attachments) ? attachments.map(String) : [],
+    contextPaths: Array.isArray(contextPaths) ? contextPaths.map(String) : [],
+    bundleName: String(bundleName || '').trim() || null,
+    timeoutMs: Number(timeoutMs) || null,
+    source: String(source || 'http'),
+    fireAndForget: true,
+    key: body?.key ? String(body.key).trim() : null,
+    tabId: body?.tabId ? String(body.tabId).trim() : null,
+    vendorId: 'chatgpt',
+    projectUrl: String(projectUrl || '').trim() || null
+  });
+
+  const materializedReplay = ({ packed, timeoutMs, kind = 'query' }) => ({
+    kind: String(kind || 'query'),
     prompt: String(packed?.prompt || ''),
     attachments: Array.isArray(packed?.attachments) ? packed.attachments.map(String) : [],
     timeoutMs: Number(timeoutMs) || null
   });
 
   const durableRunPatchFromActive = async (item) => {
-    if (!item?.id || item?.kind !== 'query') return;
+    if (!item?.id) return;
     try {
       await patchRunRecord(item.id, {
         status: item.blocked ? 'blocked' : 'running',
@@ -741,7 +944,10 @@ export function startHttpApi({
         blockedKind: item.blockedKind || null,
         blockedTitle: item.blockedTitle || null,
         stopRequested: !!item.stopRequested,
-        stopRequestedAt: item.stopRequestedAt || null
+        stopRequestedAt: item.stopRequestedAt || null,
+        ...(item.researchMeta
+          ? { researchMeta: cloneResearchMeta(item.researchMeta, { tabId: item.tabId || null }) }
+          : {})
       });
     } catch {}
   };
@@ -833,6 +1039,160 @@ export function startHttpApi({
     }
   };
 
+  const researchTimeoutMs = (value, fallback = 45 * 60_000) => positiveIntOr(value, fallback, 90 * 60_000);
+
+  const assertResearchTab = (tabId) => {
+    const tabMeta = getTabMeta(tabs, tabId);
+    const vendorId = normalizeVendorToken(tabMeta?.vendorId || '');
+    if (vendorId === 'chatgpt') return tabMeta || null;
+    const err = new Error('research_requires_chatgpt');
+    err.data = { tabId, vendorId: tabMeta?.vendorId || null };
+    throw err;
+  };
+
+  const finalizeResearchOutputs = async ({
+    runId,
+    tabId,
+    tabMeta,
+    outDir,
+    result,
+    researchOutput
+  } = {}) => {
+    const hasDownloadedOutput = Array.isArray(researchOutput?.files) && researchOutput.files.length > 0;
+    if (!hasDownloadedOutput && looksLikeResearchPlaceholder(result?.text)) {
+      const err = new Error('research_output_incomplete');
+      err.data = {
+        preview: trimPreview(result?.text, 180),
+        exportState: researchOutput?.exportState || null
+      };
+      throw err;
+    }
+    let responseText = String(result?.text || '');
+    const exportedMarkdownFile = (Array.isArray(researchOutput?.files) ? researchOutput.files : []).find((item) => {
+      const name = String(item?.name || item?.path || '').trim();
+      const mime = String(item?.mime || '').trim();
+      return /\.md$/i.test(name) || /markdown/i.test(mime);
+    }) || null;
+    if (exportedMarkdownFile?.path && looksLikeResearchPlaceholder(responseText)) {
+      try {
+        responseText = await fs.readFile(exportedMarkdownFile.path, 'utf8');
+      } catch {}
+    }
+    const responsePath = await writeResearchResponseFile({ outDir, text: responseText });
+    const candidates = [
+      {
+        kind: 'file',
+        filePath: responsePath,
+        originalName: path.basename(responsePath),
+        mime: 'text/markdown',
+        source: 'agentify_research',
+        meta: { role: 'canonical_response' }
+      }
+    ];
+    for (const item of researchOutput?.files || []) {
+      candidates.push({
+        kind: 'file',
+        filePath: item?.path,
+        originalName: item?.name || null,
+        mime: item?.mime || null,
+        source: item?.source || null,
+        meta: { role: 'download' }
+      });
+    }
+    const artifacts = await collectRegisteredArtifacts({
+      stateDir,
+      tabId,
+      tabKey: tabMeta?.key || null,
+      vendorId: tabMeta?.vendorId || null,
+      runId,
+      outDir,
+      candidates
+    });
+    const exportedMarkdown = artifacts.find((item) => item?.meta?.role === 'download' && /\.md$/i.test(String(item?.name || item?.path || '')))
+      || artifacts.find((item) => item?.meta?.role === 'download' && /markdown/i.test(String(item?.mime || '')));
+    return {
+      dir: outDir,
+      responsePath,
+      exportedMarkdownPath: exportedMarkdown?.path || null,
+      files: artifacts.map((item) => ({
+        id: item.id,
+        path: item.path,
+        name: item.name,
+        mime: item.mime || null,
+        source: item.source || null,
+        role: item?.meta?.role || null
+      }))
+    };
+  };
+
+  const executeResearchFlow = async ({
+    op,
+    tabId,
+    tabMeta,
+    controller,
+    prompt,
+    attachments = [],
+    timeoutMs,
+    outDir,
+    existingConversationUrl = null,
+    projectUrl = null,
+    effectiveKey = null
+  } = {}) => {
+    const result = await runExclusive(controller, async () => {
+      await ensureRunLocation({
+        controller,
+        tabId,
+        timeoutMs,
+        conversationUrl: existingConversationUrl,
+        projectUrl
+      });
+      return await controller.research({
+        prompt,
+        attachments,
+        timeoutMs,
+        outDir,
+        onProgress: (patch) => patchActiveQuery(tabId, patch)
+      });
+    });
+    const conversationUrl = typeof controller.getUrl === 'function'
+      ? await controller.getUrl().catch(() => existingConversationUrl || null)
+      : existingConversationUrl || null;
+    if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { projectUrl: projectUrl || null, conversationUrl });
+    let outputManifest;
+    try {
+      outputManifest = await finalizeResearchOutputs({
+        runId: op.id,
+        tabId,
+        tabMeta,
+        outDir,
+        result,
+        researchOutput: result?.research || null
+      });
+    } catch (error) {
+      if (String(error?.message || '') === 'research_output_incomplete') {
+        error.data = {
+          ...(error?.data && typeof error.data === 'object' ? error.data : {}),
+          conversationUrl
+        };
+      }
+      throw error;
+    }
+    const researchMeta = cloneResearchMeta(result?.researchMeta || null, {
+      tabId,
+      outputDir: outDir
+    });
+    researchMeta.activation.activated = true;
+    researchMeta.activation.error = null;
+    researchMeta.activation.tabId = tabId;
+    researchMeta.activation.conversationUrl = conversationUrl || researchMeta.activation.conversationUrl || null;
+    researchMeta.outputManifest = outputManifest;
+    await patchRunRecord(op.id, { researchMeta });
+    const outcome = successOutcomeForResult({ result, op, conversationUrl });
+    setLastOutcome(tabId, outcome);
+    await durableRunFinalizeFromOutcome(op.id, outcome);
+    return { result, researchMeta, outputManifest, conversationUrl };
+  };
+
   const successOutcomeForResult = ({ result, op, conversationUrl }) => ({
     status: 'success',
     label: 'Response received',
@@ -919,6 +1279,26 @@ export function startHttpApi({
     const current = activeQueries.get(tabId);
     if (!current) return null;
     const next = { ...current, ...(patch || {}), updatedAt: Date.now() };
+    if (current?.researchMeta || patch?.researchMeta) {
+      next.researchMeta = cloneResearchMeta({
+        ...(current?.researchMeta || {}),
+        ...(patch?.researchMeta || {}),
+        activation: {
+          ...(current?.researchMeta?.activation || {}),
+          ...(patch?.researchMeta?.activation || {})
+        },
+        outputManifest: {
+          ...(current?.researchMeta?.outputManifest || {}),
+          ...(patch?.researchMeta?.outputManifest || {})
+        }
+      }, {
+        tabId: next.tabId || null,
+        outputDir:
+          patch?.researchMeta?.outputManifest?.dir ||
+          current?.researchMeta?.outputManifest?.dir ||
+          null
+      });
+    }
     activeQueries.set(tabId, next);
     durableRunPatchFromActive(next);
     emitRuntimeChanged();
@@ -976,7 +1356,10 @@ export function startHttpApi({
     const original = getRunRecordOrThrow(runId);
     const replay = original.materializedReplay || null;
     if (!replay?.prompt) throw new Error('run_not_retryable');
-    const effectiveTimeoutMs = positiveIntOr(timeoutMs, replay.timeoutMs || 10 * 60_000, 30 * 60_000);
+    const nextKind = String(original.kind || replay.kind || 'query').trim() || 'query';
+    const effectiveTimeoutMs = nextKind === 'research'
+      ? researchTimeoutMs(timeoutMs, replay.timeoutMs || 45 * 60_000)
+      : positiveIntOr(timeoutMs, replay.timeoutMs || 10 * 60_000, 30 * 60_000);
     const scope = original.key
       ? `key:${original.key}`
       : original.vendorId
@@ -987,7 +1370,7 @@ export function startHttpApi({
     assertScopeNotBusy(scope);
     const op = {
       id: crypto.randomUUID(),
-      kind: 'query',
+      kind: nextKind,
       tabId: null,
       startedAt: Date.now(),
       promptPreview: original.promptPreview || trimPreview(replay.prompt),
@@ -1002,16 +1385,27 @@ export function startHttpApi({
     reserveScope(scope, op);
     let tabId = null;
     let runCreated = false;
+    let outputDir = null;
     try {
       tabId = await resolveRunTab({ run: original, show });
       assertTabNotBusy(tabId);
       if (original.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: original.projectUrl });
       op.tabId = tabId;
-      const tabMeta = getTabMeta(tabs, tabId);
+      let tabMeta = getTabMeta(tabs, tabId);
+      if (nextKind === 'research') {
+        tabMeta = assertResearchTab(tabId);
+        outputDir = await ensureRunArtifactsDir({
+          stateDir,
+          runId: op.id,
+          kind: 'research',
+          tabKey: original.key || tabMeta?.key || null,
+          vendorId: tabMeta?.vendorId || null
+        });
+      }
       const effectiveKey = original.key || tabMeta?.key || null;
       await createRunRecord({
         id: op.id,
-        kind: 'query',
+        kind: nextKind,
         source,
         status: 'running',
         phase: op.phase,
@@ -1035,12 +1429,16 @@ export function startHttpApi({
           projectUrl: original.projectUrl || null
         },
         materializedReplay: {
+          kind: nextKind,
           prompt: String(replay.prompt || ''),
           attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
           timeoutMs: effectiveTimeoutMs
         },
         packedContextSummary: original.packedContextSummary || null,
-        packedContextBudget: original.packedContextBudget || null
+        packedContextBudget: original.packedContextBudget || null,
+        ...(nextKind === 'research'
+          ? { researchMeta: defaultResearchMeta({ tabId, outputDir }) }
+          : {})
       });
       runCreated = true;
       setActiveQuery(tabId, {
@@ -1048,12 +1446,30 @@ export function startHttpApi({
         key: effectiveKey,
         vendorId: tabMeta?.vendorId || original.vendorId || null,
         vendorName: tabMeta?.vendorName || original.vendorName || null,
-        projectUrl: original.projectUrl || null
+        projectUrl: original.projectUrl || null,
+        ...(nextKind === 'research'
+          ? { researchMeta: defaultResearchMeta({ tabId, outputDir }) }
+          : {})
       });
       checkAndConsumeQueryBudget({ tabId, governor: await getGovernor() });
       inflight.queries += 1;
       const controller = tabs.getControllerById(tabId);
       const executeRetry = async () => {
+        if (nextKind === 'research') {
+          return await executeResearchFlow({
+            op,
+            tabId,
+            tabMeta,
+            controller,
+            prompt: String(replay.prompt || ''),
+            attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
+            timeoutMs: effectiveTimeoutMs,
+            outDir: outputDir,
+            existingConversationUrl: original.conversationUrl || null,
+            projectUrl: original.projectUrl || null,
+            effectiveKey
+          });
+        }
         const result = await runExclusive(controller, async () => {
           await ensureRunLocation({
             controller,
@@ -1076,7 +1492,7 @@ export function startHttpApi({
         const outcome = successOutcomeForResult({ result, op, conversationUrl });
         setLastOutcome(tabId, outcome);
         await durableRunFinalizeFromOutcome(op.id, outcome);
-        return result;
+        return { result, conversationUrl };
       };
 
       if (fireAndForget) {
@@ -1092,8 +1508,8 @@ export function startHttpApi({
         return { ok: true, async: true, tabId, runId: op.id, retryOf: original.id };
       }
 
-      const result = await executeRetry();
-      return { ok: true, tabId, runId: op.id, retryOf: original.id, result };
+      const completed = await executeRetry();
+      return { ok: true, tabId, runId: op.id, retryOf: original.id, result: completed?.result || null };
     } catch (error) {
       if (tabId) {
         const outcome = outcomeFromError(error, op);
@@ -1243,6 +1659,227 @@ export function startHttpApi({
         const controller = tabs.getControllerById(tabId);
         const st = await runExclusive(controller, async () => controller.ensureReady({ timeoutMs }));
         return sendJson(res, 200, { ok: true, tabId, state: st });
+      }
+
+      if (url.pathname === '/research' && req.method === 'POST') {
+        await projectsReady;
+        await runsReady;
+        const body = await parseBody(req, { maxBytes: 5_000_000 });
+        const timeoutMs = researchTimeoutMs(body.timeoutMs, 45 * 60_000);
+        const prompt = String(body.prompt || '');
+        if (!prompt.trim()) throw new Error('missing_prompt');
+        if (prompt.length > 200_000) throw new Error('prompt_too_large');
+        const source = requestSourceForBody(body);
+        const attachments = Array.isArray(body.attachments) ? body.attachments.map(String) : [];
+        const contextPaths = Array.isArray(body.contextPaths) ? body.contextPaths.map(String) : [];
+        const bundleName = String(body.bundleName || '').trim() || null;
+        const bodyProjectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || null;
+        const tabKey = (body.key ? String(body.key).trim() : '') || null;
+        const researchBody = { ...body, vendorId: 'chatgpt' };
+        const scope = requestScopeForBody(researchBody);
+        assertScopeNotBusy(scope);
+        const advisoryTabId = body?.tabId
+          ? String(body.tabId).trim() || null
+          : tabKey
+            ? (() => {
+              const existing = (tabs.listTabs?.() || []).find((item) => item?.key === tabKey) || null;
+              return normalizeVendorToken(existing?.vendorId || '') === 'chatgpt' ? existing.id : null;
+            })()
+            : (() => {
+              const defaultMeta = getTabMeta(tabs, defaultTabId);
+              return normalizeVendorToken(defaultMeta?.vendorId || '') === 'chatgpt' ? defaultMeta.id : null;
+            })();
+        const advisoryTabScope = advisoryTabId && `tab:${advisoryTabId}` !== scope ? `tab:${advisoryTabId}` : null;
+        if (advisoryTabScope) assertScopeNotBusy(advisoryTabScope);
+        const settings = await getSettings?.() || {};
+        const savedMeta = getPersistedKeyMeta(tabKey);
+        const projectUrl = bodyProjectUrl || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
+        const savedConversationUrl = savedMeta?.conversationUrl || null;
+        const op = {
+          id: crypto.randomUUID(),
+          kind: 'research',
+          tabId: body?.tabId ? String(body.tabId).trim() : null,
+          startedAt: Date.now(),
+          promptPreview: trimPreview(prompt),
+          source,
+          phase: 'queued',
+          stopRequested: false,
+          stopRequestedAt: null,
+          blocked: false,
+          blockedKind: null,
+          scope
+        };
+        reserveScope(scope, op);
+        if (advisoryTabScope) reserveScope(advisoryTabScope, op);
+        try {
+          if (bodyProjectUrl && tabKey) persistKeyMeta(tabKey, { projectUrl: bodyProjectUrl });
+          await createRunRecord({
+            id: op.id,
+            kind: 'research',
+            source,
+            status: 'queued',
+            phase: op.phase,
+            tabId: op.tabId || null,
+            key: tabKey || null,
+            vendorId: 'chatgpt',
+            vendorName: 'ChatGPT',
+            projectUrl: projectUrl || null,
+            conversationUrl: savedConversationUrl || null,
+            promptPreview: op.promptPreview,
+            startedAt: op.startedAt,
+            logicalRequest: logicalResearchRequest({
+              body,
+              prompt,
+              attachments,
+              contextPaths,
+              bundleName,
+              timeoutMs,
+              source,
+              projectUrl
+            }),
+            researchMeta: defaultResearchMeta({ tabId: op.tabId || null })
+          });
+
+          void (async () => {
+          let tabId = null;
+          let resolvedTabScope = null;
+          let queryReserved = false;
+          try {
+            tabId = await resolveTab({
+              tabs,
+              defaultTabId,
+              body: researchBody,
+              url,
+              showTabsByDefault: governor.showTabsByDefault,
+              createIfMissing: true,
+              vendors
+            });
+            assertTabNotBusy(tabId);
+            resolvedTabScope = tabId ? `tab:${tabId}` : null;
+            if (resolvedTabScope && resolvedTabScope !== scope && resolvedTabScope !== advisoryTabScope) {
+              assertScopeNotBusy(resolvedTabScope);
+              reserveScope(resolvedTabScope, { ...op, tabId, scope: resolvedTabScope });
+            }
+            let tabMeta = assertResearchTab(tabId);
+            if (projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl });
+            op.tabId = tabId;
+            const effectiveKey = tabKey || tabMeta?.key || null;
+            const outputDir = await ensureRunArtifactsDir({
+              stateDir,
+              runId: op.id,
+              kind: 'research',
+              tabKey: effectiveKey,
+              vendorId: tabMeta?.vendorId || null
+            });
+            const activeOp = {
+              ...op,
+              phase: 'resolving_tab',
+              key: effectiveKey,
+              vendorId: tabMeta?.vendorId || 'chatgpt',
+              vendorName: tabMeta?.vendorName || 'ChatGPT',
+              projectUrl: projectUrl || null,
+              researchMeta: defaultResearchMeta({ tabId, outputDir })
+            };
+            await patchRunRecord(op.id, {
+              status: 'running',
+              phase: activeOp.phase,
+              tabId,
+              key: effectiveKey,
+              vendorId: activeOp.vendorId,
+              vendorName: activeOp.vendorName,
+              projectUrl: projectUrl || null,
+              researchMeta: activeOp.researchMeta
+            });
+            setActiveQuery(tabId, activeOp);
+
+            const bundle = bundleName ? await getBundle(stateDir, bundleName) : null;
+            if (bundleName && !bundle) {
+              const err = new Error('bundle_not_found');
+              err.data = { name: bundleName };
+              throw err;
+            }
+            patchActiveQuery(tabId, { phase: 'preparing_context', blocked: false, blockedKind: null });
+            const vendorBudget = contextBudgetForVendor('chatgpt');
+            const merged = mergeQueryInputs({ bundle, promptPrefix: '', attachments, contextPaths });
+            const effectiveBudget = {
+              maxContextChars: positiveIntOr(body.maxContextChars, vendorBudget.maxContextChars, 500_000),
+              maxFiles: positiveIntOr(body.maxContextFiles, vendorBudget.maxFiles, 500),
+              maxFileChars: positiveIntOr(body.maxContextFileChars, vendorBudget.maxFileChars, 100_000),
+              maxChunkChars: positiveIntOr(body.maxContextChunkChars, vendorBudget.maxChunkChars, 20_000),
+              maxChunksPerFile: positiveIntOr(body.maxContextChunksPerFile, vendorBudget.maxChunksPerFile, 20),
+              maxInlineFiles: positiveIntOr(body.maxContextInlineFiles, vendorBudget.maxInlineFiles, 100),
+              maxAttachmentFiles: positiveIntOr(body.maxContextAttachments, vendorBudget.maxAttachmentFiles, 50)
+            };
+            const packed = await prepareQueryContext({
+              prompt,
+              promptPrefix: merged.promptPrefix,
+              attachments: merged.attachments,
+              contextPaths: merged.contextPaths,
+              maxContextChars: effectiveBudget.maxContextChars,
+              maxFiles: effectiveBudget.maxFiles,
+              maxFileChars: effectiveBudget.maxFileChars,
+              maxChunkChars: effectiveBudget.maxChunkChars,
+              maxChunksPerFile: effectiveBudget.maxChunksPerFile,
+              maxInlineFiles: effectiveBudget.maxInlineFiles,
+              maxAttachmentFiles: effectiveBudget.maxAttachmentFiles
+            });
+            await patchRunRecord(op.id, {
+              materializedReplay: materializedReplay({ packed, timeoutMs, kind: 'research' }),
+              packedContextSummary: packed.context?.summary || null,
+              packedContextBudget: effectiveBudget
+            });
+            checkAndConsumeQueryBudget({ tabId, governor });
+            inflight.queries += 1;
+            queryReserved = true;
+            const controller = tabs.getControllerById(tabId);
+            await executeResearchFlow({
+              op,
+              tabId,
+              tabMeta,
+              controller,
+              prompt: packed.prompt,
+              attachments: packed.attachments,
+              timeoutMs,
+              outDir: outputDir,
+              existingConversationUrl: savedConversationUrl || null,
+              projectUrl: projectUrl || tabMeta?.projectUrl || null,
+              effectiveKey
+            });
+          } catch (error) {
+            const outcome = outcomeFromError(error, op);
+            if (tabId) setLastOutcome(tabId, outcome);
+            if (String(error?.message || '') === 'research_mode_activation_failed') {
+              const current = tabId ? activeQueries.get(tabId) : null;
+              const researchMeta = cloneResearchMeta(current?.researchMeta || null, {
+                tabId,
+                outputDir: current?.researchMeta?.outputManifest?.dir || null
+              });
+              researchMeta.activation.error = error?.data?.reason ? String(error.data.reason) : String(error?.message || 'research_mode_activation_failed');
+              await patchRunRecord(op.id, { researchMeta });
+            }
+            await durableRunFinalizeFromOutcome(op.id, outcome);
+          } finally {
+            if (tabId) clearActiveQuery(tabId, op.id);
+            if (queryReserved) inflight.queries = Math.max(0, inflight.queries - 1);
+            clearScope(scope, op.id);
+            if (advisoryTabScope) clearScope(advisoryTabScope, op.id);
+            if (resolvedTabScope) clearScope(resolvedTabScope, op.id);
+          }
+          })();
+
+          return sendJson(res, 202, {
+            ok: true,
+            async: true,
+            runId: op.id,
+            queryId: op.id,
+            key: tabKey || null,
+            tabId: op.tabId || null
+          });
+        } catch (error) {
+          clearScope(scope, op.id);
+          if (advisoryTabScope) clearScope(advisoryTabScope, op.id);
+          throw error;
+        }
       }
 
       if (url.pathname === '/query' && req.method === 'POST') {
@@ -1642,6 +2279,34 @@ export function startHttpApi({
           saveArtifactsForTab({ stateDir, tabs, tabId, controller, mode, maxImages, maxFiles })
         );
         return sendJson(res, 200, { ok: true, tabId, artifacts: saved.items, dir: saved.dir });
+      }
+
+      if (url.pathname === '/research/export' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const maxFiles = positiveIntOr(body.maxFiles, 6, 50);
+        const timeoutMs = positiveIntOr(body.timeoutMs, 20_000, 60_000);
+        const tabId = await resolveTab({
+          tabs,
+          defaultTabId,
+          body,
+          url,
+          showTabsByDefault: governor.showTabsByDefault,
+          createIfMissing: false,
+          vendors
+        });
+        assertResearchTab(tabId);
+        const controller = tabs.getControllerById(tabId);
+        const saved = await runExclusive(controller, async () =>
+          exportResearchArtifactsForTab({ stateDir, tabs, tabId, controller, maxFiles, timeoutMs })
+        );
+        return sendJson(res, 200, {
+          ok: true,
+          tabId,
+          artifacts: saved.items,
+          dir: saved.dir,
+          exportState: saved.exportState,
+          exportedMarkdownPath: saved.exportedMarkdownPath
+        });
       }
 
       if (url.pathname === '/artifacts/list' && req.method === 'POST') {

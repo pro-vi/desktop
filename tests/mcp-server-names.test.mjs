@@ -9,8 +9,10 @@ const __dirname = path.dirname(__filename);
 
 test('mcp-server registers agentify_* tools only', async () => {
   const src = await fs.readFile(path.join(__dirname, '..', 'mcp-server.mjs'), 'utf8');
+  const researchBlock = src.match(/registerTool\(\s*'agentify_research'[\s\S]*?\n\);/);
 
   assert.ok(src.includes("'agentify_query'"), 'expected agentify_query tool');
+  assert.ok(src.includes("'agentify_research'"), 'expected agentify_research tool');
   assert.ok(src.includes("'agentify_download_images'"), 'expected agentify_download_images tool');
   assert.ok(src.includes("'agentify_list_watch_folders'"), 'expected agentify_list_watch_folders tool');
   assert.ok(src.includes("'agentify_add_watch_folder'"), 'expected agentify_add_watch_folder tool');
@@ -43,6 +45,10 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes('maxContextChunksPerFile: z.number().optional()'), 'expected maxContextChunksPerFile input');
   assert.ok(src.includes('maxContextInlineFiles: z.number().optional()'), 'expected maxContextInlineFiles input');
   assert.ok(!src.includes('void model;'), 'model hint should not be dropped');
+  assert.ok(researchBlock, 'expected agentify_research registration block');
+  assert.ok(researchBlock[0].includes("path: '/research'"), 'expected agentify_research to hit /research');
+  assert.ok(!researchBlock[0].includes('model: z.string().optional()'), 'agentify_research should not expose vendor/model selection');
+  assert.ok(!researchBlock[0].includes('fireAndForget'), 'agentify_research should always be async without a fireAndForget toggle');
 
   assert.ok(!src.includes('browser_'), 'should not contain browser_* tools/aliases');
   assert.ok(!src.includes('registerToolWithAliases'), 'should not contain alias helper');

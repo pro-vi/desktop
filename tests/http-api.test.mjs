@@ -526,6 +526,626 @@ test('http-api: runs open saved conversations and retry exact materialized repla
   assert.equal(retriedRun.data.run.source, 'mcp');
 });
 
+test('http-api: research is async, clamps timeout, persists outputs, and retries as research', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-success-'));
+  const researchCalls = [];
+  let currentUrl = 'https://chatgpt.com/';
+  const listedTabs = [{ id: 't0', key: 'research-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => {
+      currentUrl = to;
+    },
+    ensureReady: async () => ({ ok: true }),
+    research: async ({ prompt, attachments, timeoutMs, outDir, onProgress }) => {
+      researchCalls.push({ prompt, attachments, timeoutMs, outDir });
+      currentUrl = `https://chatgpt.com/c/research-${researchCalls.length}`;
+      const exportPath = path.join(outDir, `deep-research-${researchCalls.length}.md`);
+      await fs.writeFile(exportPath, `# Export ${researchCalls.length}\n`, 'utf8');
+      await onProgress?.({
+        phase: 'activating_research_mode',
+        researchMeta: {
+          activation: {
+            requested: true,
+            activated: true,
+            error: null,
+            tabId: 't0',
+            conversationUrl: currentUrl
+          }
+        }
+      });
+      return {
+        text: `research answer ${researchCalls.length}`,
+        codeBlocks: [],
+        meta: { mode: 'research' },
+        research: {
+          files: [{ path: exportPath, name: path.basename(exportPath), mime: 'text/markdown', source: 'chatgpt_export' }],
+          exportedMarkdownPath: exportPath,
+          exportState: { reason: 'downloaded' }
+        },
+        researchMeta: {
+          activation: {
+            requested: true,
+            activated: true,
+            error: null,
+            tabId: 't0',
+            conversationUrl: currentUrl
+          }
+        }
+      };
+    },
+    getUrl: async () => currentUrl
+  };
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl }) => {
+      const existing = listedTabs.find((item) => item.key === key);
+      if (existing) {
+        existing.vendorId = vendorId || existing.vendorId;
+        existing.vendorName = vendorName || existing.vendorName;
+        existing.projectUrl = projectUrl || existing.projectUrl || null;
+        return existing.id;
+      }
+      const created = { id: `tab-${key}`, key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      listedTabs.push(created);
+      return created.id;
+    },
+    createTab: async ({ vendorId, vendorName, projectUrl }) => {
+      const created = { id: `tab-${listedTabs.length + 1}`, key: null, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      listedTabs.push(created);
+      return created.id;
+    },
+    updateTabMeta: (tabId, patch) => {
+      const row = listedTabs.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrl, blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      key: 'research-key',
+      prompt: 'Produce the durable deep research report.',
+      timeoutMs: 999 * 60_000
+    }
+  });
+  assert.equal(started.res.status, 202);
+  assert.equal(started.data.async, true);
+  const originalRunId = started.data.runId;
+
+  const finished = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: originalRunId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  assert.equal(researchCalls.length, 1);
+  assert.equal(researchCalls[0].timeoutMs, 90 * 60_000);
+  assert.equal(finished.data.run.kind, 'research');
+  assert.equal(finished.data.run.materializedReplay.kind, 'research');
+  assert.equal(finished.data.run.researchMeta.activation.activated, true);
+  assert.equal(finished.data.run.researchMeta.activation.conversationUrl, 'https://chatgpt.com/c/research-1');
+  assert.equal(path.basename(finished.data.run.researchMeta.outputManifest.responsePath), 'response.md');
+  assert.equal(path.basename(finished.data.run.researchMeta.outputManifest.exportedMarkdownPath), 'deep-research-1.md');
+  assert.equal(
+    finished.data.run.researchMeta.outputManifest.files.some((item) => item.role === 'canonical_response' && item.name === 'response.md'),
+    true
+  );
+  assert.equal(
+    finished.data.run.researchMeta.outputManifest.files.some((item) => item.role === 'download' && item.name === 'deep-research-1.md'),
+    true
+  );
+  assert.equal(await fs.readFile(finished.data.run.researchMeta.outputManifest.responsePath, 'utf8'), 'research answer 1\n');
+
+  const listed = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: {} });
+  const summary = listed.data.runs.find((item) => item.id === originalRunId);
+  assert.ok(summary);
+  assert.equal('researchMeta' in summary, false);
+
+  const retried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: originalRunId, source: 'mcp' }
+  });
+  assert.equal(retried.res.status, 200);
+  assert.equal(retried.data.retryOf, originalRunId);
+
+  const retriedRun = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: retried.data.runId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  assert.equal(researchCalls.length, 2);
+  assert.equal(retriedRun.data.run.kind, 'research');
+  assert.equal(retriedRun.data.run.retryOf, originalRunId);
+  assert.equal(retriedRun.data.run.materializedReplay.kind, 'research');
+});
+
+test('http-api: research merges saved bundle promptPrefix into packed prompt and replay', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-bundle-prefix-'));
+  const bundleText = path.join(stateDir, 'bundle.txt');
+  await fs.writeFile(bundleText, 'bundle context\n', 'utf8');
+
+  let seenPrompt = null;
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    ensureReady: async () => ({ ok: true }),
+    research: async ({ prompt }) => {
+      seenPrompt = prompt;
+      return {
+        text: 'done',
+        codeBlocks: [],
+        meta: {},
+        research: { files: [], exportedMarkdownPath: null, exportState: null },
+        researchMeta: {
+          activation: {
+            requested: true,
+            activated: true,
+            error: null,
+            tabId: 't0',
+            conversationUrl: 'https://chatgpt.com/c/research-bundle'
+          }
+        }
+      };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/research-bundle'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const savedBundle = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/bundles/save',
+    body: {
+      name: 'research-style',
+      promptPrefix: 'Use the saved research format.',
+      contextPaths: [bundleText]
+    }
+  });
+  assert.equal(savedBundle.res.status, 200);
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      prompt: 'Analyze this deeply.',
+      bundleName: 'research-style'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const finished = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  assert.match(String(seenPrompt || ''), /Use the saved research format\./);
+  assert.match(String(seenPrompt || ''), /bundle\.txt/);
+  assert.match(String(finished.data.run.materializedReplay.prompt || ''), /Use the saved research format\./);
+});
+
+test('http-api: research marks placeholder shell text as an error when no export artifact exists', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-placeholder-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    ensureReady: async () => ({ ok: true }),
+    research: async () => ({
+      text: 'You said:\nInvestigate this.\n\nChatGPT said:\n\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.',
+      codeBlocks: [],
+      meta: {},
+      research: { files: [], exportedMarkdownPath: null, exportState: { reason: 'export_controls_not_found' } },
+      researchMeta: {
+        activation: {
+          requested: true,
+          activated: true,
+          error: null,
+          tabId: 't0',
+          conversationUrl: 'https://chatgpt.com/c/research-placeholder'
+        }
+      }
+    }),
+    getUrl: async () => 'https://chatgpt.com/c/research-placeholder'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      prompt: 'Investigate this.'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const finished = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'error' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  assert.equal(finished.data.run.kind, 'research');
+  assert.equal(finished.data.run.label, 'Research output incomplete');
+  assert.match(String(finished.data.run.detail || ''), /placeholder UI text/i);
+  assert.equal(finished.data.run.conversationUrl, 'https://chatgpt.com/c/research-placeholder');
+});
+
+test('http-api: research canonical response uses exported markdown when captured text is placeholder chrome', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-exported-markdown-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  let exportedPath = null;
+
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    ensureReady: async () => ({ ok: true }),
+    research: async ({ outDir }) => {
+      exportedPath = path.join(outDir, 'deep-research.md');
+      await fs.writeFile(exportedPath, '# exported report\n\nreal body\n', 'utf8');
+      return {
+        text: 'You said:\nInvestigate this.\n\nChatGPT said:\n\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.',
+        codeBlocks: [],
+        meta: {},
+        research: {
+          files: [{ path: exportedPath, name: 'deep-research.md', mime: 'text/markdown', source: 'download://report' }],
+          exportedMarkdownPath: exportedPath,
+          exportState: { reason: 'downloaded' }
+        },
+        researchMeta: {
+          activation: {
+            requested: true,
+            activated: true,
+            error: null,
+            tabId: 't0',
+            conversationUrl: 'https://chatgpt.com/c/research-exported'
+          }
+        }
+      };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/research-exported'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      prompt: 'Investigate this.'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const finished = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  assert.equal(
+    await fs.readFile(finished.data.run.researchMeta.outputManifest.responsePath, 'utf8'),
+    '# exported report\n\nreal body\n'
+  );
+  assert.equal(path.basename(finished.data.run.researchMeta.outputManifest.exportedMarkdownPath), 'deep-research.md');
+});
+
+test('http-api: research bundle resolution fails asynchronously after run creation', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-bundle-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    ensureReady: async () => ({ ok: true }),
+    research: async () => {
+      throw new Error('should_not_run');
+    },
+    getUrl: async () => 'https://chatgpt.com/'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      prompt: 'Investigate this with the missing bundle.',
+      bundleName: 'does-not-exist'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const finished = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'error' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  assert.equal(finished.data.run.kind, 'research');
+  assert.equal(finished.data.run.detail, 'bundle_not_found');
+});
+
+test('http-api: research reserves the underlying tab against concurrent query calls', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-lock-'));
+  let releaseResearch = null;
+  const listedTabs = [{ id: 't1', key: 'proj', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    ensureReady: async () => ({ ok: true }),
+    research: async () => {
+      await new Promise((resolve) => {
+        releaseResearch = resolve;
+      });
+      return {
+        text: 'done',
+        codeBlocks: [],
+        meta: {},
+        research: { files: [], exportedMarkdownPath: null, exportState: null },
+        researchMeta: {
+          activation: {
+            requested: true,
+            activated: true,
+            error: null,
+            tabId: 't1',
+            conversationUrl: 'https://chatgpt.com/c/locked'
+          }
+        }
+      };
+    },
+    query: async () => ({ text: 'query', codeBlocks: [], meta: {} }),
+    getUrl: async () => 'https://chatgpt.com/c/locked'
+  };
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key }) => listedTabs.find((item) => item.key === key)?.id || 't1',
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      key: 'proj',
+      prompt: 'Lock this tab for research.'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  await waitFor(async () => {
+    const status = await req({ port, token: 'secret', method: 'GET', pth: '/status?tabId=t1' });
+    return status.data.activeQuery?.kind === 'research' ? status : null;
+  }, { timeoutMs: 1_500, intervalMs: 20 });
+
+  const blocked = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      tabId: 't1',
+      prompt: 'try to reuse the same tab'
+    }
+  });
+  assert.equal(blocked.res.status, 409);
+  assert.equal(blocked.data.error, 'tab_busy');
+
+  releaseResearch?.();
+  await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+});
+
+test('http-api: research without tab/key does not lock an unrelated default non-chatgpt tab', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-multivendor-'));
+  let releaseResearch = null;
+  const listedTabs = [
+    { id: 't0', key: 'default', vendorId: 'claude', vendorName: 'Claude' },
+    { id: 't-chatgpt', key: 'vendor:chatgpt', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+  ];
+  const controllers = {
+    't0': {
+      runExclusive: async (fn) => await fn(),
+      query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    },
+    't-chatgpt': {
+      runExclusive: async (fn) => await fn(),
+      ensureReady: async () => ({ ok: true }),
+      research: async () => {
+        await new Promise((resolve) => {
+          releaseResearch = resolve;
+        });
+        return {
+          text: 'done',
+          codeBlocks: [],
+          meta: {},
+          research: { files: [], exportedMarkdownPath: null, exportState: null },
+          researchMeta: {
+            activation: {
+              requested: true,
+              activated: true,
+              error: null,
+              tabId: 't-chatgpt',
+              conversationUrl: 'https://chatgpt.com/c/research-vendor'
+            }
+          }
+        };
+      },
+      getUrl: async () => 'https://chatgpt.com/c/research-vendor'
+    }
+  };
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key, vendorId, vendorName }) => {
+      const existing = listedTabs.find((item) => item.key === key);
+      if (existing) return existing.id;
+      const created = { id: 't-chatgpt', key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT' };
+      listedTabs.push(created);
+      return created.id;
+    },
+    createTab: async () => 't-chatgpt',
+    closeTab: async () => true,
+    getControllerById: (id) => controllers[id]
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    vendors: [
+      { id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/' },
+      { id: 'claude', name: 'Claude', url: 'https://claude.ai/' }
+    ],
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      prompt: 'Run deep research on chatgpt without an explicit tab.'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const queryOnClaudeDefault = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      tabId: 't0',
+      prompt: 'plain query on the unrelated default tab'
+    }
+  });
+  assert.equal(queryOnClaudeDefault.res.status, 200);
+
+  releaseResearch?.();
+  await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+});
+
 test('http-api: unkeyed run reopen and retry prefer the recorded tab over another vendor tab', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-unkeyed-'));
   const currentUrls = new Map([
@@ -2651,6 +3271,64 @@ test('http-api: oversized numeric overrides are clamped to bounded ceilings', as
   assert.equal(saved.res.status, 200);
   assert.equal(seen.images[0], 50);
   assert.equal(seen.files[0], 50);
+});
+
+test('http-api: research export forces the controller export path and registers the markdown artifact', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-export-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  const seen = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    exportResearchReport: async ({ maxFiles, outDir, timeoutMs }) => {
+      seen.push({ maxFiles, outDir, timeoutMs });
+      const filePath = path.join(outDir, 'deep-research.md');
+      await fs.writeFile(filePath, '# Deep Research\n', 'utf8');
+      return {
+        files: [{ path: filePath, name: 'deep-research.md', mime: 'text/markdown', source: 'chatgpt_export' }],
+        exportedMarkdownPath: filePath,
+        state: { action: 'pointer_markdown', reason: 'clicked_markdown_option' }
+      };
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'research-key', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const exported = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research/export',
+    body: { key: 'research-key', maxFiles: 9, timeoutMs: 45_000 }
+  });
+  assert.equal(exported.res.status, 200);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].maxFiles, 9);
+  assert.equal(seen[0].timeoutMs, 45_000);
+  assert.equal(exported.data.tabId, 't0');
+  assert.equal(exported.data.exportState.reason, 'clicked_markdown_option');
+  assert.equal(path.basename(exported.data.exportedMarkdownPath), 'deep-research.md');
+  assert.equal(exported.data.artifacts.length, 1);
+  assert.equal(exported.data.artifacts[0].name, 'deep-research.md');
+  assert.equal(await fs.readFile(exported.data.artifacts[0].path, 'utf8'), '# Deep Research\n');
 });
 
 test('http-api: query model hint routes to a vendor-scoped tab when default tab is another vendor', async (t) => {

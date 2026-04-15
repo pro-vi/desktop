@@ -18,6 +18,10 @@ export function artifactsRoot(stateDir) {
   return path.join(stateDir, 'artifacts');
 }
 
+export function runArtifactsRoot(stateDir) {
+  return path.join(artifactsRoot(stateDir), 'runs');
+}
+
 export function artifactsIndexPath(stateDir) {
   return path.join(artifactsRoot(stateDir), 'index.jsonl');
 }
@@ -34,6 +38,40 @@ export async function ensureArtifactsDir({ stateDir, tabId, tabKey = null, vendo
   return dir;
 }
 
+export function runArtifactsDir({ stateDir, runId, kind = 'run', tabKey = null, vendorId = null } = {}) {
+  const prefix = cleanSegment(tabKey || kind || vendorId || 'run');
+  const suffix = cleanSegment(String(runId || '').trim(), crypto.randomUUID().slice(0, 12));
+  return path.join(runArtifactsRoot(stateDir), `${prefix}-${suffix}`);
+}
+
+export async function ensureRunArtifactsDir({ stateDir, runId, kind = 'run', tabKey = null, vendorId = null } = {}) {
+  const dir = runArtifactsDir({ stateDir, runId, kind, tabKey, vendorId });
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+export async function assertArtifactFileReady(filePath) {
+  const rawPath = String(filePath || '').trim();
+  if (!rawPath) throw new Error('missing_artifact_path');
+  if (!path.isAbsolute(rawPath)) throw new Error('relative_artifact_path_not_allowed');
+  const resolvedPath = path.resolve(rawPath);
+  let stat = null;
+  let realFilePath = resolvedPath;
+  try {
+    stat = await fs.lstat(resolvedPath);
+    if (!stat.isSymbolicLink()) {
+      realFilePath = await fs.realpath(resolvedPath);
+    }
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) throw new Error('missing_artifact_file');
+    throw error;
+  }
+  if (stat.isSymbolicLink()) throw new Error('artifact_symlink_not_allowed');
+  if (!stat.isFile()) throw new Error('artifact_path_not_file');
+  if (Number(stat.nlink || 1) > 1) throw new Error('artifact_link_count_not_allowed');
+  return { filePath: resolvedPath, realFilePath, stat };
+}
+
 export async function registerArtifact({
   stateDir,
   tabId,
@@ -46,19 +84,7 @@ export async function registerArtifact({
   source = null,
   meta = null
 } = {}) {
-  const rawPath = String(filePath || '').trim();
-  if (!rawPath) throw new Error('missing_artifact_path');
-  if (!path.isAbsolute(rawPath)) throw new Error('relative_artifact_path_not_allowed');
-  let st = null;
-  try {
-    st = await fs.lstat(rawPath);
-  } catch (error) {
-    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) throw new Error('missing_artifact_file');
-    throw error;
-  }
-  if (st.isSymbolicLink()) throw new Error('artifact_symlink_not_allowed');
-  if (!st.isFile()) throw new Error('artifact_path_not_file');
-  if (Number(st.nlink || 1) > 1) throw new Error('artifact_link_count_not_allowed');
+  const ready = await assertArtifactFileReady(filePath);
   const savedAt = new Date().toISOString();
   const record = {
     id: crypto.randomUUID(),
@@ -66,8 +92,8 @@ export async function registerArtifact({
     tabKey: String(tabKey || '').trim() || null,
     vendorId: String(vendorId || '').trim() || null,
     kind: String(kind || 'file').trim() || 'file',
-    path: path.resolve(rawPath),
-    name: String(originalName || path.basename(rawPath)).trim() || path.basename(rawPath),
+    path: ready.realFilePath || ready.filePath,
+    name: String(originalName || path.basename(ready.realFilePath || ready.filePath)).trim() || path.basename(ready.realFilePath || ready.filePath),
     mime: mime ? String(mime) : null,
     source: source ? String(source) : null,
     meta: meta && typeof meta === 'object' ? meta : null,

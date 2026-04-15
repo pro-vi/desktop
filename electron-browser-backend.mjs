@@ -1,3 +1,6 @@
+import fsSync from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import electron from 'electron';
 
 const { BrowserWindow } = electron;
@@ -17,6 +20,68 @@ class ElectronPageAdapter {
     this.win = win;
   }
 
+  async #withDebugger(fn, { attachErrorMessage = null, attachErrorData = null } = {}) {
+    const wc = this.win?.webContents;
+    if (!wc?.debugger) {
+      if (attachErrorMessage) {
+        const err = new Error(attachErrorMessage);
+        err.data = attachErrorData || null;
+        throw err;
+      }
+      return null;
+    }
+
+    const didAttach = !wc.debugger.isAttached();
+    try {
+      if (didAttach) wc.debugger.attach('1.3');
+    } catch {
+      if (attachErrorMessage) {
+        const err = new Error(attachErrorMessage);
+        err.data = attachErrorData || null;
+        throw err;
+      }
+      return null;
+    }
+
+    try {
+      return await fn(wc.debugger);
+    } finally {
+      try {
+        if (didAttach && wc.debugger.isAttached()) wc.debugger.detach();
+      } catch {}
+    }
+  }
+
+  async #sendDebuggerCommand(method, params = {}, sessionId = null) {
+    return await this.win.webContents.debugger.sendCommand(method, params, sessionId || undefined);
+  }
+
+  async #withDeepResearchTarget(fn) {
+    return await this.#withDebugger(async () => {
+      const current = await this.#sendDebuggerCommand('Target.getTargetInfo').catch(() => null);
+      const currentTargetId = String(current?.targetInfo?.targetId || '').trim();
+      const targets = await this.#sendDebuggerCommand('Target.getTargets').catch(() => null);
+      const matches = (targets?.targetInfos || []).filter((target) =>
+        /connector_openai_deep_research\.web-sandbox\.oaiusercontent\.com/i.test(String(target?.url || ''))
+      );
+      const info = matches.find((target) => String(target?.parentId || '').trim() === currentTargetId)
+        || (matches.length === 1 ? matches[0] : null);
+      const targetId = String(info?.targetId || '').trim();
+      if (!targetId) return null;
+
+      const attach = await this.#sendDebuggerCommand('Target.attachToTarget', { targetId, flatten: true }).catch(() => null);
+      const childSessionId = String(attach?.sessionId || '').trim();
+      if (!childSessionId) return null;
+      try {
+        await this.#sendDebuggerCommand('Page.enable', {}, childSessionId).catch(() => {});
+        await this.#sendDebuggerCommand('Runtime.enable', {}, childSessionId).catch(() => {});
+        return await fn(childSessionId, info);
+      } finally {
+        await this.#sendDebuggerCommand('Target.detachFromTarget', { sessionId: childSessionId }).catch(() => {});
+      }
+    });
+  }
+
   isClosed() {
     return this.win?.isDestroyed?.() || this.win?.webContents?.isDestroyed?.();
   }
@@ -27,6 +92,21 @@ class ElectronPageAdapter {
 
   async evaluate(js) {
     return await this.win.webContents.executeJavaScript(js, true);
+  }
+
+  async evaluateDeepResearch(js) {
+    return await this.#withDeepResearchTarget(async (childSessionId) => {
+      const result = await this.#sendDebuggerCommand(
+        'Runtime.evaluate',
+        {
+          expression: String(js || ''),
+          awaitPromise: true,
+          returnByValue: true
+        },
+        childSessionId
+      );
+      return result?.result?.value;
+    });
   }
 
   async getUrl() {
@@ -66,21 +146,11 @@ class ElectronPageAdapter {
   }
 
   async setFileInputFiles(files) {
-    const wc = this.win.webContents;
-    const didAttach = !wc.debugger.isAttached();
-    try {
-      if (didAttach) wc.debugger.attach('1.3');
-    } catch {
-      const err = new Error('file_upload_unavailable');
-      err.data = { reason: 'debugger_attach_failed' };
-      throw err;
-    }
-
-    try {
+    return await this.#withDebugger(async () => {
       let lastNodeIds = [];
       for (let attempt = 0; attempt < 10; attempt++) {
-        const { root } = await wc.debugger.sendCommand('DOM.getDocument', { depth: 12, pierce: true });
-        const q = await wc.debugger.sendCommand('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"]' });
+        const { root } = await this.#sendDebuggerCommand('DOM.getDocument', { depth: 12, pierce: true });
+        const q = await this.#sendDebuggerCommand('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"]' });
         const nodeIds = Array.isArray(q?.nodeIds) ? q.nodeIds : [];
         lastNodeIds = nodeIds;
         if (!nodeIds.length) {
@@ -91,13 +161,13 @@ class ElectronPageAdapter {
         let lastErr = null;
         for (const nodeId of [...nodeIds].reverse()) {
           try {
-            await wc.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files });
+            await this.#sendDebuggerCommand('DOM.setFileInputFiles', { nodeId, files });
             // Dispatch change event to trigger React's synthetic event handlers.
             // CDP setFileInputFiles may not always fire the event that React listens for.
             try {
-              const { object } = await wc.debugger.sendCommand('DOM.resolveNode', { nodeId });
+              const { object } = await this.#sendDebuggerCommand('DOM.resolveNode', { nodeId });
               if (object?.objectId) {
-                await wc.debugger.sendCommand('Runtime.callFunctionOn', {
+                await this.#sendDebuggerCommand('Runtime.callFunctionOn', {
                   objectId: object.objectId,
                   functionDeclaration: `function() {
                     const ev = new Event('change', { bubbles: true });
@@ -122,11 +192,114 @@ class ElectronPageAdapter {
       const err = new Error('missing_file_input');
       err.data = { selector: 'input[type=file]', found: lastNodeIds.length };
       throw err;
-    } finally {
+    }, {
+      attachErrorMessage: 'file_upload_unavailable',
+      attachErrorData: { reason: 'debugger_attach_failed' }
+    });
+  }
+
+  async waitForDownload({ timeoutMs = 15_000, outDir } = {}) {
+    const wc = this.win?.webContents;
+    const session = wc?.session;
+    const targetDir = String(outDir || '').trim();
+    if (!session || !targetDir) return null;
+
+    return await new Promise((resolve) => {
+      const waitStartedAt = Date.now();
+      let settled = false;
+      let timer = null;
+
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        try {
+          session.removeListener?.('will-download', onDownload);
+        } catch {}
+        resolve(value || null);
+      };
+
+      const onDownload = (event, item, sourceWebContents) => {
+        if (!item) return;
+        if (sourceWebContents && wc && sourceWebContents !== wc) return;
+
+        const rawName = String(item.getFilename?.() || '').trim() || `download-${Date.now()}`;
+        const safeName = rawName.replace(/[\\/:*?"<>|]+/g, '-');
+        const parsed = path.parse(safeName);
+        const downloadStartedAt = Date.now();
+        let finalName = safeName;
+        let filePath = path.join(targetDir, finalName);
+        const reserve = () => {
+          try {
+            fsSync.mkdirSync(targetDir, { recursive: true });
+          } catch {}
+          if (!fsSync.existsSync(filePath)) return;
+          for (let suffix = 1; suffix < 1000; suffix++) {
+            finalName = `${parsed.name}-${suffix}${parsed.ext}`;
+            filePath = path.join(targetDir, finalName);
+            if (!fsSync.existsSync(filePath)) return;
+          }
+        };
+        const findCompletedPath = () => {
+          if (fsSync.existsSync(filePath)) return filePath;
+          const candidates = [];
+          try {
+            const rows = fsSync.readdirSync(targetDir, { withFileTypes: true });
+            for (const row of rows) {
+              if (!row?.isFile?.()) continue;
+              const candidatePath = path.join(targetDir, row.name);
+              const candidateParsed = path.parse(row.name);
+              if (candidateParsed.ext !== parsed.ext) continue;
+              if (candidateParsed.name !== parsed.name && !candidateParsed.name.startsWith(`${parsed.name}-`)) continue;
+              const stat = fsSync.statSync(candidatePath);
+              if (!stat.isFile()) continue;
+              if (Number(stat.mtimeMs || 0) < Math.min(downloadStartedAt, waitStartedAt) - 2_000) continue;
+              candidates.push({ path: candidatePath, mtimeMs: Number(stat.mtimeMs || 0) });
+            }
+          } catch {}
+          candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+          return candidates[0]?.path || null;
+        };
+
+        const done = (_event, state) => {
+          if (String(state || '') !== 'completed') {
+            finish(null);
+            return;
+          }
+          void (async () => {
+            const deadline = Date.now() + 500;
+            let completedPath = findCompletedPath();
+            while (!completedPath && Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              completedPath = findCompletedPath();
+            }
+            const finalPath = completedPath || filePath;
+            finish({
+              path: finalPath,
+              name: path.basename(finalPath),
+              mime: typeof item.getMimeType === 'function' ? item.getMimeType() || null : null,
+              source: typeof item.getURL === 'function' ? item.getURL() || null : null
+            });
+          })();
+        };
+
+        try {
+          reserve();
+          item.setSavePath?.(filePath);
+          item.once?.('done', done);
+        } catch {
+          finish(null);
+        }
+      };
+
       try {
-        if (didAttach && wc.debugger.isAttached()) wc.debugger.detach();
-      } catch {}
-    }
+        session.on('will-download', onDownload);
+      } catch {
+        finish(null);
+        return;
+      }
+      timer = setTimeout(() => finish(null), Math.max(1, Number(timeoutMs) || 0));
+    });
   }
 }
 

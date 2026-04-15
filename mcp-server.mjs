@@ -126,6 +126,49 @@ registerTool(
 );
 
 registerTool(
+  'agentify_research',
+  {
+    description:
+      'Send a prompt through the ChatGPT Deep Research channel asynchronously. Returns immediately with a durable run id; poll agentify_get_run for status and outputs.',
+    inputSchema: {
+      tabId: z.string().optional().describe('Tab/session id to use. Must point to a ChatGPT tab if provided.'),
+      key: z.string().optional().describe('Stable tab key (e.g., project name); creates a ChatGPT tab if missing.'),
+      projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
+      bundleName: z.string().optional().describe('Named context bundle to merge into this research request before sending.'),
+      prompt: z.string().describe('Full prompt to send to ChatGPT Deep Research.'),
+      attachments: z.array(z.string()).optional().describe('Local file paths to upload before sending the prompt.'),
+      contextPaths: z.array(z.string()).optional().describe('Local files/folders to pack into the prompt and/or attach automatically.'),
+      timeoutMs: z.number().optional().describe('Maximum time to allow the research run before it is marked timed out.')
+    }
+  },
+  async ({ tabId, key, projectUrl, bundleName, prompt, attachments, contextPaths, timeoutMs }) => {
+    const resolvedAttachments = resolveLocalPaths(attachments || []);
+    const resolvedContextPaths = resolveLocalPaths(contextPaths || []);
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/research',
+      body: {
+        source: 'mcp',
+        tabId,
+        key,
+        projectUrl,
+        bundleName,
+        prompt,
+        attachments: resolvedAttachments,
+        contextPaths: resolvedContextPaths,
+        timeoutMs: timeoutMs || undefined
+      }
+    });
+    return {
+      content: [{ type: 'text', text: `Research submitted (async). tabId=${data.tabId || ''}, key=${data.key || ''}, runId=${data.runId || ''}. Poll agentify_get_run for progress and outputs.` }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
   'agentify_read_page',
   {
     description: 'Read text content from the active tab in the local Agentify Desktop window.',

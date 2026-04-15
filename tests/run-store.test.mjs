@@ -117,3 +117,64 @@ test('run-store: queued writes keep finalized runs terminal on disk', async () =
   assert.equal(persisted.detail, 'done');
   assert.equal(typeof persisted.finishedAt, 'number');
 });
+
+test('run-store: researchMeta persists, merges on patch, and stays out of list summaries', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-research-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const store = createRunStore(stateDir);
+  await store.load();
+
+  await store.create({
+    id: 'run-research-1',
+    kind: 'research',
+    source: 'mcp',
+    status: 'success',
+    phase: 'exporting_output',
+    startedAt: Date.now(),
+    promptPreview: 'deep research',
+    researchMeta: {
+      activation: {
+        requested: true,
+        activated: true,
+        error: null,
+        tabId: 't-research',
+        conversationUrl: 'https://chatgpt.com/c/research-1'
+      },
+      outputManifest: {
+        dir: '/tmp/research-output',
+        responsePath: '/tmp/research-output/response.md',
+        exportedMarkdownPath: '/tmp/research-output/export.md',
+        files: [{ id: 'artifact-1', path: '/tmp/research-output/response.md', name: 'response.md' }]
+      }
+    }
+  });
+
+  const full = store.get('run-research-1');
+  assert.equal(full?.researchMeta?.activation?.activated, true);
+  assert.equal(full?.researchMeta?.outputManifest?.responsePath, '/tmp/research-output/response.md');
+
+  await store.patch('run-research-1', {
+    researchMeta: {
+      outputManifest: {
+        responsePath: '/tmp/research-output/final-response.md'
+      }
+    }
+  });
+
+  const patched = store.get('run-research-1');
+  assert.equal(patched?.researchMeta?.activation?.activated, true);
+  assert.equal(patched?.researchMeta?.outputManifest?.responsePath, '/tmp/research-output/final-response.md');
+  assert.equal(patched?.researchMeta?.outputManifest?.exportedMarkdownPath, '/tmp/research-output/export.md');
+
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  const fromDisk = reloaded.get('run-research-1');
+  assert.equal(fromDisk?.researchMeta?.activation?.activated, true);
+  assert.equal(fromDisk?.researchMeta?.outputManifest?.responsePath, '/tmp/research-output/final-response.md');
+
+  const listed = store.list({ includeArchived: true });
+  assert.equal(listed.length, 1);
+  assert.equal('researchMeta' in listed[0], false);
+});

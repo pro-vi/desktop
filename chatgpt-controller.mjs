@@ -18,6 +18,37 @@ function clipText(value, max = 240) {
   return `${text.slice(0, Math.max(0, max - 3))}...`;
 }
 
+function looksLikeResearchShellText(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!text) return false;
+  return (
+    /chatgpt said:\s*deep research(?:\s+apps)?(?:\s+sites)?(?:\s+chatgpt can make mistakes\. check important info\.)?/.test(text) ||
+    text === 'deep research' ||
+    text === 'deep research apps' ||
+    text === 'deep research apps sites' ||
+    /^deep research(?:\s+apps)?(?:\s+sites)?(?:\s+chatgpt can make mistakes\. check important info\.)?$/.test(text)
+  );
+}
+
+function buildResearchMeta({ activated = false, error = null, tabId = null, conversationUrl = null, debug = null } = {}) {
+  return {
+    activation: {
+      requested: true,
+      activated: !!activated,
+      error: error ? String(error) : null,
+      tabId: tabId || null,
+      conversationUrl: conversationUrl || null,
+      debug: debug && typeof debug === 'object' ? safeClone(debug) : null
+    }
+  };
+}
+
+function safeClone(value) {
+  return globalThis.structuredClone
+    ? globalThis.structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+}
+
 function blockedTitle(kind) {
   if (kind === 'login') return 'Needs sign-in';
   if (kind === 'captcha') return 'Needs CAPTCHA';
@@ -25,6 +56,60 @@ function blockedTitle(kind) {
   if (kind === 'ui') return 'Needs page ready';
   return 'Needs attention';
 }
+
+const HOST_DOM_COLLECTION_HELPERS_JS = String.raw`
+  const visible = (n) => {
+    if (!n) return false;
+    const r = n.getBoundingClientRect();
+    const style = window.getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const uniq = (nodes) => {
+    const out = [];
+    const seen = new Set();
+    for (const n of nodes) {
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      out.push(n);
+    }
+    return out;
+  };
+  const queryAll = (sel) => {
+    if (!sel) return [];
+    try {
+      return Array.from(document.querySelectorAll(sel));
+    } catch {
+      return [];
+    }
+  };
+`;
+
+const NESTED_DOM_COLLECTION_HELPERS_JS = String.raw`
+  const visible = (n) => {
+    if (!n) return false;
+    const r = n.getBoundingClientRect();
+    const style = d.defaultView?.getComputedStyle?.(n);
+    return r.width > 0 && r.height > 0 && style && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const uniq = (nodes) => {
+    const out = [];
+    const seen = new Set();
+    for (const n of nodes) {
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      out.push(n);
+    }
+    return out;
+  };
+  const queryAll = (sel) => {
+    if (!sel) return [];
+    try {
+      return Array.from(d.querySelectorAll(sel));
+    } catch {
+      return [];
+    }
+  };
+`;
 
 class Mutex {
   #p = Promise.resolve();
@@ -68,6 +153,26 @@ export class ChatGPTController {
     return await this.page.evaluate(js);
   }
 
+  async #evalDeepResearch(js) {
+    if (typeof this.page?.evaluateDeepResearch !== 'function') return null;
+    return await this.page.evaluateDeepResearch(js);
+  }
+
+  async #readDeepResearchText({ maxChars = 200_000 } = {}) {
+    const text = await this.#evalDeepResearch(`(() => {
+      const cap = ${maxChars};
+      const clean = (s) => String(s || '').replace(/\\u0000/g, '').replace(/\\s+\\n/g, '\\n').trim();
+      const rootFrame = document.querySelector('#root');
+      const d = rootFrame?.contentDocument;
+      if (!d) return '';
+      const root = d.body || d.documentElement;
+      let txt = clean(root?.innerText) || clean(d.body?.innerText) || clean(d.documentElement?.innerText);
+      if (!txt) txt = clean(root?.textContent) || clean(d.body?.textContent) || clean(d.documentElement?.textContent);
+      return txt.slice(0, cap);
+    })()`);
+    return String(text || '');
+  }
+
   async #emitProgress(patch) {
     if (!this.currentRun?.onProgress || !patch || typeof patch !== 'object') return;
     try {
@@ -80,7 +185,7 @@ export class ChatGPTController {
   }
 
   async readPageText({ maxChars = 200_000 } = {}) {
-    const text = await this.#eval(`(() => {
+    let text = await this.#eval(`(() => {
       const cap = ${maxChars};
       const clean = (s) => String(s || '').replace(/\\u0000/g, '').replace(/\\s+\\n/g, '\\n').trim();
       const root = document.querySelector('main') || document.body || document.documentElement;
@@ -99,7 +204,243 @@ export class ChatGPTController {
 
       return txt.slice(0, cap);
     })()`);
-    return String(text || '');
+    text = String(text || '');
+    if (!text || looksLikeResearchShellText(text)) {
+      const deepText = await this.#readDeepResearchText({ maxChars }).catch(() => '');
+      if (deepText) return deepText;
+    }
+    return text;
+  }
+
+  async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {
+    const normalizedIntent = String(intent || '').trim().toLowerCase();
+    if (!normalizedIntent) return null;
+
+    const buttonSel = JSON.stringify(this.selectors.composerMenuButton || '');
+    const menuSel = JSON.stringify(this.selectors.composerMenu || this.selectors.researchModeMenu || '');
+    const itemSel = JSON.stringify(this.selectors.composerMenuItem || '');
+    const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
+    const legacyResearchButtonSel = JSON.stringify(this.selectors.researchModeButton || '');
+    const legacyResearchOptionSel = JSON.stringify(this.selectors.researchModeOption || '');
+    const start = Date.now();
+    let last = null;
+    let lastClickAt = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      const allowClick = lastClickAt === 0 || (Date.now() - lastClickAt) >= 1500;
+      const snap = await this.#eval(`(() => {
+        const intent = ${JSON.stringify(normalizedIntent)};
+        const allowClick = ${allowClick ? 'true' : 'false'};
+        ${HOST_DOM_COLLECTION_HELPERS_JS}
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const scorePrompt = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
+        const labelOf = (n) =>
+          [
+            n?.getAttribute?.('aria-label') || '',
+            n?.getAttribute?.('title') || '',
+            n?.getAttribute?.('data-testid') || '',
+            n?.id || '',
+            n?.textContent || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const promptCandidates = Array.from(document.querySelectorAll(${promptSel}));
+        const promptFallback = Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]'));
+        const promptPool = [];
+        const seenPrompt = new Set();
+        for (const n of [...promptCandidates, ...promptFallback]) {
+          if (!n || seenPrompt.has(n)) continue;
+          seenPrompt.add(n);
+          promptPool.push(n);
+        }
+        let prompt = null;
+        let bestPrompt = -Infinity;
+        for (const n of promptPool) {
+          if (!editable(n)) continue;
+          const s = scorePrompt(n);
+          if (s > bestPrompt) {
+            bestPrompt = s;
+            prompt = n;
+          }
+        }
+        const composerRoot =
+          prompt?.closest('form') ||
+          prompt?.closest('[data-testid*="composer" i], [data-testid*="prompt" i], [data-testid*="chat-input" i], [aria-label*="message" i], [aria-label*="prompt" i]') ||
+          prompt?.closest('main') ||
+          document.body;
+        const menuRoots = uniq([
+          ...queryAll(${menuSel}),
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]'))
+        ]).filter(visible);
+        const scoreUpload = (label) => {
+          if (!label) return -1;
+          if (/add files/.test(label)) return 130;
+          if (/add photos and files/.test(label)) return 120;
+          if (/add photos/.test(label)) return 110;
+          if (/attach|upload|paperclip/.test(label)) return 70;
+          return -1;
+        };
+        const scoreResearch = (label, generic = false) => {
+          if (!label) return -1;
+          if (/share|copy|download|export|pdf|markdown/.test(label)) return -1;
+          if (/deep research/.test(label)) return 130;
+          if (generic && /research|tools/.test(label)) return 70;
+          return -1;
+        };
+        const intentScore = (label, generic = false) =>
+          intent === 'upload_files' ? scoreUpload(label) : scoreResearch(label, generic);
+        const itemPool = uniq([
+          ...queryAll(${itemSel}),
+          ...queryAll(${legacyResearchOptionSel}),
+          ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], [role="tab"]')))
+        ]);
+        const rankedItem = itemPool
+          .map((n) => ({ node: n, label: labelOf(n), score: intentScore(labelOf(n), false) }))
+          .filter((item) => visible(item.node) && item.score >= 0)
+          .sort((a, b) => b.score - a.score)[0] || null;
+        if (!allowClick) {
+          return {
+            action: 'cooldown',
+            reason: 'waiting_after_click',
+            label: rankedItem?.label || null,
+            menuOpen: menuRoots.length > 0
+          };
+        }
+        if (rankedItem && (menuRoots.length > 0 || intent === 'deep_research')) {
+          const r = rankedItem.node.getBoundingClientRect();
+          return {
+            action: 'pointer_item',
+            reason: intent === 'upload_files' ? 'clicked_upload_menu_item' : 'clicked_deep_research_option',
+            label: rankedItem.label || null,
+            menuOpen: menuRoots.length > 0,
+            rect: { x: r.x, y: r.y, w: r.width, h: r.height }
+          };
+        }
+
+        const composerButtons = Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"]'));
+        const globalButtons = Array.from(document.querySelectorAll('button, [role="button"], [role="tab"]'));
+        const menuButtonPool = uniq([
+          ...queryAll(${buttonSel}),
+          ...composerButtons,
+          ...globalButtons
+        ]);
+        const explicitMenuButtons = new Set(queryAll(${buttonSel}));
+        const rankedMenuButton = menuButtonPool
+          .map((n) => {
+            const label = labelOf(n);
+            let score = -1;
+            if (visible(n) && n.matches('button, [role="button"], [role="tab"]')) {
+              if (explicitMenuButtons.has(n)) score = 140;
+              else if (n.id === 'composer-plus-btn') score = 135;
+              else if (String(n.getAttribute('data-testid') || '').trim().toLowerCase() === 'composer-plus-btn') score = 135;
+              else if (/add files and more|files and more/.test(label)) score = 130;
+              else if (/add files|add photos/.test(label) && !/deep research|create image/.test(label)) score = 110;
+            }
+            return { node: n, label, score };
+          })
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score)[0] || null;
+        if (rankedMenuButton) {
+          const r = rankedMenuButton.node.getBoundingClientRect();
+          return {
+            action: 'pointer_button',
+            reason: 'clicked_composer_menu_button',
+            label: rankedMenuButton.label || null,
+            menuOpen: menuRoots.length > 0,
+            rect: { x: r.x, y: r.y, w: r.width, h: r.height }
+          };
+        }
+
+        if (intent === 'upload_files') {
+          const legacyAttach = uniq([...composerButtons, ...globalButtons])
+            .map((n) => ({ node: n, label: labelOf(n), score: scoreUpload(labelOf(n)) }))
+            .filter((item) => visible(item.node) && item.score >= 0)
+            .sort((a, b) => b.score - a.score)[0] || null;
+          if (legacyAttach) {
+            const r = legacyAttach.node.getBoundingClientRect();
+            return {
+              action: 'pointer_legacy_button',
+              reason: 'clicked_attach_trigger',
+              label: legacyAttach.label || null,
+              menuOpen: false,
+              rect: { x: r.x, y: r.y, w: r.width, h: r.height }
+            };
+          }
+          return { action: 'none', reason: 'upload_controls_not_found', menuOpen: false };
+        }
+
+        const legacyResearch = uniq([
+          ...queryAll(${legacyResearchButtonSel}),
+          ...globalButtons
+        ])
+          .map((n) => ({ node: n, label: labelOf(n), score: scoreResearch(labelOf(n), true) }))
+          .filter((item) => visible(item.node) && item.score >= 0)
+          .sort((a, b) => b.score - a.score)[0] || null;
+        if (legacyResearch) {
+          const r = legacyResearch.node.getBoundingClientRect();
+          return {
+            action: 'pointer_legacy_button',
+            reason: 'clicked_research_trigger',
+            label: legacyResearch.label || null,
+            menuOpen: false,
+            rect: { x: r.x, y: r.y, w: r.width, h: r.height }
+          };
+        }
+
+        return { action: 'none', reason: 'research_controls_not_found', menuOpen: false };
+      })()`);
+      last = snap;
+      if (snap?.action === 'click_item') return snap;
+      if (snap?.action === 'pointer_item' && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
+        const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
+        await this.#clickAt(cx, cy);
+        return { ...snap, action: 'click_item' };
+      }
+      if ((snap?.action === 'pointer_button' || snap?.action === 'pointer_legacy_button') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
+        const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
+        await this.#clickAt(cx, cy);
+        lastClickAt = Date.now();
+        await sleep(450);
+        continue;
+      }
+      if (snap?.action === 'click_button' || snap?.action === 'click_legacy_button') {
+        lastClickAt = Date.now();
+        await sleep(450);
+        continue;
+      }
+      if (snap?.action === 'cooldown') {
+        await sleep(250);
+        continue;
+      }
+      await sleep(250);
+    }
+
+    return last;
   }
 
   async detectChallenge() {
@@ -1035,91 +1376,13 @@ export class ChatGPTController {
       return { name, mime, data: buf.toString('base64') };
     }));
 
-    // Click the composer-scoped paperclip/attach button to ensure the right file input exists.
-    const attachOpen = await this.#eval(`(() => {
-      const visible = (n) => {
-        if (!n) return false;
-        const r = n.getBoundingClientRect();
-        const style = window.getComputedStyle(n);
-        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      };
-      const editable = (n) => {
-        if (!n) return false;
-        if (!visible(n)) return false;
-        if (n.matches('textarea')) return !n.disabled && !n.readOnly;
-        if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
-        return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
-      };
-      const scorePrompt = (n) => {
-        const r = n.getBoundingClientRect();
-        const label = [
-          n.getAttribute('aria-label') || '',
-          n.getAttribute('placeholder') || '',
-          n.getAttribute('name') || '',
-          n.getAttribute('id') || '',
-          n.getAttribute('data-testid') || ''
-        ].join(' ').toLowerCase();
-        let s = 0;
-        if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
-        if (n.matches('textarea')) s += 50;
-        if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
-        if (n.getAttribute('role') === 'textbox') s += 25;
-        if (r.width >= 260 && r.height >= 26) s += 20;
-        s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
-        s += Math.max(0, r.y / 8);
-        return s;
-      };
-      const promptCandidates = Array.from(document.querySelectorAll(${JSON.stringify(this.selectors.promptTextarea)}));
-      const promptFallback = Array.from(document.querySelectorAll('main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]'));
-      const promptPool = [];
-      const seenPrompt = new Set();
-      for (const n of [...promptCandidates, ...promptFallback]) {
-        if (!n || seenPrompt.has(n)) continue;
-        seenPrompt.add(n);
-        promptPool.push(n);
-      }
-      let prompt = null;
-      let bestPrompt = -Infinity;
-      for (const n of promptPool) {
-        if (!editable(n)) continue;
-        const s = scorePrompt(n);
-        if (s > bestPrompt) {
-          bestPrompt = s;
-          prompt = n;
-        }
-      }
-      const composerRoot =
-        prompt?.closest('form') ||
-        prompt?.closest('[data-testid*=\"composer\" i], [data-testid*=\"prompt\" i], [data-testid*=\"chat-input\" i], [aria-label*=\"message\" i], [aria-label*=\"prompt\" i]') ||
-        prompt?.closest('main') ||
-        document.body;
-      const candidates = Array.from((composerRoot || document).querySelectorAll('button, [role="button"]'));
-      const attach = candidates.find(b => /attach|upload|paperclip/i.test((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||'')));
-      if (attach) {
-        attach.click();
-        return {
-          ok: true,
-          source: 'composer',
-          label: ((attach.getAttribute('aria-label') || '') + ' ' + (attach.textContent || '')).trim() || null
-        };
-      }
-      const globalCandidates = Array.from(document.querySelectorAll('button, [role="button"]'));
-      const fallbackAttach = globalCandidates.find(b => /attach|upload|paperclip/i.test((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||'')));
-      if (fallbackAttach) {
-        fallbackAttach.click();
-        return {
-          ok: true,
-          source: 'global',
-          label: ((fallbackAttach.getAttribute('aria-label') || '') + ' ' + (fallbackAttach.textContent || '')).trim() || null
-        };
-      }
-      return { ok: false, source: 'none', label: null };
-    })()`);
+    const attachOpen = await this.#openComposerAction({ intent: 'upload_files', timeoutMs: 10_000 });
     await this.#emitProgress({
       attachmentDebug: {
         stage: 'open_picker',
-        source: attachOpen?.source || 'unknown',
-        buttonLabel: clipText(attachOpen?.label || '')
+        source: attachOpen?.action || 'unknown',
+        buttonLabel: clipText(attachOpen?.label || ''),
+        reason: clipText(attachOpen?.reason || '', 120) || null
       }
     });
     await sleep(300);
@@ -1419,11 +1682,27 @@ export class ChatGPTController {
     throw err;
   }
 
-  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, preSendCount = 0, preSendText = '', preSendPageText = '' } = {}) {
+  async #waitForAssistantStable({
+    timeoutMs = 5 * 60_000,
+    stableMs = 1500,
+    pollMs = 400,
+    preSendCount = 0,
+    preSendText = '',
+    preSendPageText = '',
+    minimumTimeoutMs = 0,
+    minimumStableMs = 0,
+    extraThinkingPattern = ''
+  } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
+    const extraThinkingSource = JSON.stringify(String(extraThinkingPattern || '').trim());
+    const effectiveTimeoutMs = Math.max(
+      Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Math.floor(Number(timeoutMs)) : 0,
+      Number.isFinite(Number(minimumTimeoutMs)) && Number(minimumTimeoutMs) > 0 ? Math.floor(Number(minimumTimeoutMs)) : 0,
+      1
+    );
     const start = Date.now();
     let last = '';
     let lastChange = Date.now();
@@ -1432,9 +1711,10 @@ export class ChatGPTController {
     let continueClicks = 0;
     let generationObserved = false;
 
-    while (Date.now() - start < timeoutMs) {
+    while (Date.now() - start < effectiveTimeoutMs) {
       this.#throwIfStopRequested();
       const snap = await this.#eval(`(() => {
+        const extraThinkingRe = ${extraThinkingSource} ? new RegExp(${extraThinkingSource}, 'i') : null;
         const stop = !!document.querySelector(${stopSel});
         const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
           const r = n.getBoundingClientRect();
@@ -1453,9 +1733,15 @@ export class ChatGPTController {
         // Detect thinking state from UI chrome (banners, status elements), NOT from the
         // assistant response text — responses that mention "reasoning" or "thinking" must
         // not trigger this. Scan elements outside the assistant message nodes.
-        const thinkingBanner = Array.from(document.querySelectorAll('[class*="think"], [data-testid*="think"], [aria-label*="think"], .sr-only, [role="status"]')).some(el => {
+        const thinkingBanner = Array.from(document.querySelectorAll(
+          '[class*="think"], [data-testid*="think"], [aria-label*="think"], [class*="research"], [data-testid*="research"], [aria-label*="research"], [class*="search"], [data-testid*="search"], [aria-label*="search"], [class*="source"], [data-testid*="source"], [aria-label*="source"], [class*="clarif"], [data-testid*="clarif"], [aria-label*="clarif"], .sr-only, [role="status"], [aria-live]'
+        )).some(el => {
           if (lastNode && lastNode.contains(el)) return false;
-          return /\bthinking\b|\bpro thinking\b|\bextended pro\b/i.test((el.textContent || '').trim());
+          const text = (el.textContent || '').trim();
+          if (!text) return false;
+          if (/\bthinking\b|\bpro thinking\b|\bextended pro\b|\breasoning\b/i.test(text)) return true;
+          if (extraThinkingRe && extraThinkingRe.test(text)) return true;
+          return false;
         });
         const isThinking = thinkingBanner;
         return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking, pageText: fallbackMainText };
@@ -1491,7 +1777,11 @@ export class ChatGPTController {
       if (generating) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
-      const dynamicStableMs = Math.max(stableMs, txt.length > 8000 ? 3000 : txt.length > 2000 ? 2200 : stableMs);
+      const dynamicStableMs = Math.max(
+        stableMs,
+        Number.isFinite(Number(minimumStableMs)) && Number(minimumStableMs) > 0 ? Math.floor(Number(minimumStableMs)) : 0,
+        txt.length > 8000 ? 3000 : txt.length > 2000 ? 2200 : stableMs
+      );
       const stable = Date.now() - lastChange >= dynamicStableMs;
       const stopGoneLongEnough = stopGoneAt != null && Date.now() - stopGoneAt >= 800;
 
@@ -1564,6 +1854,561 @@ export class ChatGPTController {
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
+  }
+
+  async #activateResearchMode({ timeoutMs = 20_000 } = {}) {
+    await this.#emitProgress({ phase: 'activating_research_mode' });
+    const menuSel = JSON.stringify(this.selectors.researchModeMenu || '');
+    const activeSel = JSON.stringify(this.selectors.researchModeActive || '');
+    const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
+    const start = Date.now();
+    const trigger = await this.#openComposerAction({ intent: 'deep_research', timeoutMs: Math.min(timeoutMs, 10_000) });
+    const clickedAt = trigger && ['click_item', 'click_button', 'click_legacy_button'].includes(trigger.action)
+      ? Date.now()
+      : 0;
+    let last = null;
+    let lastAction = trigger?.action || 'none';
+
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      const snap = await this.#eval(`(() => {
+        const clickedAt = ${Math.max(0, clickedAt)};
+        ${HOST_DOM_COLLECTION_HELPERS_JS}
+        const labelOf = (n) =>
+          [
+            n?.getAttribute?.('aria-label') || '',
+            n?.getAttribute?.('title') || '',
+            n?.getAttribute?.('data-testid') || '',
+            n?.textContent || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
+        if (explicitActiveNodes.length) {
+          return { active: true, action: 'none', reason: 'active_selector_visible', label: labelOf(explicitActiveNodes[0]) || null };
+        }
+        const activeNodes = uniq(Array.from(document.querySelectorAll('[aria-pressed="true"], [aria-checked="true"], [data-state="active"], [data-state="on"], [aria-selected="true"]')))
+          .filter((n) => visible(n) && /deep research|research/i.test(labelOf(n)));
+        if (activeNodes.length) {
+          return { active: true, action: 'none', reason: 'generic_active_research_state', label: labelOf(activeNodes[0]) || 'research' };
+        }
+
+        const menuRoots = uniq([
+          ...queryAll(${menuSel}),
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]'))
+        ]).filter(visible);
+        const composerNodes = uniq([
+          ...queryAll(${promptSel}),
+          ...Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]'))
+        ]).filter(visible);
+        const composerRoot =
+          composerNodes[0]?.closest('form') ||
+          composerNodes[0]?.closest('[data-testid*="composer" i], [data-testid*="prompt" i], [data-testid*="chat-input" i], [aria-label*="message" i], [aria-label*="prompt" i]') ||
+          composerNodes[0]?.closest('main') ||
+          document.body;
+        const insideMenu = (node) => menuRoots.some((root) => root === node || root.contains(node));
+        const composerHintNodes = uniq(Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], [aria-label], [title], [data-testid]')))
+          .filter((n) => visible(n) && !insideMenu(n));
+        const composerHints = composerHintNodes
+          .map((n) => labelOf(n))
+          .filter(Boolean)
+          .filter((label, index, arr) => arr.indexOf(label) === index)
+          .slice(0, 12);
+        const promptHints = composerNodes
+          .map((n) => [
+            n?.getAttribute?.('aria-label') || '',
+            n?.getAttribute?.('placeholder') || '',
+            n?.getAttribute?.('data-testid') || '',
+            n?.getAttribute?.('title') || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase())
+          .filter(Boolean)
+          .slice(0, 4);
+        const composerText = String(composerRoot?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 240);
+        const menuText = menuRoots
+          .map((root) => String(root?.innerText || '').replace(/\\s+/g, ' ').trim())
+          .filter(Boolean)
+          .join(' | ')
+          .slice(0, 240);
+        const dialog = uniq(Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [data-testid*="modal"], [data-radix-dialog-content]'))).find(visible) || null;
+        const dialogText = String(dialog?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 240);
+        if (clickedAt > 0 && composerHints.some((label) => /deep research/.test(label))) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'composer_hint_research_state',
+            label: composerHints.find((label) => /deep research/.test(label)) || null,
+            menuOpen: menuRoots.length > 0,
+            menuText,
+            dialogText,
+            composerText,
+            composerHints,
+            promptHints
+          };
+        }
+        if (clickedAt > 0 && promptHints.some((label) => /deep research|research/.test(label))) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'prompt_hint_research_state',
+            label: promptHints.find((label) => /deep research|research/.test(label)) || null,
+            menuOpen: menuRoots.length > 0,
+            menuText,
+            dialogText,
+            composerText,
+            composerHints,
+            promptHints
+          };
+        }
+        if (clickedAt > 0 && !menuRoots.length && composerNodes.length) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'latched_after_click',
+            label: null,
+            menuOpen: false,
+            menuText,
+            dialogText,
+            composerText,
+            composerHints,
+            promptHints
+          };
+        }
+        return {
+          active: false,
+          action: 'none',
+          reason: 'research_activation_pending',
+          menuOpen: menuRoots.length > 0,
+          menuText,
+          dialogText,
+          composerText,
+          composerHints,
+          promptHints
+        };
+      })()`);
+      last = snap;
+      if (snap?.active) return snap;
+      await sleep(250);
+    }
+
+    const err = new Error('research_mode_activation_failed');
+    err.data = {
+      reason: clipText(
+        trigger?.reason === 'research_controls_not_found'
+          ? trigger.reason
+          : last?.reason || last?.label || trigger?.reason || 'research_activation_timeout',
+        160
+      ) || 'research_activation_timeout',
+      state: last || null,
+      trigger: trigger || null,
+      lastAction
+    };
+    throw err;
+  }
+
+  #ensureResearchDownloadPromise({ downloadPromise = null, timeoutMs = 15_000, outDir } = {}) {
+    if (downloadPromise || typeof this.page?.waitForDownload !== 'function') return downloadPromise || null;
+    return this.page.waitForDownload({
+      timeoutMs: Math.max(3_000, Math.min(20_000, timeoutMs)),
+      outDir
+    }).catch(() => null);
+  }
+
+  async #awaitImmediateResearchDownload(downloadPromise, { waitMs = 1_000 } = {}) {
+    if (!downloadPromise) return null;
+    return await Promise.race([
+      downloadPromise,
+      sleep(Math.max(1, Number(waitMs) || 0)).then(() => null)
+    ]);
+  }
+
+  async #exportResearchMarkdown({ outDir, timeoutMs = 15_000, maxFiles = 6 } = {}) {
+    await this.#emitProgress({ phase: 'exporting_output' });
+    const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+    const buttonSel = JSON.stringify(this.selectors.researchExportButton || '');
+    const menuSel = JSON.stringify(this.selectors.researchExportMenu || '');
+    const optionSel = JSON.stringify(this.selectors.researchExportMarkdownOption || '');
+    const start = Date.now();
+    let last = null;
+    let downloadPromise = null;
+    let downloadedFile = null;
+    let reportOpenedAt = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      const snap = await this.#eval(`(() => {
+        const reportOpenedAt = ${Math.max(0, reportOpenedAt)};
+        ${HOST_DOM_COLLECTION_HELPERS_JS}
+        const labelOf = (n) =>
+          [
+            n?.getAttribute?.('aria-label') || '',
+            n?.getAttribute?.('title') || '',
+            n?.getAttribute?.('data-testid') || '',
+            n?.getAttribute?.('download') || '',
+            n?.textContent || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const assistantNodes = Array.from(document.querySelectorAll(${assistantSel}));
+        const lastAssistant = assistantNodes[assistantNodes.length - 1];
+        const markdownLink = Array.from(lastAssistant?.querySelectorAll('a[href], a[download]') || []).find((n) => {
+          const label = labelOf(n);
+          const href = String(n.getAttribute('href') || n.href || '').toLowerCase();
+          const download = String(n.getAttribute('download') || '').trim();
+          const testId = String(n.getAttribute('data-testid') || '').trim().toLowerCase();
+          const exportHint = !!download || /export|download|attachment|report/.test(label) || /export|download|attachment|report/.test(testId);
+          return exportHint && /markdown|\\.md(?:$|[?#])/i.test(label + ' ' + href + ' ' + download + ' ' + testId);
+        });
+        if (markdownLink) {
+          return { ready: true, action: 'none', reason: 'markdown_link_present', label: labelOf(markdownLink) || 'markdown' };
+        }
+
+        const rectOf = (n) => {
+          const r = n.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        };
+
+        const menuRoots = uniq([
+          ...queryAll(${menuSel}),
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]'))
+        ]).filter(visible);
+        if (reportOpenedAt > 0 && Date.now() - reportOpenedAt < 1_500) {
+          return {
+            ready: false,
+            action: 'none',
+            reason: 'waiting_for_report_open',
+            menuOpen: menuRoots.length > 0
+          };
+        }
+
+        const assistantButtons = Array.from(lastAssistant?.querySelectorAll('button, [role="button"], a[href], a[download]') || []);
+        const optionPool = uniq([
+          ...queryAll(${optionSel}),
+          ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], a[href], a[download]'))),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], a[href], a[download]'))
+        ]);
+        const markdownOption = optionPool
+          .map((n) => {
+            const label = labelOf(n);
+            let score = -1;
+            if (visible(n) && /markdown|\\.md/.test(label) && !/copy|word|pdf/.test(label)) {
+              score = /export to markdown/.test(label) ? 150 : /markdown/.test(label) ? 120 : 90;
+              if (menuRoots.some((root) => root === n || root.contains(n))) score += 20;
+            }
+            return { node: n, label, score };
+          })
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score)[0] || null;
+        if (markdownOption) {
+          return {
+            ready: false,
+            action: 'pointer_markdown',
+            reason: 'clicked_markdown_option',
+            label: markdownOption.label || null,
+            menuOpen: menuRoots.length > 0,
+            rect: rectOf(markdownOption.node)
+          };
+        }
+
+        const buttonPool = uniq([
+          ...queryAll(${buttonSel}),
+          ...assistantButtons,
+          ...Array.from(document.querySelectorAll('button, [role="button"], a[href], a[download]'))
+        ]);
+        const exportButton = buttonPool
+          .map((n) => {
+            const label = labelOf(n);
+            let score = -1;
+            if (visible(n) && /export|download/.test(label) && !/copy|pdf|word|markdown/.test(label)) {
+              score = /export/.test(label) ? 140 : /download/.test(label) ? 120 : 90;
+              if (String(n.getAttribute('aria-label') || '').trim().toLowerCase() === 'export') score += 60;
+              if (String(n.getAttribute('aria-haspopup') || '').trim().toLowerCase() === 'menu') score += 40;
+              if (n.hasAttribute('aria-expanded')) score += 20;
+              if (lastAssistant && (lastAssistant === n || lastAssistant.contains(n))) score += 30;
+            }
+            return { node: n, label, score };
+          })
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score)[0] || null;
+        if (exportButton) {
+          return {
+            ready: false,
+            action: 'pointer_export',
+            reason: 'clicked_export_trigger',
+            label: exportButton.label || null,
+            menuOpen: menuRoots.length > 0,
+            rect: rectOf(exportButton.node)
+          };
+        }
+
+        const composerRoots = Array.from(document.querySelectorAll('form'));
+        const outsideComposer = (n) => !composerRoots.some((root) => root === n || root.contains(n));
+        const reportPool = uniq([
+          ...Array.from(document.querySelectorAll('[role="button"], button, [tabindex]')),
+          ...assistantButtons
+        ]);
+        const reportLauncher = reportPool
+          .map((n) => {
+            const label = labelOf(n);
+            let score = -1;
+            if (visible(n) && outsideComposer(n)) {
+              if (/research completed in/.test(label)) score = 220;
+              else if (/\\bdeep research\\b/.test(label)) score = 160;
+              else if (/citations|searches/.test(label) && /research/.test(label)) score = 120;
+              if (score >= 0) {
+                if (String(n.getAttribute('role') || '').trim().toLowerCase() === 'button') score += 20;
+                if (String(n.tagName || '').trim().toLowerCase() === 'button') score += 10;
+              }
+            }
+            return { node: n, label, score };
+          })
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score)[0] || null;
+        if (reportLauncher) {
+          return {
+            ready: false,
+            action: 'pointer_open_report',
+            reason: 'open_research_report',
+            label: reportLauncher.label || null,
+            menuOpen: menuRoots.length > 0,
+            rect: rectOf(reportLauncher.node)
+          };
+        }
+
+        return { ready: false, action: 'none', reason: 'export_controls_not_found', menuOpen: menuRoots.length > 0 };
+      })()`);
+      last = snap;
+      if (snap?.ready) break;
+      if ((snap?.action === 'pointer_markdown' || snap?.action === 'pointer_export' || snap?.action === 'pointer_open_report') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
+        const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
+        if (snap.action === 'pointer_markdown' && !downloadPromise && typeof this.page?.waitForDownload === 'function') {
+          downloadPromise = this.#ensureResearchDownloadPromise({ downloadPromise, timeoutMs, outDir });
+        }
+        await this.#clickAt(cx, cy);
+        if (snap.action === 'pointer_markdown') {
+          const immediate = await this.#awaitImmediateResearchDownload(downloadPromise);
+          downloadedFile = immediate || downloadedFile;
+          if (immediate?.path) break;
+        } else if (snap.action === 'pointer_open_report') {
+          reportOpenedAt = Date.now();
+          await sleep(900);
+        } else {
+          await sleep(500);
+        }
+        continue;
+      }
+
+      if (snap?.action === 'none') {
+        const nested = await this.#evalDeepResearch(`(() => {
+          const buttonSel = ${buttonSel};
+          const menuSel = ${menuSel};
+          const optionSel = ${optionSel};
+          const d = document.querySelector('#root')?.contentDocument;
+          if (!d) return { ready: false, action: 'none', reason: 'nested_doc_missing' };
+          ${NESTED_DOM_COLLECTION_HELPERS_JS}
+          const labelOf = (n) =>
+            [
+              n?.getAttribute?.('aria-label') || '',
+              n?.getAttribute?.('title') || '',
+              n?.getAttribute?.('data-testid') || '',
+              n?.getAttribute?.('download') || '',
+              n?.textContent || ''
+            ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const clickNode = (n) => {
+            try {
+              n?.click?.();
+              return true;
+            } catch {
+              return false;
+            }
+          };
+
+          const menuRoots = uniq([
+            ...queryAll(menuSel),
+            ...Array.from(d.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]'))
+          ]).filter(visible);
+
+          const optionPool = uniq([
+            ...queryAll(optionSel),
+            ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], a[href], a[download]'))),
+            ...Array.from(d.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], a[href], a[download]'))
+          ]);
+          const markdownOption = optionPool
+            .map((n) => {
+              const label = labelOf(n);
+              let score = -1;
+              if (visible(n) && /markdown|\\.md/.test(label) && !/copy|word|pdf/.test(label)) {
+                score = /export to markdown/.test(label) ? 150 : /markdown/.test(label) ? 120 : 90;
+                if (menuRoots.some((root) => root === n || root.contains(n))) score += 20;
+              }
+              return { node: n, label, score };
+            })
+            .filter((item) => item.score >= 0)
+            .sort((a, b) => b.score - a.score)[0] || null;
+          if (markdownOption) {
+            clickNode(markdownOption.node);
+            return {
+              ready: false,
+              action: 'dom_markdown_click',
+              reason: 'clicked_markdown_option',
+              label: markdownOption.label || null
+            };
+          }
+
+          const buttonPool = uniq([
+            ...queryAll(buttonSel),
+            ...Array.from(d.querySelectorAll('button, [role="button"], a[href], a[download]'))
+          ]);
+          const exportButton = buttonPool
+            .map((n) => {
+              const label = labelOf(n);
+              let score = -1;
+              if (visible(n) && /export|download/.test(label) && !/copy|pdf|word|markdown/.test(label)) {
+                score = /export/.test(label) ? 140 : /download/.test(label) ? 120 : 90;
+                if (String(n.getAttribute('aria-label') || '').trim().toLowerCase() === 'export') score += 60;
+                if (String(n.getAttribute('aria-haspopup') || '').trim().toLowerCase() === 'menu') score += 40;
+                if (n.hasAttribute('aria-expanded')) score += 20;
+              }
+              return { node: n, label, score };
+            })
+            .filter((item) => item.score >= 0)
+            .sort((a, b) => b.score - a.score)[0] || null;
+          if (exportButton) {
+            clickNode(exportButton.node);
+            return {
+              ready: false,
+              action: 'dom_export_click',
+              reason: 'clicked_export_trigger',
+              label: exportButton.label || null
+            };
+          }
+
+          return {
+            ready: false,
+            action: 'none',
+            reason: 'nested_export_controls_not_found',
+            text: String(d.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 200)
+          };
+        })()`).catch(() => null);
+        if (nested?.action === 'dom_markdown_click') {
+          last = nested;
+          downloadPromise = this.#ensureResearchDownloadPromise({ downloadPromise, timeoutMs, outDir });
+          const immediate = await this.#awaitImmediateResearchDownload(downloadPromise);
+          downloadedFile = immediate || downloadedFile;
+          if (immediate?.path) break;
+          await sleep(500);
+          continue;
+        }
+        if (nested?.action === 'dom_export_click') {
+          last = nested;
+          await sleep(500);
+          continue;
+        }
+        if (nested) last = nested;
+      }
+      await sleep(300);
+    }
+
+    if (!downloadedFile?.path && downloadPromise) {
+      try {
+        downloadedFile = await Promise.race([
+          downloadPromise,
+          sleep(Math.max(250, timeoutMs - Math.max(0, Date.now() - start))).then(() => null)
+        ]);
+      } catch {
+        downloadedFile = null;
+      }
+    }
+
+    const domItems = await this.getLastAssistantDownloads({ maxFiles }).catch(() => []);
+    const domFiles = await this.#saveDownloadItems({ items: domItems, outDir, linkMode: 'export' }).catch(() => []);
+    const files = [];
+    const seenPaths = new Set();
+    for (const item of [downloadedFile, ...(Array.isArray(domFiles) ? domFiles : [])]) {
+      const filePath = String(item?.path || '').trim();
+      if (!filePath || seenPaths.has(filePath)) continue;
+      seenPaths.add(filePath);
+      files.push(item);
+    }
+    const markdownFile = files.find((item) => /\.md$/i.test(String(item?.name || item?.path || '')) || /markdown/i.test(String(item?.mime || ''))) || null;
+    return {
+      state: last || null,
+      files,
+      exportedMarkdownPath: markdownFile?.path || null
+    };
+  }
+
+  async research({ prompt, attachments = [], timeoutMs = 45 * 60_000, outDir = path.join(this.stateDir, 'downloads'), onProgress = null } = {}) {
+    if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
+    if (prompt.length > 200_000) throw new Error('prompt_too_large');
+    const requestedTimeoutMs = Number(timeoutMs);
+    const effectiveTimeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+      ? Math.max(Math.floor(requestedTimeoutMs), 60 * 60_000)
+      : 60 * 60_000;
+    return await this.mutex.run(async () => {
+      const run = { kind: 'research', requested: false, requestedAt: null, reason: null, onProgress };
+      this.currentRun = run;
+      let researchMeta = buildResearchMeta();
+      try {
+        await this.ensureReady({ timeoutMs: effectiveTimeoutMs });
+        await this.#activateResearchMode({ timeoutMs: 30_000 });
+        researchMeta = buildResearchMeta({
+          activated: true,
+          conversationUrl: await this.getUrl().catch(() => null)
+        });
+        await this.#emitProgress({ phase: 'activating_research_mode', researchMeta });
+        await this.#attachFiles(attachments);
+        await this.#typePrompt(prompt);
+        const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+        const preSend = await this.#eval(`(() => {
+          const nodes = Array.from(document.querySelectorAll(${assistantSel}));
+          const lastNode = nodes[nodes.length - 1];
+          const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
+          return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
+        })()`);
+        await this.#clickSend();
+        const result = await this.#waitForAssistantStable({
+          timeoutMs: effectiveTimeoutMs,
+          preSendCount: preSend?.count || 0,
+          preSendText: preSend?.lastText || '',
+          preSendPageText: preSend?.pageText || '',
+          minimumTimeoutMs: 60 * 60_000,
+          minimumStableMs: 60_000,
+          extraThinkingPattern: '\\bresearching\\b|\\bsearching(?: the web)?\\b|\\breading sources?\\b|\\bclarifying\\b|\\bgathering\\b'
+        });
+        const exported = await this.#exportResearchMarkdown({
+          outDir,
+          timeoutMs: 30_000,
+          maxFiles: 8
+        }).catch((error) => ({
+          state: { reason: String(error?.message || 'export_failed') },
+          files: [],
+          exportedMarkdownPath: null
+        }));
+        return {
+          ...result,
+          research: {
+            files: exported?.files || [],
+            exportedMarkdownPath: exported?.exportedMarkdownPath || null,
+            exportState: exported?.state || null
+          },
+          researchMeta
+        };
+      } catch (error) {
+        if (String(error?.message || '') === 'research_mode_activation_failed') {
+          researchMeta = buildResearchMeta({
+            activated: false,
+            error: error?.data?.reason ? String(error.data.reason) : 'research_mode_activation_failed',
+            conversationUrl: await this.getUrl().catch(() => null),
+            debug: {
+              trigger: error?.data?.trigger || null,
+              state: error?.data?.state || null,
+              lastAction: error?.data?.lastAction || null
+            }
+          });
+          await this.#emitProgress({ phase: 'activating_research_mode', researchMeta });
+        }
+        throw error;
+      } finally {
+        if (this.currentRun === run) this.currentRun = null;
+      }
+    });
   }
 
   async send({ text, timeoutMs = 3 * 60_000, stopAfterSend = false, onProgress = null } = {}) {
@@ -1719,7 +2564,14 @@ export class ChatGPTController {
           continue;
         }
         seen.add(href);
-        const item = { href, name: rawName || null };
+        const item = {
+          href,
+          name: rawName || null,
+          label: text || null,
+          title: title || null,
+          testId: String(a.getAttribute('data-testid') || '').trim() || null,
+          downloadAttr: !!download
+        };
         if (/^blob:|^data:/i.test(href)) {
           try {
             const r = await fetch(href);
@@ -1744,13 +2596,24 @@ export class ChatGPTController {
     return Array.isArray(out) ? out : [];
   }
 
-  async downloadLastAssistantFiles({ maxFiles = 6, outDir = path.join(this.stateDir, 'downloads') } = {}) {
-    const items = await this.getLastAssistantDownloads({ maxFiles });
+  async #saveDownloadItems({ items, outDir, linkMode = 'generic' } = {}) {
+    const filtered = (Array.isArray(items) ? items : []).filter((item) => {
+      if (String(linkMode || 'generic') !== 'export') return true;
+      const hintText = [
+        item?.name || '',
+        item?.label || '',
+        item?.title || '',
+        item?.testId || ''
+      ].join(' ').toLowerCase();
+      if (item?.downloadAttr) return true;
+      if (/^blob:|^data:/i.test(String(item?.href || ''))) return true;
+      return /export|download|attachment|report/.test(hintText);
+    });
     await fs.mkdir(outDir, { recursive: true });
     const saved = [];
 
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
+    for (let i = 0; i < filtered.length; i++) {
+      const item = filtered[i];
       let mime = item.mime || null;
       let buf = null;
 
@@ -1806,6 +2669,82 @@ export class ChatGPTController {
       const file = path.join(outDir, finalName);
       await fs.writeFile(file, buf);
       saved.push({ path: file, name: finalName, mime: mime || null, source: item.href || null });
+    }
+
+    return saved;
+  }
+
+  async #looksLikeResearchReport() {
+    const snap = await this.#eval(`(() => {
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const labelOf = (n) =>
+        [
+          n?.getAttribute?.('aria-label') || '',
+          n?.getAttribute?.('title') || '',
+          n?.textContent || ''
+        ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const mainText = String((document.querySelector('main') || document.body)?.innerText || '')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      const hasResearchSummary = /research completed in/.test(mainText);
+      const hasExportButton = Array.from(document.querySelectorAll('button, [role="button"]')).some((n) => {
+        if (!visible(n)) return false;
+        return /\\bexport\\b/.test(labelOf(n));
+      });
+      return { hasResearchSummary, hasExportButton };
+    })()`).catch(() => null);
+    if (snap?.hasResearchSummary && snap?.hasExportButton) return true;
+    const nested = await this.#evalDeepResearch(`(() => {
+      const d = document.querySelector('#root')?.contentDocument;
+      if (!d) return { hasResearchSummary: false, hasExportButton: false };
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = d.defaultView?.getComputedStyle?.(n);
+        return r.width > 0 && r.height > 0 && style && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const labelOf = (n) =>
+        [
+          n?.getAttribute?.('aria-label') || '',
+          n?.getAttribute?.('title') || '',
+          n?.textContent || ''
+        ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const mainText = String(d.body?.innerText || d.documentElement?.innerText || '')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      const hasResearchSummary = /research completed in/.test(mainText);
+      const hasExportButton = Array.from(d.querySelectorAll('button, [role="button"]')).some((n) => {
+        if (!visible(n)) return false;
+        return /\\bexport\\b/.test(labelOf(n));
+      });
+      return { hasResearchSummary, hasExportButton };
+    })()`).catch(() => null);
+    return !!(nested?.hasResearchSummary && nested?.hasExportButton);
+  }
+
+  async exportResearchReport({ maxFiles = 6, outDir = path.join(this.stateDir, 'downloads'), timeoutMs = 15_000 } = {}) {
+    return await this.#exportResearchMarkdown({ outDir, timeoutMs, maxFiles });
+  }
+
+  async downloadLastAssistantFiles({ maxFiles = 6, outDir = path.join(this.stateDir, 'downloads'), linkMode = 'generic' } = {}) {
+    const items = await this.getLastAssistantDownloads({ maxFiles });
+    const saved = await this.#saveDownloadItems({ items, outDir, linkMode });
+    if (saved.length > 0) return saved;
+
+    if (await this.#looksLikeResearchReport()) {
+      const exported = await this.exportResearchReport({
+        outDir,
+        timeoutMs: 15_000,
+        maxFiles
+      }).catch(() => null);
+      if (Array.isArray(exported?.files) && exported.files.length > 0) return exported.files;
     }
 
     return saved;

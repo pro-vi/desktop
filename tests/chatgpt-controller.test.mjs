@@ -265,7 +265,7 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
       async evaluate(js) {
         if (js.includes('const hasTurnstile')) return readyState();
         if (js.includes('const fileData =')) return { ok: true, count: 1 };
-        if (js.includes("const attach = candidates.find")) return true;
+        if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
         if (js.includes('const dialogBtn = Array.from')) {
           return {
             dismissed: false,
@@ -328,7 +328,7 @@ test('chatgpt-controller: query fails when attachment dialog blocks upload', asy
     async evaluate(js) {
       if (js.includes('const hasTurnstile')) return readyState();
       if (js.includes('const fileData =')) return { ok: true, count: 1 };
-      if (js.includes("const attach = candidates.find")) return true;
+      if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
       if (js.includes("const closeBtn = document.querySelector")) return true;
         if (js.includes('const dialogBtn = Array.from')) {
           return {
@@ -388,7 +388,7 @@ test('chatgpt-controller: query does not treat generic attachment chrome as a su
       async evaluate(js) {
         if (js.includes('const hasTurnstile')) return readyState();
         if (js.includes('const fileData =')) return { ok: true, count: 1 };
-        if (js.includes("const attach = candidates.find")) return true;
+        if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
         if (js.includes('const dialogBtn = Array.from')) {
           return {
             dismissed: false,
@@ -452,7 +452,7 @@ test('chatgpt-controller: query proceeds when uploaded chip is present without v
       async navigate() {},
       async evaluate(js) {
         if (js.includes('const hasTurnstile')) return readyState();
-        if (js.includes("const attach = candidates.find")) return true;
+        if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
         if (js.includes('const fileData =')) return { ok: true, count: 1 };
         if (js.includes('const dialogBtn = Array.from')) {
           return {
@@ -529,5 +529,729 @@ test('chatgpt-controller: query proceeds when uploaded chip is present without v
   } finally {
     Date.now = realNow;
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('chatgpt-controller: research surfaces activation failure and progress metadata', async () => {
+  const realNow = Date.now;
+  let fakeNow = 5_000_000;
+  const progress = [];
+  Date.now = () => {
+    fakeNow += 5_000;
+    return fakeNow;
+  };
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('research_controls_not_found') && js.includes('clicked_deep_research_option')) {
+        return { action: 'none', reason: 'research_controls_not_found', menuOpen: false };
+      }
+      if (js.includes('research_activation_pending')) return { active: false, action: 'none', reason: 'research_activation_pending', menuOpen: false };
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchModeButton: '[data-testid="research-button"]',
+      researchModeMenu: '[role="menu"]',
+      researchModeOption: '[role="menuitem"]',
+      researchModeActive: '[aria-pressed="true"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.research({
+        prompt: 'formalize this problem',
+        timeoutMs: 5,
+        outDir: os.tmpdir(),
+        onProgress: async (patch) => {
+          progress.push(patch);
+        }
+      }),
+      (error) => {
+        assert.equal(error?.message, 'research_mode_activation_failed');
+        assert.equal(error?.data?.reason, 'research_controls_not_found');
+        return true;
+      }
+    );
+
+    assert.equal(progress.some((item) => item?.phase === 'activating_research_mode'), true);
+    assert.equal(
+      progress.some((item) => item?.researchMeta?.activation?.error === 'research_controls_not_found'),
+      true
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: research runs under the controller mutex', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-mutex-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  const realNow = Date.now;
+  let fakeNow = 8_100_000;
+  let clockMode = 'default';
+  Date.now = () => {
+    fakeNow += clockMode === 'wait' ? 31_000 : clockMode === 'export' ? 500 : 100;
+    return fakeNow;
+  };
+
+  let sendChecks = 0;
+  let waitChecks = 0;
+  let exportChecks = 0;
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('clicked_deep_research_option')) {
+        return { action: 'click_item', reason: 'clicked_deep_research_option', label: 'deep research' };
+      }
+      if (js.includes('research_activation_pending')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'latched_after_click',
+          menuOpen: false,
+          composerHints: ['deep research'],
+          promptHints: []
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 0, lastText: '', pageText: '' };
+      }
+      if (js.includes("already_generating")) {
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('promptLen')) {
+        sendChecks += 1;
+        return sendChecks >= 2
+          ? { stopVisible: false, sendDisabled: true, promptLen: 0 }
+          : { stopVisible: false, sendDisabled: false, promptLen: 8 };
+      }
+      if (js.includes('fallbackMainText')) {
+        clockMode = 'wait';
+        waitChecks += 1;
+        if (waitChecks === 1) {
+          return {
+            stop: true,
+            sendEnabled: false,
+            sendFound: true,
+            txt: '',
+            count: 0,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: true,
+            pageText: ''
+          };
+        }
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'You said: Investigate this. ChatGPT said: Deep research Apps Sites ChatGPT can make mistakes. Check important info.',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'placeholder'
+        };
+      }
+      if (js.includes('return { codeBlocks: codes }')) {
+        clockMode = 'default';
+        return { codeBlocks: [] };
+      }
+      if (js.includes('clicked_markdown_option') && js.includes('clicked_export_trigger')) {
+        clockMode = 'export';
+        exportChecks += 1;
+        return exportChecks === 1
+          ? {
+              ready: false,
+              action: 'pointer_export',
+              reason: 'clicked_export_trigger',
+              label: 'download report',
+              menuOpen: false,
+              rect: { x: 500, y: 80, w: 24, h: 24 }
+            }
+          : {
+              ready: false,
+              action: 'pointer_markdown',
+              reason: 'clicked_markdown_option',
+              label: 'export to markdown',
+              menuOpen: true,
+              rect: { x: 560, y: 140, w: 180, h: 36 }
+            };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/research-export';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {},
+    async waitForDownload({ outDir: targetDir }) {
+      const exportedPath = path.join(targetDir, 'report.md');
+      await fs.writeFile(exportedPath, '# report\n\nreal markdown\n', 'utf8');
+      return {
+        path: exportedPath,
+        name: 'report.md',
+        mime: 'text/markdown',
+        source: 'download://report'
+      };
+    }
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchModeButton: '[data-testid="research-button"]',
+      researchModeMenu: '[role="menu"]',
+      researchModeOption: '[role="menuitem"]',
+      researchModeActive: '[aria-pressed="true"]',
+      researchExportButton: '[data-testid="download-button"]',
+      researchExportMenu: '[role="menu"]',
+      researchExportMarkdownOption: '[role="menuitem"]'
+    }
+  });
+
+  controller.downloadLastAssistantFiles = async () => [];
+
+  const realMutex = controller.mutex;
+  let mutexCalls = 0;
+  controller.mutex = {
+    run: async (fn) => {
+      mutexCalls += 1;
+      return await realMutex.run(fn);
+    }
+  };
+
+  try {
+    const result = await controller.research({
+      prompt: 'Investigate this.',
+      timeoutMs: 10_000,
+      outDir
+    });
+
+    assert.equal(mutexCalls, 1);
+    assert.equal(path.basename(result.research.exportedMarkdownPath), 'report.md');
+  } finally {
+    controller.mutex = realMutex;
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: export-mode downloads ignore cited markdown links without download hints', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-export-filter-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  const controller = new ChatGPTController({
+    page: {},
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    },
+    stateDir: outDir
+  });
+
+  controller.getLastAssistantDownloads = async () => ([
+    {
+      href: 'https://example.com/README.md',
+      name: 'README.md',
+      label: 'README.md',
+      title: 'README.md',
+      testId: null,
+      downloadAttr: false
+    },
+    {
+      href: 'blob:report',
+      name: 'report.md',
+      label: 'Export markdown',
+      title: 'Export markdown',
+      testId: 'export-markdown',
+      downloadAttr: true,
+      mime: 'text/markdown',
+      dataUrl: 'data:text/markdown;base64,IyByZXBvcnQK'
+    }
+  ]);
+
+  const saved = await controller.downloadLastAssistantFiles({ maxFiles: 6, outDir, linkMode: 'export' });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].name, 'report.md');
+  assert.equal(saved[0].source, 'blob:report');
+});
+
+test('chatgpt-controller: generic file download escalates to research export when no links are present', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-export-generic-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  let exportChecks = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const nodes = Array.from(document.querySelectorAll') && js.includes('a[href], a[download]')) {
+        return [];
+      }
+      if (js.includes('hasResearchSummary') && js.includes('hasExportButton')) {
+        return { hasResearchSummary: true, hasExportButton: true };
+      }
+      if (js.includes('clicked_markdown_option') && js.includes('clicked_export_trigger')) {
+        exportChecks += 1;
+        return exportChecks === 1
+          ? {
+              ready: false,
+              action: 'pointer_export',
+              reason: 'clicked_export_trigger',
+              label: 'export',
+              menuOpen: false,
+              rect: { x: 520, y: 90, w: 24, h: 24 }
+            }
+          : {
+              ready: false,
+              action: 'pointer_markdown',
+              reason: 'clicked_markdown_option',
+              label: 'export to markdown',
+              menuOpen: true,
+              rect: { x: 560, y: 140, w: 180, h: 36 }
+            };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/research-export-generic';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {},
+    async waitForDownload({ outDir: targetDir }) {
+      const exportedPath = path.join(targetDir, 'report.md');
+      await fs.writeFile(exportedPath, '# report\n\nexported via generic download\n', 'utf8');
+      return {
+        path: exportedPath,
+        name: 'report.md',
+        mime: 'text/markdown',
+        source: 'download://report'
+      };
+    }
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchExportButton: '[data-testid="download-button"]',
+      researchExportMenu: '[role="menu"]',
+      researchExportMarkdownOption: '[role="menuitem"]'
+    }
+  });
+
+  const saved = await controller.downloadLastAssistantFiles({ maxFiles: 3, outDir });
+  assert.deepEqual(saved.map((item) => path.basename(item.path)), ['report.md']);
+  assert.equal(saved[0].mime, 'text/markdown');
+});
+
+test('chatgpt-controller: research export opens the report view before clicking export', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-open-report-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  let exportChecks = 0;
+  let clicks = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('open_research_report') && js.includes('clicked_markdown_option') && js.includes('clicked_export_trigger')) {
+        exportChecks += 1;
+        if (exportChecks === 1) {
+          return {
+            ready: false,
+            action: 'pointer_open_report',
+            reason: 'open_research_report',
+            label: 'deep research',
+            menuOpen: false,
+            rect: { x: 420, y: 220, w: 240, h: 40 }
+          };
+        }
+        if (exportChecks === 2) {
+          return {
+            ready: false,
+            action: 'pointer_export',
+            reason: 'clicked_export_trigger',
+            label: 'export',
+            menuOpen: false,
+            rect: { x: 700, y: 80, w: 28, h: 28 }
+          };
+        }
+        return {
+          ready: false,
+          action: 'pointer_markdown',
+          reason: 'clicked_markdown_option',
+          label: 'export to markdown',
+          menuOpen: true,
+          rect: { x: 760, y: 132, w: 180, h: 36 }
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/research-report';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {
+      clicks += 1;
+    },
+    async mouseUp() {},
+    async setFileInputFiles() {},
+    async waitForDownload({ outDir: targetDir }) {
+      const exportedPath = path.join(targetDir, 'report.md');
+      await fs.writeFile(exportedPath, '# report\n', 'utf8');
+      return {
+        path: exportedPath,
+        name: 'report.md',
+        mime: 'text/markdown',
+        source: 'download://report'
+      };
+    }
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchExportButton: '[data-testid="download-button"]',
+      researchExportMenu: '[role="menu"]',
+      researchExportMarkdownOption: '[role="menuitem"]'
+    }
+  });
+
+  const exported = await controller.exportResearchReport({ maxFiles: 3, outDir, timeoutMs: 15_000 });
+  assert.equal(clicks >= 3, true);
+  assert.equal(exported.files.length, 1);
+  assert.equal(path.basename(exported.exportedMarkdownPath), 'report.md');
+});
+
+test('chatgpt-controller: research export can click nested deep research controls', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-nested-export-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  let nestedChecks = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('clicked_markdown_option') && js.includes('clicked_export_trigger')) {
+        return {
+          ready: false,
+          action: 'none',
+          reason: 'export_controls_not_found',
+          menuOpen: false
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async evaluateDeepResearch(js) {
+      if (js.includes("reason: 'clicked_markdown_option'")) {
+        nestedChecks += 1;
+        if (nestedChecks === 1) {
+          return {
+            ready: false,
+            action: 'dom_export_click',
+            reason: 'clicked_export_trigger',
+            label: 'Export'
+          };
+        }
+        return {
+          ready: false,
+          action: 'dom_markdown_click',
+          reason: 'clicked_markdown_option',
+          label: 'Export to Markdown'
+        };
+      }
+      throw new Error(`unexpected_deep_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/research-report';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {},
+    async waitForDownload({ outDir: targetDir }) {
+      const exportedPath = path.join(targetDir, 'nested-report.md');
+      await fs.writeFile(exportedPath, '# nested report\n', 'utf8');
+      return {
+        path: exportedPath,
+        name: 'nested-report.md',
+        mime: 'text/markdown',
+        source: 'download://nested-report'
+      };
+    }
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchExportButton: '[data-testid="download-button"]',
+      researchExportMenu: '[role="menu"]',
+      researchExportMarkdownOption: '[role="menuitem"]'
+    }
+  });
+
+  const exported = await controller.exportResearchReport({ maxFiles: 3, outDir, timeoutMs: 15_000 });
+  assert.equal(nestedChecks >= 2, true);
+  assert.equal(exported.files.length, 1);
+  assert.equal(path.basename(exported.exportedMarkdownPath), 'nested-report.md');
+});
+
+test('chatgpt-controller: readPageText falls back to nested deep research content', async () => {
+  const page = {
+    async navigate() {},
+    async evaluate() {
+      return 'You said:\nUse Deep Research.\nChatGPT said:\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.';
+    },
+    async evaluateDeepResearch() {
+      return 'Research completed in 4m\nPrimary source on RAG benchmarks: RAGBench and TRACe';
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/research-report';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const text = await controller.readPageText({ maxChars: 500 });
+  assert.match(text, /RAGBench and TRACe/);
+});
+
+test('chatgpt-controller: research export uses native download hook for markdown report', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-export-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  const realNow = Date.now;
+  let fakeNow = 8_000_000;
+  let clockMode = 'default';
+  Date.now = () => {
+    fakeNow += clockMode === 'wait' ? 31_000 : clockMode === 'export' ? 500 : 100;
+    return fakeNow;
+  };
+
+  let sendChecks = 0;
+  let waitChecks = 0;
+  let exportChecks = 0;
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('clicked_deep_research_option')) {
+        return { action: 'click_item', reason: 'clicked_deep_research_option', label: 'deep research' };
+      }
+      if (js.includes('research_activation_pending')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'latched_after_click',
+          menuOpen: false,
+          composerHints: ['deep research'],
+          promptHints: []
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 0, lastText: '', pageText: '' };
+      }
+      if (js.includes("already_generating")) {
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('promptLen')) {
+        sendChecks += 1;
+        return sendChecks >= 2
+          ? { stopVisible: false, sendDisabled: true, promptLen: 0 }
+          : { stopVisible: false, sendDisabled: false, promptLen: 8 };
+      }
+      if (js.includes('fallbackMainText')) {
+        clockMode = 'wait';
+        waitChecks += 1;
+        if (waitChecks === 1) {
+          return {
+            stop: true,
+            sendEnabled: false,
+            sendFound: true,
+            txt: '',
+            count: 0,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: true,
+            pageText: ''
+          };
+        }
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'You said: Investigate this. ChatGPT said: Deep research Apps Sites ChatGPT can make mistakes. Check important info.',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'placeholder'
+        };
+      }
+      if (js.includes('return { codeBlocks: codes }')) {
+        clockMode = 'default';
+        return { codeBlocks: [] };
+      }
+      if (js.includes('clicked_markdown_option') && js.includes('clicked_export_trigger')) {
+        clockMode = 'export';
+        exportChecks += 1;
+        return exportChecks === 1
+          ? {
+              ready: false,
+              action: 'pointer_export',
+              reason: 'clicked_export_trigger',
+              label: 'download report',
+              menuOpen: false,
+              rect: { x: 500, y: 80, w: 24, h: 24 }
+            }
+          : {
+              ready: false,
+              action: 'pointer_markdown',
+              reason: 'clicked_markdown_option',
+              label: 'export to markdown',
+              menuOpen: true,
+              rect: { x: 560, y: 140, w: 180, h: 36 }
+            };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/research-export';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {},
+    async waitForDownload({ outDir: targetDir }) {
+      const exportedPath = path.join(targetDir, 'report.md');
+      await fs.writeFile(exportedPath, '# report\n\nreal markdown\n', 'utf8');
+      return {
+        path: exportedPath,
+        name: 'report.md',
+        mime: 'text/markdown',
+        source: 'download://report'
+      };
+    }
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchModeButton: '[data-testid="research-button"]',
+      researchModeMenu: '[role="menu"]',
+      researchModeOption: '[role="menuitem"]',
+      researchModeActive: '[aria-pressed="true"]',
+      researchExportButton: '[data-testid="download-button"]',
+      researchExportMenu: '[role="menu"]',
+      researchExportMarkdownOption: '[role="menuitem"]'
+    }
+  });
+
+  controller.downloadLastAssistantFiles = async () => [];
+
+  try {
+    const result = await controller.research({
+      prompt: 'Investigate this.',
+      timeoutMs: 10_000,
+      outDir
+    });
+
+    assert.equal(path.basename(result.research.exportedMarkdownPath), 'report.md');
+    assert.deepEqual(result.research.files.map((item) => path.basename(item.path)), ['report.md']);
+    assert.equal(result.researchMeta.activation.activated, true);
+  } finally {
+    Date.now = realNow;
   }
 });
