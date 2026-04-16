@@ -30,6 +30,17 @@ function looksLikeResearchShellText(value) {
   );
 }
 
+function extractConversationUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    const parsed = new URL(text);
+    return /\/c\/[^/]+\/?$/.test(parsed.pathname) ? parsed.toString() : null;
+  } catch {
+    return /\/c\/[^/?#]+/.test(text) ? text : null;
+  }
+}
+
 function buildResearchMeta({ activated = false, error = null, tabId = null, conversationUrl = null, debug = null } = {}) {
   return {
     activation: {
@@ -1710,6 +1721,7 @@ export class ChatGPTController {
     let stopGoneAt = null;
     let continueClicks = 0;
     let generationObserved = false;
+    let emittedConversationUrl = null;
 
     while (Date.now() - start < effectiveTimeoutMs) {
       this.#throwIfStopRequested();
@@ -1727,6 +1739,7 @@ export class ChatGPTController {
         const lastNode = nodes[nodes.length - 1];
         const fallbackMainText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         const txt = (lastNode?.innerText || fallbackMainText).trim();
+        const currentUrl = window.location.href || '';
         const hasContinue = Array.from(document.querySelectorAll('button, a')).some(b => /continue generating/i.test((b.textContent||'').trim()));
         const hasRegenerate = Array.from(document.querySelectorAll('button, a')).some(b => /regenerate/i.test((b.textContent||'').trim()));
         const hasError = /something went wrong|try again|error/i.test(txt) && txt.length < 500;
@@ -1744,11 +1757,16 @@ export class ChatGPTController {
           return false;
         });
         const isThinking = thinkingBanner;
-        return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking, pageText: fallbackMainText };
+        return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking, pageText: fallbackMainText, currentUrl };
       })()`);
 
       const txt = String(snap?.txt || '');
       const pageText = String(snap?.pageText || '');
+      const conversationUrl = extractConversationUrl(snap?.currentUrl || '');
+      if (conversationUrl && conversationUrl !== emittedConversationUrl) {
+        emittedConversationUrl = conversationUrl;
+        await this.#emitProgress({ conversationUrl });
+      }
       const assistantAdvanced = (snap?.count || 0) > preSendCount || ((snap?.count || 0) > 0 && txt !== preSendText);
       const pageChanged = pageText !== preSendPageText;
       if (txt !== last) {

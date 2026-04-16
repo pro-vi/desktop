@@ -201,6 +201,68 @@ function listedTabMatchesVendor(tab, vendor) {
   return false;
 }
 
+function normalizeLocationUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    return new URL(text).toString();
+  } catch {
+    return text;
+  }
+}
+
+function extractConversationUrl(value) {
+  const text = normalizeLocationUrl(value);
+  if (!text) return null;
+  try {
+    const parsed = new URL(text);
+    return /\/c\/[^/]+\/?$/.test(parsed.pathname) ? parsed.toString() : null;
+  } catch {
+    return /\/c\/[^/?#]+/.test(text) ? text : null;
+  }
+}
+
+function extractProjectUrl(value) {
+  const text = normalizeLocationUrl(value);
+  if (!text) return null;
+  try {
+    const parsed = new URL(text);
+    return /\/project\/?$/.test(parsed.pathname) ? parsed.toString() : null;
+  } catch {
+    return /\/project\/?$/.test(text) ? text : null;
+  }
+}
+
+function deriveProjectUrlFromConversationUrl(value) {
+  const conversationUrl = extractConversationUrl(value);
+  if (!conversationUrl) return null;
+  try {
+    const parsed = new URL(conversationUrl);
+    const idx = parsed.pathname.indexOf('/c/');
+    const prefix = idx > 0 ? parsed.pathname.slice(0, idx) : '';
+    if (!prefix || prefix === '/') return null;
+    parsed.pathname = `${prefix}/project`;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    const match = conversationUrl.match(/^(https?:\/\/[^/]+(?:\/[^/?#]+)+)\/c\/[^/?#]+/);
+    return match ? `${match[1]}/project` : null;
+  }
+}
+
+function locationPatchForPersistence({ url = null, projectUrl = null, conversationUrl = null } = {}) {
+  const nextConversationUrl = extractConversationUrl(conversationUrl || url);
+  const nextProjectUrl =
+    extractProjectUrl(projectUrl || url) ||
+    deriveProjectUrlFromConversationUrl(conversationUrl || url) ||
+    null;
+  const patch = {};
+  if (nextProjectUrl) patch.projectUrl = nextProjectUrl;
+  if (nextConversationUrl) patch.conversationUrl = nextConversationUrl;
+  return patch;
+}
+
 async function resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault = false, createIfMissing = true, vendors = [] }) {
   const tabId = (body?.tabId ? String(body.tabId).trim() : '') || getTabIdFromUrl(url) || null;
   const key = (body?.key ? String(body.key).trim() : '') || null;
@@ -594,17 +656,31 @@ export function startHttpApi({
 
   // Persistent key → { projectUrl, conversationUrl } map.
   let keyMetaByKey = {};
+  let keyMetaWriteQueue = Promise.resolve();
   const projectsReady = readProjects(stateDir).then((p) => { keyMetaByKey = p; }).catch(() => {});
   function persistKeyMeta(key, patch) {
-    if (!key || !patch) return;
+    if (!key || !patch) return Promise.resolve(null);
     const existing = keyMetaByKey[key] || { projectUrl: null, conversationUrl: null };
     const updated = { ...existing, ...patch };
-    if (existing.projectUrl === updated.projectUrl && existing.conversationUrl === updated.conversationUrl) return;
-    keyMetaByKey[key] = updated;
-    writeProjects(keyMetaByKey, stateDir).catch(() => {});
+    if (existing.projectUrl === updated.projectUrl && existing.conversationUrl === updated.conversationUrl) {
+      return Promise.resolve(updated);
+    }
+    const snapshot = { ...keyMetaByKey, [key]: updated };
+    keyMetaByKey = snapshot;
+    keyMetaWriteQueue = keyMetaWriteQueue
+      .catch(() => {})
+      .then(() => writeProjects(snapshot, stateDir));
+    return keyMetaWriteQueue.then(() => updated).catch(() => updated);
   }
   function getPersistedKeyMeta(key) {
     return (key && keyMetaByKey[key]) || null;
+  }
+
+  function persistKeyLocation(key, { url = null, projectUrl = null, conversationUrl = null } = {}) {
+    if (!key) return Promise.resolve(null);
+    const patch = locationPatchForPersistence({ url, projectUrl, conversationUrl });
+    if (!Object.keys(patch).length) return Promise.resolve(null);
+    return Promise.resolve(persistKeyMeta(key, patch)).then(() => patch);
   }
 
   const runStore = createRunStore(stateDir);
@@ -945,6 +1021,9 @@ export function startHttpApi({
         blockedTitle: item.blockedTitle || null,
         stopRequested: !!item.stopRequested,
         stopRequestedAt: item.stopRequestedAt || null,
+        ...(item.conversationUrl
+          ? { conversationUrl: item.conversationUrl }
+          : {}),
         ...(item.researchMeta
           ? { researchMeta: cloneResearchMeta(item.researchMeta, { tabId: item.tabId || null }) }
           : {})
@@ -1157,7 +1236,7 @@ export function startHttpApi({
     const conversationUrl = typeof controller.getUrl === 'function'
       ? await controller.getUrl().catch(() => existingConversationUrl || null)
       : existingConversationUrl || null;
-    if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { projectUrl: projectUrl || null, conversationUrl });
+    if (effectiveKey && conversationUrl) persistKeyLocation(effectiveKey, { conversationUrl, projectUrl });
     let outputManifest;
     try {
       outputManifest = await finalizeResearchOutputs({
@@ -1224,6 +1303,7 @@ export function startHttpApi({
     if (!tabId || !item) return;
     const next = { ...item, updatedAt: Date.now() };
     activeQueries.set(tabId, next);
+    if (next.key) persistKeyLocation(next.key, { conversationUrl: next.conversationUrl, projectUrl: next.projectUrl });
     durableRunPatchFromActive(next);
     emitRuntimeChanged();
   };
@@ -1300,6 +1380,7 @@ export function startHttpApi({
       });
     }
     activeQueries.set(tabId, next);
+    if (next.key) persistKeyLocation(next.key, { conversationUrl: next.conversationUrl, projectUrl: next.projectUrl });
     durableRunPatchFromActive(next);
     emitRuntimeChanged();
     return next;
@@ -1335,25 +1416,34 @@ export function startHttpApi({
   const openRunAction = async ({ runId, timeoutMs = 30_000, show = true } = {}) => {
     await runsReady;
     const run = getRunRecordOrThrow(runId);
-    const tabId = await resolveRunTab({ run, show: false });
-    if (run.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: run.projectUrl });
+    const savedMeta = getPersistedKeyMeta(run.key);
+    const resolvedRun = {
+      ...run,
+      projectUrl: run.projectUrl || savedMeta?.projectUrl || null,
+      conversationUrl: run.conversationUrl || savedMeta?.conversationUrl || null
+    };
+    const tabId = await resolveRunTab({ run: resolvedRun, show: false });
+    if (resolvedRun.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: resolvedRun.projectUrl });
     const controller = tabs.getControllerById(tabId);
     await runExclusive(controller, async () => {
       await ensureRunLocation({
         controller,
         tabId,
         timeoutMs,
-        conversationUrl: run.conversationUrl || null,
-        projectUrl: run.projectUrl || null
+        conversationUrl: resolvedRun.conversationUrl || null,
+        projectUrl: resolvedRun.projectUrl || null
       });
     });
     if (show) await onShow?.({ tabId }).catch(() => {});
-    return { ok: true, tabId, run };
+    return { ok: true, tabId, run: resolvedRun };
   };
 
   const retryRunAction = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
     await runsReady;
     const original = getRunRecordOrThrow(runId);
+    const savedMeta = getPersistedKeyMeta(original.key);
+    const originalProjectUrl = original.projectUrl || savedMeta?.projectUrl || null;
+    const originalConversationUrl = original.conversationUrl || savedMeta?.conversationUrl || null;
     const replay = original.materializedReplay || null;
     if (!replay?.prompt) throw new Error('run_not_retryable');
     const nextKind = String(original.kind || replay.kind || 'query').trim() || 'query';
@@ -1387,9 +1477,16 @@ export function startHttpApi({
     let runCreated = false;
     let outputDir = null;
     try {
-      tabId = await resolveRunTab({ run: original, show });
+      tabId = await resolveRunTab({
+        run: {
+          ...original,
+          projectUrl: originalProjectUrl,
+          conversationUrl: originalConversationUrl
+        },
+        show
+      });
       assertTabNotBusy(tabId);
-      if (original.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: original.projectUrl });
+      if (originalProjectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: originalProjectUrl });
       op.tabId = tabId;
       let tabMeta = getTabMeta(tabs, tabId);
       if (nextKind === 'research') {
@@ -1413,8 +1510,8 @@ export function startHttpApi({
         key: effectiveKey,
         vendorId: tabMeta?.vendorId || original.vendorId || null,
         vendorName: tabMeta?.vendorName || original.vendorName || null,
-        projectUrl: original.projectUrl || null,
-        conversationUrl: original.conversationUrl || null,
+        projectUrl: originalProjectUrl,
+        conversationUrl: originalConversationUrl,
         promptPreview: op.promptPreview,
         startedAt: op.startedAt,
         retryOf: original.id,
@@ -1426,7 +1523,7 @@ export function startHttpApi({
           key: effectiveKey,
           tabId,
           vendorId: tabMeta?.vendorId || original.vendorId || null,
-          projectUrl: original.projectUrl || null
+          projectUrl: originalProjectUrl
         },
         materializedReplay: {
           kind: nextKind,
@@ -1446,7 +1543,8 @@ export function startHttpApi({
         key: effectiveKey,
         vendorId: tabMeta?.vendorId || original.vendorId || null,
         vendorName: tabMeta?.vendorName || original.vendorName || null,
-        projectUrl: original.projectUrl || null,
+        projectUrl: originalProjectUrl,
+        conversationUrl: originalConversationUrl,
         ...(nextKind === 'research'
           ? { researchMeta: defaultResearchMeta({ tabId, outputDir }) }
           : {})
@@ -1465,8 +1563,8 @@ export function startHttpApi({
             attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
             timeoutMs: effectiveTimeoutMs,
             outDir: outputDir,
-            existingConversationUrl: original.conversationUrl || null,
-            projectUrl: original.projectUrl || null,
+            existingConversationUrl: originalConversationUrl,
+            projectUrl: originalProjectUrl,
             effectiveKey
           });
         }
@@ -1475,8 +1573,8 @@ export function startHttpApi({
             controller,
             tabId,
             timeoutMs: effectiveTimeoutMs,
-            conversationUrl: original.conversationUrl || null,
-            projectUrl: original.projectUrl || null
+            conversationUrl: originalConversationUrl,
+            projectUrl: originalProjectUrl
           });
           return controller.query({
             prompt: String(replay.prompt || ''),
@@ -1486,9 +1584,9 @@ export function startHttpApi({
           });
         });
         const conversationUrl = typeof controller.getUrl === 'function'
-          ? await controller.getUrl().catch(() => original.conversationUrl || null)
-          : original.conversationUrl || null;
-        if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { projectUrl: original.projectUrl || null, conversationUrl });
+          ? await controller.getUrl().catch(() => originalConversationUrl || null)
+          : originalConversationUrl || null;
+        if (effectiveKey && conversationUrl) persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: originalProjectUrl });
         const outcome = successOutcomeForResult({ result, op, conversationUrl });
         setLastOutcome(tabId, outcome);
         await durableRunFinalizeFromOutcome(op.id, outcome);
@@ -1649,7 +1747,14 @@ export function startHttpApi({
         const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
         const controller = tabs.getControllerById(tabId);
         await runExclusive(controller, async () => controller.navigate(to));
-        return sendJson(res, 200, { ok: true, tabId, url: await controller.getUrl() });
+        const currentUrl = await controller.getUrl();
+        const tabMeta = getTabMeta(tabs, tabId);
+        const tabKey = (body.key ? String(body.key).trim() : '') || tabMeta?.key || null;
+        const persistedLocation = tabKey
+          ? await persistKeyLocation(tabKey, { url: currentUrl, projectUrl: tabMeta?.projectUrl || null })
+          : null;
+        if (persistedLocation?.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: persistedLocation.projectUrl });
+        return sendJson(res, 200, { ok: true, tabId, url: currentUrl });
       }
 
       if (url.pathname === '/ensure-ready' && req.method === 'POST') {
@@ -1934,7 +2039,8 @@ export function startHttpApi({
             key: effectiveKey,
             vendorId: tabMeta?.vendorId || null,
             vendorName: tabMeta?.vendorName || null,
-            projectUrl: projectUrl || null
+            projectUrl: projectUrl || null,
+            conversationUrl: savedConversationUrl || null
           };
           await createRunRecord({
             id: op.id,
@@ -2033,7 +2139,7 @@ export function startHttpApi({
               });
               // Capture conversation URL after successful query
               const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
-              if (effectiveKey && conversationUrl) persistKeyMeta(effectiveKey, { conversationUrl });
+              if (effectiveKey && conversationUrl) persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: effectiveProjectUrl });
               const outcome = successOutcomeForResult({ result, op, conversationUrl });
               setLastOutcome(tabId, outcome);
               await durableRunFinalizeFromOutcome(op.id, outcome);

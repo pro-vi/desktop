@@ -90,6 +90,7 @@ test('http-api: status returns getStatus output', async (t) => {
 });
 
 test('http-api: status surfaces active query runtime and stop can cancel it', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-status-active-'));
   let releaseQuery = null;
   let stopCalls = 0;
   const controller = {
@@ -122,7 +123,7 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
     tabs,
     defaultTabId: 't0',
     serverId: 'sid-test',
-    stateDir: '/tmp',
+    stateDir,
     getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
     getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
   });
@@ -524,6 +525,255 @@ test('http-api: runs open saved conversations and retry exact materialized repla
   assert.equal(retriedRun.data.run.retryOf, originalRunId);
   assert.equal(retriedRun.data.run.materializedReplay.prompt, queryCalls[0].prompt);
   assert.equal(retriedRun.data.run.source, 'mcp');
+});
+
+test('http-api: fire-and-forget query persists in-flight conversationUrl for reopen after restart', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-reconnect-'));
+  const conversationUrl = 'https://chatgpt.com/g/g-p-reconnect/c/live-thread';
+  const projectUrl = 'https://chatgpt.com/g/g-p-reconnect/project';
+  const listedTabs1 = [{ id: 't0', key: 'reconnect-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller1 = {
+    runExclusive: async (fn) => await fn(),
+    query: async ({ onProgress }) => {
+      await onProgress?.({ phase: 'waiting_for_response', conversationUrl });
+      await new Promise(() => {});
+    },
+    getUrl: async () => conversationUrl
+  };
+  const tabs1 = {
+    listTabs: () => listedTabs1,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl: tabProjectUrl }) => {
+      const existing = listedTabs1.find((item) => item.key === key) || listedTabs1[0];
+      existing.vendorId = vendorId || existing.vendorId;
+      existing.vendorName = vendorName || existing.vendorName;
+      existing.projectUrl = tabProjectUrl || existing.projectUrl || null;
+      return existing.id;
+    },
+    createTab: async () => 't0',
+    updateTabMeta: (tabId, patch) => {
+      const row = listedTabs1.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller1
+  };
+  const server1 = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs: tabs1,
+    defaultTabId: 't0',
+    serverId: 'sid-test-1',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: conversationUrl, blocked: false, promptVisible: true, kind: null, tabs: tabs1.listTabs() })
+  });
+  const port1 = server1.address().port;
+
+  const started = await req({
+    port: port1,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      key: 'reconnect-key',
+      prompt: 'keep waiting',
+      fireAndForget: true,
+      source: 'mcp',
+      projectUrl
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const runPath = path.join(stateDir, 'runs', `${started.data.runId}.json`);
+  const persisted = await waitFor(async () => {
+    try {
+      const run = JSON.parse(await fs.readFile(runPath, 'utf8'));
+      return run.conversationUrl ? run : null;
+    } catch {
+      return null;
+    }
+  });
+  assert.equal(persisted.status, 'running');
+  assert.equal(persisted.phase, 'waiting_for_response');
+  assert.equal(persisted.conversationUrl, conversationUrl);
+
+  await new Promise((resolve) => server1.close(resolve));
+
+  let currentUrl2 = 'about:blank';
+  const navigateCalls = [];
+  const listedTabs2 = [{ id: 't-default', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller2 = {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => {
+      navigateCalls.push(to);
+      currentUrl2 = to;
+    },
+    ensureReady: async () => ({ ok: true }),
+    getUrl: async () => currentUrl2
+  };
+  const tabs2 = {
+    listTabs: () => listedTabs2,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl: tabProjectUrl }) => {
+      const existing = listedTabs2.find((item) => item.key === key);
+      if (existing) {
+        existing.vendorId = vendorId || existing.vendorId;
+        existing.vendorName = vendorName || existing.vendorName;
+        existing.projectUrl = tabProjectUrl || existing.projectUrl || null;
+        return existing.id;
+      }
+      const created = { id: 't-reopened', key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: tabProjectUrl || null };
+      listedTabs2.push(created);
+      return created.id;
+    },
+    createTab: async () => 't-created',
+    updateTabMeta: (tabId, patch) => {
+      const row = listedTabs2.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller2
+  };
+  const server2 = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs: tabs2,
+    defaultTabId: 't-default',
+    serverId: 'sid-test-2',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrl2, blocked: false, promptVisible: true, kind: null, tabs: tabs2.listTabs() })
+  });
+  t.after(() => server2.close());
+  const port2 = server2.address().port;
+
+  const reopened = await req({
+    port: port2,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/open',
+    body: { runId: started.data.runId }
+  });
+  assert.equal(reopened.res.status, 200);
+  assert.equal(reopened.data.run.conversationUrl, conversationUrl);
+  assert.equal(navigateCalls.at(-1), conversationUrl);
+});
+
+test('http-api: keyed navigate persists conversationUrl for later query recovery after restart', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-keyed-recovery-'));
+  let currentUrl1 = 'https://chatgpt.com/';
+  const listedTabs1 = [];
+  const controller1 = {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => {
+      currentUrl1 = to;
+    },
+    getUrl: async () => currentUrl1
+  };
+  const tabs1 = {
+    listTabs: () => listedTabs1,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl }) => {
+      const existing = listedTabs1.find((item) => item.key === key);
+      if (existing) return existing.id;
+      const created = { id: 't-nav', key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      listedTabs1.push(created);
+      return created.id;
+    },
+    createTab: async () => 't-nav',
+    updateTabMeta: (tabId, patch) => {
+      const row = listedTabs1.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller1
+  };
+  const server1 = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs: tabs1,
+    defaultTabId: 't-nav',
+    serverId: 'sid-test-1',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrl1, blocked: false, promptVisible: true, kind: null, tabs: tabs1.listTabs() })
+  });
+  const port1 = server1.address().port;
+
+  const recoveredConversationUrl = 'https://chatgpt.com/g/g-p-recovery/c/thread-1';
+  const navigated = await req({
+    port: port1,
+    token: 'secret',
+    method: 'POST',
+    pth: '/navigate',
+    body: { key: 'recovery-key', url: recoveredConversationUrl }
+  });
+  assert.equal(navigated.res.status, 200);
+  assert.equal(navigated.data.url, recoveredConversationUrl);
+
+  await new Promise((resolve) => server1.close(resolve));
+
+  let currentUrl2 = 'https://chatgpt.com/';
+  const navigateCalls = [];
+  const queryCalls = [];
+  const listedTabs2 = [{ id: 't-default', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller2 = {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => {
+      navigateCalls.push(to);
+      currentUrl2 = to;
+    },
+    ensureReady: async () => ({ ok: true }),
+    getUrl: async () => currentUrl2,
+    query: async ({ prompt }) => {
+      queryCalls.push({ prompt, urlBeforeSend: currentUrl2 });
+      return { text: 'continued', codeBlocks: [], meta: {} };
+    }
+  };
+  const tabs2 = {
+    listTabs: () => listedTabs2,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl }) => {
+      const existing = listedTabs2.find((item) => item.key === key);
+      if (existing) {
+        existing.vendorId = vendorId || existing.vendorId;
+        existing.vendorName = vendorName || existing.vendorName;
+        existing.projectUrl = projectUrl || existing.projectUrl || null;
+        return existing.id;
+      }
+      const created = { id: 't-query', key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      listedTabs2.push(created);
+      return created.id;
+    },
+    createTab: async () => 't-query',
+    updateTabMeta: (tabId, patch) => {
+      const row = listedTabs2.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller2
+  };
+  const server2 = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs: tabs2,
+    defaultTabId: 't-default',
+    serverId: 'sid-test-2',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrl2, blocked: false, promptVisible: true, kind: null, tabs: tabs2.listTabs() })
+  });
+  t.after(() => server2.close());
+  const port2 = server2.address().port;
+
+  const queried = await req({
+    port: port2,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'recovery-key', prompt: 'follow up' }
+  });
+  assert.equal(queried.res.status, 200);
+  assert.equal(queryCalls.length, 1);
+  assert.equal(queryCalls[0].urlBeforeSend, recoveredConversationUrl);
+  assert.equal(navigateCalls.at(-1), recoveredConversationUrl);
 });
 
 test('http-api: research is async, clamps timeout, persists outputs, and retries as research', async (t) => {

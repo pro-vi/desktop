@@ -206,6 +206,109 @@ test('chatgpt-controller: query does not accept unchanged fallback page text fro
   }
 });
 
+test('chatgpt-controller: query emits conversationUrl progress when a new thread URL appears', async () => {
+  const progress = [];
+  let waitForAssistantChecks = 0;
+  const realNow = Date.now;
+  let fakeNow = 2_000_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes("already_generating")) {
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        }
+        if (js.includes('return { count: nodes.length')) {
+          return { count: 0, lastText: '', pageText: '' };
+        }
+        if (js.includes('promptLen')) {
+          return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+        }
+        if (js.includes('fallbackMainText')) {
+          waitForAssistantChecks += 1;
+          if (waitForAssistantChecks === 1) {
+            return {
+              stop: true,
+              sendEnabled: false,
+              sendFound: true,
+              txt: 'Thinking',
+              count: 1,
+              usedFallback: false,
+              hasError: false,
+              hasContinue: false,
+              hasRegenerate: false,
+              isThinking: false,
+              pageText: 'Thinking',
+              currentUrl: 'https://chatgpt.com/g/g-p-test/c/new-thread'
+            };
+          }
+          return {
+            stop: false,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Final answer',
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            pageText: 'Final answer',
+            currentUrl: 'https://chatgpt.com/g/g-p-test/c/new-thread'
+          };
+        }
+        if (js.includes('const codes = Array.from')) {
+          return { codeBlocks: [] };
+        }
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/new-thread';
+      },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 20_000,
+      onProgress: async (patch) => {
+        progress.push(patch);
+      }
+    });
+
+    assert.equal(result.text, 'Final answer');
+    assert.equal(waitForAssistantChecks >= 2, true);
+    assert.equal(
+      progress.some((patch) => patch?.conversationUrl === 'https://chatgpt.com/g/g-p-test/c/new-thread'),
+      true
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: send fails when the prompt never stages in the active composer', async () => {
   const page = {
     async navigate() {},
