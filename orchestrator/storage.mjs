@@ -1,33 +1,25 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import crypto from 'node:crypto';
 
-async function atomicWriteJson(filePath, obj, { mode } = {}) {
-  const dir = path.dirname(filePath);
-  await fs.mkdir(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
-  const data = `${JSON.stringify(obj, null, 2)}\n`;
-  await fs.writeFile(tmp, data, mode ? { encoding: 'utf8', mode } : { encoding: 'utf8' });
-  await fs.rename(tmp, filePath);
-}
+import { atomicWriteJson } from '../fs-utils.mjs';
 
-export function orchestratorDir(stateDir) {
+function orchestratorDir(stateDir) {
   return path.join(stateDir, 'orchestrator');
 }
 
-export function handledPath(stateDir) {
+function handledPath(stateDir) {
   return path.join(orchestratorDir(stateDir), 'handled.json');
 }
 
-export function sessionsPath(stateDir) {
+function sessionsPath(stateDir) {
   return path.join(orchestratorDir(stateDir), 'sessions.json');
 }
 
-export function workspaceConfigPath(stateDir) {
+function workspaceConfigPath(stateDir) {
   return path.join(orchestratorDir(stateDir), 'workspaces.json');
 }
 
-export async function readJson(filePath, fallback) {
+async function readJson(filePath, fallback) {
   try {
     return JSON.parse(await fs.readFile(filePath, 'utf8'));
   } catch {
@@ -35,7 +27,7 @@ export async function readJson(filePath, fallback) {
   }
 }
 
-export async function writeJson(filePath, obj, opts) {
+async function writeJson(filePath, obj, opts) {
   await atomicWriteJson(filePath, obj, opts);
 }
 
@@ -63,7 +55,7 @@ export async function isHandled(stateDir, { key, id }) {
   return !!data?.keys?.[String(key)]?.[String(id)];
 }
 
-export async function loadSessions(stateDir) {
+async function loadSessions(stateDir) {
   const data = await readJson(sessionsPath(stateDir), { keys: {} });
   if (!data || typeof data !== 'object') return { keys: {} };
   if (!data.keys || typeof data.keys !== 'object') data.keys = {};
@@ -84,7 +76,7 @@ export async function getSession(stateDir, { key }) {
   return data?.keys?.[String(key)] || null;
 }
 
-export async function loadWorkspaces(stateDir) {
+async function loadWorkspaces(stateDir) {
   const data = await readJson(workspaceConfigPath(stateDir), { keys: {} });
   if (!data || typeof data !== 'object') return { keys: {} };
   if (!data.keys || typeof data.keys !== 'object') data.keys = {};

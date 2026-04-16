@@ -18,7 +18,7 @@ export function artifactsRoot(stateDir) {
   return path.join(stateDir, 'artifacts');
 }
 
-export function runArtifactsRoot(stateDir) {
+function runArtifactsRoot(stateDir) {
   return path.join(artifactsRoot(stateDir), 'runs');
 }
 
@@ -26,7 +26,7 @@ export function artifactsIndexPath(stateDir) {
   return path.join(artifactsRoot(stateDir), 'index.jsonl');
 }
 
-export function tabArtifactsDir({ stateDir, tabId, tabKey = null, vendorId = null } = {}) {
+function tabArtifactsDir({ stateDir, tabId, tabKey = null, vendorId = null } = {}) {
   const prefix = cleanSegment(tabKey || vendorId || 'tab');
   const suffix = cleanSegment(String(tabId || '').slice(0, 12), crypto.randomUUID().slice(0, 12));
   return path.join(artifactsRoot(stateDir), `${prefix}-${suffix}`);
@@ -38,7 +38,7 @@ export async function ensureArtifactsDir({ stateDir, tabId, tabKey = null, vendo
   return dir;
 }
 
-export function runArtifactsDir({ stateDir, runId, kind = 'run', tabKey = null, vendorId = null } = {}) {
+function runArtifactsDir({ stateDir, runId, kind = 'run', tabKey = null, vendorId = null } = {}) {
   const prefix = cleanSegment(tabKey || kind || vendorId || 'run');
   const suffix = cleanSegment(String(runId || '').trim(), crypto.randomUUID().slice(0, 12));
   return path.join(runArtifactsRoot(stateDir), `${prefix}-${suffix}`);

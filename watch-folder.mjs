@@ -1,8 +1,8 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { registerArtifact } from './artifact-store.mjs';
+import { atomicWriteFile } from './fs-utils.mjs';
 
 function watchRoot(stateDir) {
   return path.join(stateDir, 'watch-folders');
@@ -14,13 +14,6 @@ export function defaultWatchFolder(stateDir) {
 
 function watchStatePath(stateDir) {
   return path.join(watchRoot(stateDir), 'state.json');
-}
-
-async function atomicWriteFile(filePath, data) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
-  await fs.rename(tmp, filePath);
 }
 
 function cleanFolderName(value) {
@@ -127,7 +120,7 @@ async function readState(stateDir) {
 }
 
 async function writeState(stateDir, state) {
-  await atomicWriteFile(watchStatePath(stateDir), `${JSON.stringify(state, null, 2)}\n`);
+  await atomicWriteFile(watchStatePath(stateDir), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
 function shouldSkipName(name) {

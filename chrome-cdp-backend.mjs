@@ -70,7 +70,7 @@ async function findExecutableInPath(names) {
   return null;
 }
 
-export async function findChromeExecutable(explicitPath = null) {
+async function findChromeExecutable(explicitPath = null) {
   const userPath = String(explicitPath || '').trim();
   if (userPath) {
     if (await pathExists(userPath)) return userPath;

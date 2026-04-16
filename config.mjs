@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import crypto from 'node:crypto';
 
+import { atomicWriteFile } from './fs-utils.mjs';
 import { ensureStateDir } from './state.mjs';
 
 function clampNumber(v, { min, max, fallback }) {
@@ -20,14 +20,7 @@ function asBool(v, fallback = false) {
   return fallback;
 }
 
-async function atomicWriteFile(filePath, data, { mode } = {}) {
-  const dir = path.dirname(filePath);
-  const tmp = path.join(dir, `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, mode ? { encoding: 'utf8', mode } : { encoding: 'utf8' });
-  await fs.rename(tmp, filePath);
-}
-
-export function configPath(stateDir) {
+function configPath(stateDir) {
   return path.join(stateDir, 'config.json');
 }
 

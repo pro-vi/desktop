@@ -10,7 +10,7 @@ async function exists(p) {
   }
 }
 
-export async function findRepoRoot(startDir) {
+async function findRepoRoot(startDir) {
   let dir = path.resolve(startDir || process.cwd());
   for (let i = 0; i < 50; i++) {
     if (await exists(path.join(dir, '.git'))) return dir;

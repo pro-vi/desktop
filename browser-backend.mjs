@@ -1,4 +1,4 @@
-export const SUPPORTED_BROWSER_BACKENDS = ['electron', 'chrome-cdp'];
+const SUPPORTED_BROWSER_BACKENDS = ['electron', 'chrome-cdp'];
 
 export function normalizeBrowserBackend(value) {
   const raw = String(value || '').trim().toLowerCase();

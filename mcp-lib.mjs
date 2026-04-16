@@ -21,7 +21,7 @@ async function fileExists(p) {
   }
 }
 
-export async function loadConnection({ stateDir }) {
+async function loadConnection({ stateDir }) {
   const state = await readState(stateDir);
   const token = await readToken(stateDir);
   if (!state?.port || !token) return null;

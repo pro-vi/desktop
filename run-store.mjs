@@ -1,6 +1,7 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+
+import { atomicWriteFile } from './fs-utils.mjs';
 
 function safeClone(value) {
   return globalThis.structuredClone
@@ -16,11 +17,8 @@ function runPath(stateDir, runId) {
   return path.join(runsDir(stateDir), `${runId}.json`);
 }
 
-async function atomicWriteFile(filePath, data) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
-  await fs.rename(tmp, filePath);
+async function defaultWriteFile(filePath, data) {
+  await atomicWriteFile(filePath, data, { mode: 0o600 });
 }
 
 function normalizeString(value) {
@@ -109,7 +107,7 @@ function mergeResearchMeta(current, patchData) {
   };
 }
 
-export function createRunStore(stateDir, { writeFile = atomicWriteFile } = {}) {
+export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) {
   const records = new Map();
   const writeQueues = new Map();
 

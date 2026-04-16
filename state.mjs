@@ -3,26 +3,21 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 
-async function atomicWriteFile(filePath, data, { mode } = {}) {
-  const dir = path.dirname(filePath);
-  const tmp = path.join(dir, `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, mode ? { encoding: 'utf8', mode } : { encoding: 'utf8' });
-  await fs.rename(tmp, filePath);
-}
+import { atomicWriteFile } from './fs-utils.mjs';
 
 export function defaultStateDir() {
   return process.env.AGENTIFY_DESKTOP_STATE_DIR || path.join(os.homedir(), '.agentify-desktop');
 }
 
-export function tokenPath(stateDir = defaultStateDir()) {
+function tokenPath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'token.txt');
 }
 
-export function statePath(stateDir = defaultStateDir()) {
+function statePath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'state.json');
 }
 
-export function settingsPath(stateDir = defaultStateDir()) {
+function settingsPath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'settings.json');
 }
 
@@ -145,7 +140,7 @@ export async function writeSettings(settings, stateDir = defaultStateDir()) {
 
 // --- Key metadata persistence (key → { projectUrl, conversationUrl }) ---
 
-export function projectsPath(stateDir = defaultStateDir()) {
+function projectsPath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'projects.json');
 }
 

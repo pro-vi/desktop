@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-export function normalizeAbs(p) {
+function normalizeAbs(p) {
   return path.resolve(String(p || '').trim());
 }
 

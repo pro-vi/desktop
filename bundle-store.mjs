@@ -1,6 +1,7 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+
+import { atomicWriteFile } from './fs-utils.mjs';
 
 function normalizePathList(items) {
   if (!Array.isArray(items)) return [];
@@ -27,13 +28,6 @@ function normalizeName(name) {
 
 function bundlesPath(stateDir) {
   return path.join(stateDir, 'bundles.json');
-}
-
-async function atomicWriteFile(filePath, data) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
-  await fs.rename(tmp, filePath);
 }
 
 function normalizeBundle(input = {}) {
@@ -64,7 +58,7 @@ async function writeAll(stateDir, bundles) {
   const cleaned = bundles
     .map((item) => normalizeBundle(item))
     .sort((a, b) => a.name.localeCompare(b.name));
-  await atomicWriteFile(bundlesPath(stateDir), `${JSON.stringify({ bundles: cleaned }, null, 2)}\n`);
+  await atomicWriteFile(bundlesPath(stateDir), `${JSON.stringify({ bundles: cleaned }, null, 2)}\n`, { mode: 0o600 });
   return cleaned;
 }
 

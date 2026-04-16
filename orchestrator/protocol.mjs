@@ -1,5 +1,3 @@
-import crypto from 'node:crypto';
-
 function isUuidLike(s) {
   return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s.trim());
 }
@@ -22,18 +20,6 @@ export function parseAgentifyToolBlocks(pageText) {
   }
   blocks.sort((a, b) => a.index - b.index);
   return blocks.map((b) => b.obj);
-}
-
-export function findNextUnHandled(blocks, isHandledFn) {
-  const arr = Array.isArray(blocks) ? blocks : [];
-  for (let i = arr.length - 1; i >= 0; i--) {
-    const b = arr[i];
-    const id = String(b?.id || '').trim();
-    const key = String(b?.key || '').trim();
-    if (!id || !key) continue;
-    if (!isHandledFn(key, id)) return b;
-  }
-  return null;
 }
 
 export function findOldestUnHandled(blocks, isHandledFn, { keyFilter = null } = {}) {
@@ -64,7 +50,3 @@ export function normalizeToolRequest(obj, { defaultKey = null } = {}) {
   return { tool, id, key, mode, args };
 }
 
-export function createToolRequest({ tool, key, mode = 'interactive', args = {} }) {
-  const id = crypto.randomUUID();
-  return { agentify_tool: tool, id, key, mode, args };
-}
