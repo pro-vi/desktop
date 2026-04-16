@@ -204,9 +204,16 @@ test('http-api: status surfaces source, phase, blocked state, and last outcome f
     pth: '/query',
     body: { prompt: 'show runtime', source: 'mcp' }
   });
-  await new Promise((resolve) => setTimeout(resolve, 25));
 
-  const st1 = await req({ port, token: 'secret', method: 'GET', pth: '/status' });
+  // Poll /status until the query reaches awaiting_user; disk I/O in /query
+  // means a fixed delay is too flaky on slow machines.
+  let st1 = null;
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    st1 = await req({ port, token: 'secret', method: 'GET', pth: '/status' });
+    if (st1.data?.activeQuery?.phase === 'awaiting_user') break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.equal(st1.res.status, 200);
   assert.equal(st1.data.activeQuery?.source, 'mcp');
   assert.equal(st1.data.activeQuery?.phase, 'awaiting_user');

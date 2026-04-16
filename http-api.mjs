@@ -2042,6 +2042,9 @@ export function startHttpApi({
             projectUrl: projectUrl || null,
             conversationUrl: savedConversationUrl || null
           };
+          // Set active query before the durable disk write so /status reflects
+          // in-flight queries without waiting for run-record persistence.
+          setActiveQuery(tabId, activeOp);
           await createRunRecord({
             id: op.id,
             kind: 'query',
@@ -2070,7 +2073,6 @@ export function startHttpApi({
             })
           });
           runCreated = true;
-          setActiveQuery(tabId, activeOp);
           const vendorBudget = contextBudgetForVendor(tabMeta?.vendorId || 'chatgpt');
           try {
             patchActiveQuery(tabId, { phase: 'preparing_context', blocked: false, blockedKind: null });
