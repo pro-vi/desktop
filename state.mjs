@@ -4,6 +4,13 @@ import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 
 import { atomicWriteFile } from './fs-utils.mjs';
+import {
+  DEFAULT_CHAT_MODE_INTENT,
+  DEFAULT_IMAGE_KEY,
+  DEFAULT_IMAGE_MODE_INTENT,
+  normalizeChatGptModeIntent,
+  normalizePersistedChatGptKeyMeta
+} from './chatgpt-mode-intent.mjs';
 
 export function defaultStateDir() {
   return process.env.AGENTIFY_DESKTOP_STATE_DIR || path.join(os.homedir(), '.agentify-desktop');
@@ -39,6 +46,10 @@ export function defaultSettings() {
     showTabsByDefault: false,
     allowAuthPopups: true,
     defaultProjectUrl: null,
+    defaultChatModeIntent: DEFAULT_CHAT_MODE_INTENT,
+    defaultImageProjectUrl: null,
+    defaultImageModeIntent: DEFAULT_IMAGE_MODE_INTENT,
+    defaultImageKey: DEFAULT_IMAGE_KEY,
 
     // Acknowledgment for changing settings (UX only; not required for operation).
     acknowledgedAt: null
@@ -77,6 +88,12 @@ export function normalizeSettings(input) {
     showTabsByDefault: !!s.showTabsByDefault,
     allowAuthPopups: typeof s.allowAuthPopups === 'boolean' ? s.allowAuthPopups : d.allowAuthPopups,
     defaultProjectUrl: typeof s.defaultProjectUrl === 'string' && s.defaultProjectUrl.trim() ? s.defaultProjectUrl.trim() : null,
+    defaultChatModeIntent: normalizeChatGptModeIntent(s.defaultChatModeIntent, { fallback: d.defaultChatModeIntent }),
+    defaultImageProjectUrl:
+      typeof s.defaultImageProjectUrl === 'string' && s.defaultImageProjectUrl.trim() ? s.defaultImageProjectUrl.trim() : null,
+    defaultImageModeIntent: normalizeChatGptModeIntent(s.defaultImageModeIntent, { fallback: d.defaultImageModeIntent }),
+    defaultImageKey:
+      typeof s.defaultImageKey === 'string' && s.defaultImageKey.trim() ? s.defaultImageKey.trim() : d.defaultImageKey,
     acknowledgedAt: typeof s.acknowledgedAt === 'string' && s.acknowledgedAt.trim() ? s.acknowledgedAt.trim() : null
   };
   return out;
@@ -138,7 +155,7 @@ export async function writeSettings(settings, stateDir = defaultStateDir()) {
   return normalized;
 }
 
-// --- Key metadata persistence (key → { projectUrl, conversationUrl }) ---
+// --- Key metadata persistence (key → { projectUrl, conversationUrl, modeIntent }) ---
 
 function projectsPath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'projects.json');
@@ -150,15 +167,8 @@ export async function readProjects(stateDir = defaultStateDir()) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
     const out = {};
     for (const [k, v] of Object.entries(raw)) {
-      // Backwards compat: old format stored bare strings (projectUrl only)
-      if (typeof v === 'string' && v.trim()) {
-        out[k] = { projectUrl: v.trim(), conversationUrl: null };
-      } else if (v && typeof v === 'object' && !Array.isArray(v)) {
-        out[k] = {
-          projectUrl: (typeof v.projectUrl === 'string' && v.projectUrl.trim()) ? v.projectUrl.trim() : null,
-          conversationUrl: (typeof v.conversationUrl === 'string' && v.conversationUrl.trim()) ? v.conversationUrl.trim() : null
-        };
-      }
+      // Backwards compat: old format stored bare strings (projectUrl only).
+      out[k] = normalizePersistedChatGptKeyMeta(v);
     }
     return out;
   } catch {

@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 
 import { ensureToken, readToken, writeToken, defaultSettings, normalizeSettings, readSettings, writeSettings } from '../state.mjs';
+import { DEFAULT_CHAT_MODE_INTENT, DEFAULT_IMAGE_MODE_INTENT } from '../chatgpt-mode-intent.mjs';
 
 async function tempDir() {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-desktop-test-'));
@@ -35,6 +36,11 @@ test('state: normalizeSettings defaults allowAuthPopups to true', () => {
   assert.equal(s.chromeDebugPort, 9222);
   assert.equal(s.chromeProfileMode, 'isolated');
   assert.equal(s.chromeProfileName, 'Default');
+  assert.equal(s.defaultProjectUrl, null);
+  assert.equal(s.defaultChatModeIntent, DEFAULT_CHAT_MODE_INTENT);
+  assert.equal(s.defaultImageProjectUrl, null);
+  assert.equal(s.defaultImageModeIntent, DEFAULT_IMAGE_MODE_INTENT);
+  assert.equal(s.defaultImageKey, 'image-default');
 });
 
 test('state: readSettings returns defaults when file missing', async () => {
@@ -49,6 +55,32 @@ test('state: writeSettings persists allowAuthPopups', async () => {
   assert.equal(saved.allowAuthPopups, false);
   const re = await readSettings(dir);
   assert.equal(re.allowAuthPopups, false);
+});
+
+test('state: writeSettings persists default image project URL', async () => {
+  const dir = await tempDir();
+  const saved = await writeSettings({ defaultImageProjectUrl: ' https://chatgpt.com/g/g-p-image/project ' }, dir);
+  assert.equal(saved.defaultImageProjectUrl, 'https://chatgpt.com/g/g-p-image/project');
+  const re = await readSettings(dir);
+  assert.equal(re.defaultImageProjectUrl, 'https://chatgpt.com/g/g-p-image/project');
+});
+
+test('state: writeSettings normalizes ChatGPT mode intents', async () => {
+  const dir = await tempDir();
+  const saved = await writeSettings({ defaultChatModeIntent: ' Pro ', defaultImageModeIntent: ' reasoning ' }, dir);
+  assert.equal(saved.defaultChatModeIntent, 'extended-pro');
+  assert.equal(saved.defaultImageModeIntent, 'thinking');
+  const re = await readSettings(dir);
+  assert.equal(re.defaultChatModeIntent, 'extended-pro');
+  assert.equal(re.defaultImageModeIntent, 'thinking');
+});
+
+test('state: writeSettings persists default image key', async () => {
+  const dir = await tempDir();
+  const saved = await writeSettings({ defaultImageKey: ' images ' }, dir);
+  assert.equal(saved.defaultImageKey, 'images');
+  const re = await readSettings(dir);
+  assert.equal(re.defaultImageKey, 'images');
 });
 
 test('state: normalizeSettings clamps backend fields', () => {

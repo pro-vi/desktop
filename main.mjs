@@ -284,6 +284,20 @@ async function main() {
             }
           }
         ]
+      },
+      {
+        label: 'Edit',
+        submenu: [
+          { role: 'undo' },
+          { role: 'redo' },
+          { type: 'separator' },
+          { role: 'cut' },
+          { role: 'copy' },
+          { role: 'paste' },
+          { role: 'pasteAndMatchStyle' },
+          { role: 'delete' },
+          { role: 'selectAll' }
+        ]
       }
     ];
     try {
@@ -337,6 +351,11 @@ async function main() {
     if (has('chromeProfileName')) next.chromeProfileName = args.chromeProfileName;
     if (has('showTabsByDefault')) next.showTabsByDefault = args.showTabsByDefault;
     if (has('allowAuthPopups')) next.allowAuthPopups = args.allowAuthPopups;
+    if (has('defaultProjectUrl')) next.defaultProjectUrl = args.defaultProjectUrl;
+    if (has('defaultChatModeIntent')) next.defaultChatModeIntent = args.defaultChatModeIntent;
+    if (has('defaultImageProjectUrl')) next.defaultImageProjectUrl = args.defaultImageProjectUrl;
+    if (has('defaultImageModeIntent')) next.defaultImageModeIntent = args.defaultImageModeIntent;
+    if (has('defaultImageKey')) next.defaultImageKey = args.defaultImageKey;
     if (args?.acknowledge) next.acknowledgedAt = new Date().toISOString();
     settings = await writeSettings(next, stateDir);
     return settings;

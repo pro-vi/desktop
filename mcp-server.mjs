@@ -37,6 +37,7 @@ registerTool(
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
+      modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro, thinking, instant. This is separate from the vendor `model` hint.'),
       bundleName: z.string().optional().describe('Named context bundle to merge into this query before sending.'),
       prompt: z.string().describe('Prompt to send to ChatGPT.'),
       promptPrefix: z.string().optional().describe('Optional reusable instruction block prepended before packed context and prompt.'),
@@ -58,6 +59,7 @@ registerTool(
     tabId,
     key,
     projectUrl,
+    modeIntent,
     bundleName,
     prompt,
     promptPrefix,
@@ -87,6 +89,7 @@ registerTool(
         tabId,
         key: effectiveKey,
         projectUrl,
+        modeIntent,
         bundleName,
         prompt,
         promptPrefix,
@@ -435,23 +438,36 @@ registerTool(
   'agentify_image_gen',
   {
     description:
-      'Generate images via ChatGPT web UI (best-effort): sends the prompt, then downloads any images from the latest assistant message to a local folder and returns file paths.',
+      'Generate images via ChatGPT web UI (best-effort): sends the prompt, then downloads any images from the latest assistant message to a local folder and returns file paths. Use a dedicated key/projectUrl if your normal ChatGPT project is pinned to a Pro model that cannot create images.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
+      projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Useful for routing image requests to a separate Instant/Thinking project.'),
+      modeIntent: z.string().optional().describe('ChatGPT mode intent for image creation. Defaults to the configured image intent when omitted.'),
       prompt: z.string().describe('Prompt to send to ChatGPT for image generation.'),
       timeoutMs: z.number().optional().describe('Maximum time to wait for completion.'),
       maxImages: z.number().optional().describe('Maximum images to download.')
     }
   },
-  async ({ model, tabId, key, prompt, timeoutMs, maxImages }) => {
+  async ({ model, tabId, key, projectUrl, modeIntent, prompt, timeoutMs, maxImages }) => {
     const conn = await getConn();
     const q = await requestJson({
       ...conn,
       method: 'POST',
       path: '/query',
-      body: { source: 'mcp', model, tabId, key, prompt, attachments: [], timeoutMs: timeoutMs || 10 * 60_000 }
+      body: {
+        source: 'mcp',
+        model,
+        tabId,
+        key,
+        projectUrl,
+        modeIntent,
+        imageGeneration: true,
+        prompt,
+        attachments: [],
+        timeoutMs: timeoutMs || 10 * 60_000
+      }
     });
     const d = await requestJson({
       ...conn,
@@ -780,16 +796,17 @@ registerTool(
       key: z.string().optional(),
       name: z.string().optional(),
       projectUrl: z.string().optional().describe('ChatGPT Project URL. Routes conversations on this tab into the project.'),
+      modeIntent: z.string().optional().describe('ChatGPT mode intent to associate with this tab. Supported intents: extended-pro, thinking, instant.'),
       show: z.boolean().optional().describe('Show the tab window immediately.')
     }
   },
-  async ({ model, key, name, projectUrl, show }) => {
+  async ({ model, key, name, projectUrl, modeIntent, show }) => {
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/tabs/create',
-      body: { model, key, name, projectUrl, show: typeof show === 'boolean' ? show : undefined }
+      body: { model, key, name, projectUrl, modeIntent, show: typeof show === 'boolean' ? show : undefined }
     });
     return { content: [{ type: 'text', text: data.tabId || '' }], structuredContent: data };
   }

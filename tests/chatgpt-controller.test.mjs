@@ -309,6 +309,459 @@ test('chatgpt-controller: query emits conversationUrl progress when a new thread
   }
 });
 
+test('chatgpt-controller: query applies the requested mode intent before sending', async () => {
+  const progress = [];
+  const pointerEvents = [];
+  let modeChecks = 0;
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        modeChecks += 1;
+        if (modeChecks === 1) {
+          return {
+            active: false,
+            action: 'pointer_trigger',
+            reason: 'clicked_mode_trigger',
+            targetIntent: 'extended-pro',
+            activeIntent: 'thinking',
+            label: 'Thinking',
+            rect: { x: 40, y: 40, w: 100, h: 28 },
+            menuOpen: false
+          };
+        }
+        if (modeChecks === 2) {
+          return {
+            active: false,
+            action: 'pointer_option',
+            reason: 'clicked_mode_option',
+            targetIntent: 'extended-pro',
+            activeIntent: 'thinking',
+            label: 'Extended Pro',
+            rect: { x: 60, y: 80, w: 120, h: 28 },
+            menuOpen: true
+          };
+        }
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_already_active',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          label: 'Extended Pro'
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) {
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 0, lastText: '', pageText: '' };
+      }
+      if (js.includes('promptLen')) {
+        return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      }
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Final answer',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'Final answer'
+        };
+      }
+      if (js.includes('const codes = Array.from')) {
+        return { codeBlocks: [] };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/g/g-p-test/c/mode-thread';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse(x, y) {
+      pointerEvents.push(`move:${x},${y}`);
+    },
+    async mouseDown(x, y) {
+      pointerEvents.push(`down:${x},${y}`);
+    },
+    async mouseUp(x, y) {
+      pointerEvents.push(`up:${x},${y}`);
+    },
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      chatModeButton: '[data-testid="mode-trigger"]',
+      chatModeMenu: '[role="menu"]',
+      chatModeOption: '[role="menuitem"]',
+      chatModeActive: '[aria-pressed="true"]'
+    }
+  });
+
+  const result = await controller.query({
+    prompt: 'agentify',
+    timeoutMs: 20_000,
+    modeIntent: 'extended-pro',
+    onProgress: async (patch) => {
+      progress.push(patch);
+    }
+  });
+
+  assert.equal(result.text, 'Final answer');
+  assert.equal(modeChecks >= 3, true);
+  assert.equal(pointerEvents.filter((item) => item.startsWith('down:')).length, 4);
+  assert.equal(progress.some((patch) => patch?.phase === 'activating_mode_intent' && patch?.modeIntent === 'extended-pro'), true);
+});
+
+test('chatgpt-controller: query does not click mode controls when the requested intent is already active', async () => {
+  let modeChecks = 0;
+  const pointerEvents = [];
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        modeChecks += 1;
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_already_active',
+          targetIntent: 'thinking',
+          activeIntent: 'thinking',
+          label: 'Thinking'
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) {
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 0, lastText: '', pageText: '' };
+      }
+      if (js.includes('promptLen')) {
+        return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      }
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Done',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'Done'
+        };
+      }
+      if (js.includes('const codes = Array.from')) {
+        return { codeBlocks: [] };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/g/g-p-test/c/mode-already-active';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse(x, y) {
+      pointerEvents.push(`move:${x},${y}`);
+    },
+    async mouseDown(x, y) {
+      pointerEvents.push(`down:${x},${y}`);
+    },
+    async mouseUp(x, y) {
+      pointerEvents.push(`up:${x},${y}`);
+    },
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.query({
+    prompt: 'agentify',
+    timeoutMs: 20_000,
+    modeIntent: 'thinking'
+  });
+
+  assert.equal(result.text, 'Done');
+  assert.equal(modeChecks, 1);
+  assert.equal(pointerEvents.filter((item) => item.startsWith('down:')).length, 2);
+});
+
+test('chatgpt-controller: query fails closed when mode intent cannot be confirmed', async () => {
+  const realNow = Date.now;
+  let fakeNow = 6_000_000;
+  Date.now = () => {
+    fakeNow += 5_000;
+    return fakeNow;
+  };
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        return {
+          active: false,
+          action: 'none',
+          reason: 'mode_controls_not_found',
+          targetIntent: 'extended-pro',
+          activeIntent: 'thinking',
+          menuOpen: false,
+          composerHints: ['thinking']
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro' }),
+      (error) => {
+        assert.equal(error?.message, 'mode_intent_activation_failed');
+        assert.equal(error?.data?.reason, 'mode_controls_not_found');
+        assert.equal(error?.data?.targetIntent, 'extended-pro');
+        return true;
+      }
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: query treats creating-image placeholders as still generating until the final response arrives', async () => {
+  let waitForAssistantChecks = 0;
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes("already_generating")) {
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        }
+        if (js.includes('return { count: nodes.length')) {
+          return { count: 0, lastText: '', pageText: '' };
+        }
+        if (js.includes('promptLen')) {
+          return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+        }
+        if (js.includes('fallbackMainText')) {
+          waitForAssistantChecks += 1;
+          if (waitForAssistantChecks <= 3) {
+            return {
+              stop: false,
+              sendEnabled: true,
+              sendFound: true,
+              txt: 'Creating image\\n\\nThinking',
+              count: 1,
+              usedFallback: false,
+              hasError: false,
+              hasContinue: false,
+              hasRegenerate: false,
+              isThinking: false,
+              pageText: 'Creating image\\n\\nThinking',
+              currentUrl: 'https://chatgpt.com/g/g-p-test/c/image-thread'
+            };
+          }
+          return {
+            stop: false,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Final image ready',
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            pageText: 'Final image ready',
+            currentUrl: 'https://chatgpt.com/g/g-p-test/c/image-thread'
+          };
+        }
+        if (js.includes('const codes = Array.from')) {
+          return { codeBlocks: [] };
+        }
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/image-thread';
+      },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    const result = await controller.query({ prompt: 'make image', timeoutMs: 20_000 });
+    assert.equal(result.text, 'Final image ready');
+    assert.equal(waitForAssistantChecks >= 4, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: image-generation queries keep waiting while fallback text is still thinking without image output', async () => {
+  let waitForAssistantChecks = 0;
+  const realNow = Date.now;
+  let fakeNow = 4_000_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes("already_generating")) {
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        }
+        if (js.includes('return { count: nodes.length')) {
+          return { count: 0, lastText: '', pageText: '' };
+        }
+        if (js.includes('promptLen')) {
+          return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+        }
+        if (js.includes('fallbackMainText')) {
+          waitForAssistantChecks += 1;
+          if (waitForAssistantChecks <= 3) {
+            return {
+              stop: false,
+              sendEnabled: true,
+              sendFound: true,
+              txt: 'Generate the icon\\n\\nSketching it out\\n\\nThinking',
+              count: 1,
+              usedFallback: false,
+              hasError: false,
+              hasContinue: false,
+              hasRegenerate: false,
+              isThinking: false,
+              imageCandidateCount: 0,
+              pageText: 'Generate the icon\\n\\nSketching it out\\n\\nThinking',
+              currentUrl: 'https://chatgpt.com/g/g-p-test/c/image-thread'
+            };
+          }
+          return {
+            stop: false,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Final image ready',
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            imageCandidateCount: 1,
+            pageText: 'Final image ready',
+            currentUrl: 'https://chatgpt.com/g/g-p-test/c/image-thread'
+          };
+        }
+        if (js.includes('const codes = Array.from')) {
+          return { codeBlocks: [] };
+        }
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/image-thread';
+      },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    const result = await controller.query({ prompt: 'make image', timeoutMs: 20_000, imageGeneration: true });
+    assert.equal(result.text, 'Final image ready');
+    assert.equal(waitForAssistantChecks >= 4, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: send fails when the prompt never stages in the active composer', async () => {
   const page = {
     async navigate() {},

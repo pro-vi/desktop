@@ -5,6 +5,12 @@ import { URL } from 'node:url';
 import crypto from 'node:crypto';
 import { writeToken, readProjects, writeProjects } from './state.mjs';
 import {
+  normalizeChatGptModeIntent,
+  normalizePersistedChatGptKeyMeta,
+  resolveChatGptChatProfile,
+  resolveChatGptQueryProfile
+} from './chatgpt-mode-intent.mjs';
+import {
   ensureArtifactsDir,
   ensureRunArtifactsDir,
   listArtifacts,
@@ -101,6 +107,7 @@ function mapErrorToHttp(error) {
   if (msg === 'artifact_save_failed') return { code: 500, body: { error: 'artifact_save_failed', data: error?.data || null } };
   if (msg === 'research_requires_chatgpt') return { code: 409, body: { error: 'research_requires_chatgpt', data: error?.data || null } };
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
+  if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
   return null;
 }
 
@@ -188,6 +195,30 @@ function resolveVendor({ body, vendors = [] } = {}) {
 function defaultVendor(vendors = []) {
   const rows = Array.isArray(vendors) ? vendors : [];
   return rows.find((item) => String(item?.id || '').trim() === 'chatgpt') || rows[0] || builtinChatGPTVendor();
+}
+
+function trimOrNull(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function chatGptTabMetaPatch({ projectUrl, modeIntent } = {}) {
+  const patch = {};
+  if (projectUrl) patch.projectUrl = projectUrl;
+  if (modeIntent) patch.modeIntent = modeIntent;
+  return patch;
+}
+
+function chatGptPersistedMetaPatch({ projectUrl, modeIntent } = {}) {
+  const patch = {};
+  if (projectUrl) patch.projectUrl = projectUrl;
+  if (modeIntent) patch.modeIntent = modeIntent;
+  return patch;
+}
+
+function listedTabMatchesModeIntent(tab, modeIntent) {
+  const expected = normalizeChatGptModeIntent(modeIntent, { fallback: null });
+  if (!expected) return true;
+  return normalizeChatGptModeIntent(tab?.modeIntent, { fallback: null }) === expected;
 }
 
 function listedTabMatchesVendor(tab, vendor) {
@@ -654,15 +685,19 @@ export function startHttpApi({
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
-  // Persistent key → { projectUrl, conversationUrl } map.
+  // Persistent key → { projectUrl, conversationUrl, modeIntent } map.
   let keyMetaByKey = {};
   let keyMetaWriteQueue = Promise.resolve();
   const projectsReady = readProjects(stateDir).then((p) => { keyMetaByKey = p; }).catch(() => {});
   function persistKeyMeta(key, patch) {
     if (!key || !patch) return Promise.resolve(null);
-    const existing = keyMetaByKey[key] || { projectUrl: null, conversationUrl: null };
-    const updated = { ...existing, ...patch };
-    if (existing.projectUrl === updated.projectUrl && existing.conversationUrl === updated.conversationUrl) {
+    const existing = normalizePersistedChatGptKeyMeta(keyMetaByKey[key]);
+    const updated = normalizePersistedChatGptKeyMeta({ ...existing, ...patch });
+    if (
+      existing.projectUrl === updated.projectUrl &&
+      existing.conversationUrl === updated.conversationUrl &&
+      existing.modeIntent === updated.modeIntent
+    ) {
       return Promise.resolve(updated);
     }
     const snapshot = { ...keyMetaByKey, [key]: updated };
@@ -673,7 +708,7 @@ export function startHttpApi({
     return keyMetaWriteQueue.then(() => updated).catch(() => updated);
   }
   function getPersistedKeyMeta(key) {
-    return (key && keyMetaByKey[key]) || null;
+    return key ? normalizePersistedChatGptKeyMeta(keyMetaByKey[key]) : null;
   }
 
   function persistKeyLocation(key, { url = null, projectUrl = null, conversationUrl = null } = {}) {
@@ -928,6 +963,27 @@ export function startHttpApi({
           : 'ChatGPT Deep Research could not be activated on this tab.'
       };
     }
+    if (message === 'mode_intent_activation_failed') {
+      const targetIntent = detail?.targetIntent ? String(detail.targetIntent) : null;
+      const activeIntent = detail?.state?.activeIntent ? String(detail.state.activeIntent) : null;
+      const label = detail?.state?.label ? trimPreview(detail.state.label, 60) : null;
+      const stateMenuOpen = typeof detail?.state?.menuOpen === 'boolean' ? detail.state.menuOpen : null;
+      const stateMenuText = detail?.state?.menuText ? trimPreview(detail.state.menuText, 80) : null;
+      const composerHints = Array.isArray(detail?.state?.composerHints) && detail.state.composerHints.length
+        ? trimPreview(detail.state.composerHints.join(' | '), 100)
+        : null;
+      const debugSuffix = [targetIntent ? `target=${targetIntent}` : null, activeIntent ? `active=${activeIntent}` : null, label, stateMenuOpen === null ? null : `menuOpen=${stateMenuOpen}`, stateMenuText, composerHints]
+        .filter(Boolean)
+        .join('; ');
+      return {
+        ...base,
+        status: 'error',
+        label: 'ChatGPT mode unavailable',
+        detail: detail?.reason
+          ? `ChatGPT mode intent could not be confirmed before send: ${detail.reason}${debugSuffix ? ` (${debugSuffix})` : ''}`
+          : 'ChatGPT mode intent could not be confirmed before send.'
+      };
+    }
     if (message === 'research_output_incomplete') {
       return {
         ...base,
@@ -957,7 +1013,9 @@ export function startHttpApi({
     timeoutMs,
     source,
     fireAndForget,
-    projectUrl
+    projectUrl,
+    imageGeneration,
+    modeIntent
   }) => ({
     prompt: String(prompt || ''),
     promptPrefix: String(promptPrefix || ''),
@@ -971,7 +1029,9 @@ export function startHttpApi({
     tabId: body?.tabId ? String(body.tabId).trim() : null,
     vendorId: body?.vendorId ? String(body.vendorId).trim() : (body?.model ? String(body.model).trim() : null),
     model: body?.model ? String(body.model).trim() : null,
-    projectUrl: String(projectUrl || '').trim() || null
+    projectUrl: String(projectUrl || '').trim() || null,
+    imageGeneration: !!imageGeneration,
+    modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null })
   });
 
   const logicalResearchRequest = ({
@@ -982,7 +1042,8 @@ export function startHttpApi({
     bundleName,
     timeoutMs,
     source,
-    projectUrl
+    projectUrl,
+    modeIntent
   }) => ({
     prompt: String(prompt || ''),
     attachments: Array.isArray(attachments) ? attachments.map(String) : [],
@@ -994,7 +1055,8 @@ export function startHttpApi({
     key: body?.key ? String(body.key).trim() : null,
     tabId: body?.tabId ? String(body.tabId).trim() : null,
     vendorId: 'chatgpt',
-    projectUrl: String(projectUrl || '').trim() || null
+    projectUrl: String(projectUrl || '').trim() || null,
+    modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null })
   });
 
   const materializedReplay = ({ packed, timeoutMs, kind = 'query' }) => ({
@@ -1015,6 +1077,7 @@ export function startHttpApi({
         vendorId: item.vendorId || null,
         vendorName: item.vendorName || null,
         projectUrl: item.projectUrl || null,
+        modeIntent: item.modeIntent || null,
         promptPreview: item.promptPreview || null,
         blocked: !!item.blocked,
         blockedKind: item.blockedKind || null,
@@ -1065,24 +1128,28 @@ export function startHttpApi({
         url: vendor?.url,
         vendorId: vendor?.id || run?.vendorId || null,
         vendorName: vendor?.name || run?.vendorName || null,
-        projectUrl: run?.projectUrl || null
+        projectUrl: run?.projectUrl || null,
+        modeIntent: run?.modeIntent || null
       });
     }
     const rows = Array.isArray(tabs.listTabs?.()) ? tabs.listTabs() : [];
     const advisoryTab = run?.tabId ? rows.find((item) => String(item?.id || '') === String(run.tabId || '')) || null : null;
     if (advisoryTab) {
-      if (run?.projectUrl) tabs.updateTabMeta?.(advisoryTab.id, { projectUrl: run.projectUrl });
+      const patch = chatGptTabMetaPatch({ projectUrl: run?.projectUrl || null, modeIntent: run?.modeIntent || null });
+      if (Object.keys(patch).length) tabs.updateTabMeta?.(advisoryTab.id, patch);
       return advisoryTab.id;
     }
     const vendorTab = vendor
       ? rows.find((item) => {
         if (!listedTabMatchesVendor(item, vendor)) return false;
+        if (!listedTabMatchesModeIntent(item, run?.modeIntent || null)) return false;
         if (!run?.projectUrl) return true;
         return String(item?.projectUrl || '').trim() === String(run.projectUrl || '').trim();
-      }) || rows.find((item) => listedTabMatchesVendor(item, vendor)) || null
+      }) || rows.find((item) => listedTabMatchesVendor(item, vendor) && listedTabMatchesModeIntent(item, run?.modeIntent || null)) || null
       : null;
     if (vendorTab) {
-      if (run?.projectUrl) tabs.updateTabMeta?.(vendorTab.id, { projectUrl: run.projectUrl });
+      const patch = chatGptTabMetaPatch({ projectUrl: run?.projectUrl || null, modeIntent: run?.modeIntent || null });
+      if (Object.keys(patch).length) tabs.updateTabMeta?.(vendorTab.id, patch);
       return vendorTab.id;
     }
     if (vendor) {
@@ -1092,7 +1159,8 @@ export function startHttpApi({
         url: vendor.url,
         vendorId: vendor.id,
         vendorName: vendor.name,
-        projectUrl: run?.projectUrl || null
+        projectUrl: run?.projectUrl || null,
+        modeIntent: run?.modeIntent || null
       });
     }
     return defaultTabId;
@@ -1303,15 +1371,17 @@ export function startHttpApi({
     if (!tabId || !item) return;
     const next = { ...item, updatedAt: Date.now() };
     activeQueries.set(tabId, next);
-    if (next.key) persistKeyLocation(next.key, { conversationUrl: next.conversationUrl, projectUrl: next.projectUrl });
+    if (next.key && next.persistKeyLocation !== false) {
+      persistKeyLocation(next.key, { conversationUrl: next.conversationUrl, projectUrl: next.projectUrl });
+    }
     durableRunPatchFromActive(next);
     emitRuntimeChanged();
   };
 
-  const requestScopeForBody = (body) => {
+  const requestScopeForBody = (body, { overrideKey = null } = {}) => {
     const tabId = body?.tabId ? String(body.tabId).trim() : '';
     if (tabId) return `tab:${tabId}`;
-    const key = body?.key ? String(body.key).trim() : '';
+    const key = trimOrNull(overrideKey) || (body?.key ? String(body.key).trim() : '');
     if (key) return `key:${key}`;
     const vendorId = body?.vendorId ? String(body.vendorId).trim() : '';
     if (vendorId) return `vendor:${vendorId}`;
@@ -1380,7 +1450,9 @@ export function startHttpApi({
       });
     }
     activeQueries.set(tabId, next);
-    if (next.key) persistKeyLocation(next.key, { conversationUrl: next.conversationUrl, projectUrl: next.projectUrl });
+    if (next.key && next.persistKeyLocation !== false) {
+      persistKeyLocation(next.key, { conversationUrl: next.conversationUrl, projectUrl: next.projectUrl });
+    }
     durableRunPatchFromActive(next);
     emitRuntimeChanged();
     return next;
@@ -1417,13 +1489,16 @@ export function startHttpApi({
     await runsReady;
     const run = getRunRecordOrThrow(runId);
     const savedMeta = getPersistedKeyMeta(run.key);
+    const imageGeneration = !!run?.logicalRequest?.imageGeneration;
     const resolvedRun = {
       ...run,
       projectUrl: run.projectUrl || savedMeta?.projectUrl || null,
-      conversationUrl: run.conversationUrl || savedMeta?.conversationUrl || null
+      conversationUrl: run.conversationUrl || (imageGeneration ? null : savedMeta?.conversationUrl || null),
+      modeIntent: run.modeIntent || run.logicalRequest?.modeIntent || savedMeta?.modeIntent || null
     };
     const tabId = await resolveRunTab({ run: resolvedRun, show: false });
-    if (resolvedRun.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: resolvedRun.projectUrl });
+    const patch = chatGptTabMetaPatch({ projectUrl: resolvedRun.projectUrl || null, modeIntent: resolvedRun.modeIntent || null });
+    if (Object.keys(patch).length) tabs.updateTabMeta?.(tabId, patch);
     const controller = tabs.getControllerById(tabId);
     await runExclusive(controller, async () => {
       await ensureRunLocation({
@@ -1442,8 +1517,11 @@ export function startHttpApi({
     await runsReady;
     const original = getRunRecordOrThrow(runId);
     const savedMeta = getPersistedKeyMeta(original.key);
+    const imageGeneration = !!original?.logicalRequest?.imageGeneration;
+    const persistKeyLocationForRun = !imageGeneration;
     const originalProjectUrl = original.projectUrl || savedMeta?.projectUrl || null;
-    const originalConversationUrl = original.conversationUrl || savedMeta?.conversationUrl || null;
+    const originalConversationUrl = original.conversationUrl || (imageGeneration ? null : savedMeta?.conversationUrl || null);
+    const originalModeIntent = original.modeIntent || original.logicalRequest?.modeIntent || savedMeta?.modeIntent || null;
     const replay = original.materializedReplay || null;
     if (!replay?.prompt) throw new Error('run_not_retryable');
     const nextKind = String(original.kind || replay.kind || 'query').trim() || 'query';
@@ -1481,12 +1559,14 @@ export function startHttpApi({
         run: {
           ...original,
           projectUrl: originalProjectUrl,
-          conversationUrl: originalConversationUrl
+          conversationUrl: originalConversationUrl,
+          modeIntent: originalModeIntent
         },
         show
       });
       assertTabNotBusy(tabId);
-      if (originalProjectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: originalProjectUrl });
+      const retryTabPatch = chatGptTabMetaPatch({ projectUrl: originalProjectUrl, modeIntent: originalModeIntent });
+      if (Object.keys(retryTabPatch).length) tabs.updateTabMeta?.(tabId, retryTabPatch);
       op.tabId = tabId;
       let tabMeta = getTabMeta(tabs, tabId);
       if (nextKind === 'research') {
@@ -1511,6 +1591,7 @@ export function startHttpApi({
         vendorId: tabMeta?.vendorId || original.vendorId || null,
         vendorName: tabMeta?.vendorName || original.vendorName || null,
         projectUrl: originalProjectUrl,
+        modeIntent: originalModeIntent,
         conversationUrl: originalConversationUrl,
         promptPreview: op.promptPreview,
         startedAt: op.startedAt,
@@ -1523,7 +1604,8 @@ export function startHttpApi({
           key: effectiveKey,
           tabId,
           vendorId: tabMeta?.vendorId || original.vendorId || null,
-          projectUrl: originalProjectUrl
+          projectUrl: originalProjectUrl,
+          modeIntent: originalModeIntent
         },
         materializedReplay: {
           kind: nextKind,
@@ -1544,7 +1626,9 @@ export function startHttpApi({
         vendorId: tabMeta?.vendorId || original.vendorId || null,
         vendorName: tabMeta?.vendorName || original.vendorName || null,
         projectUrl: originalProjectUrl,
+        modeIntent: originalModeIntent,
         conversationUrl: originalConversationUrl,
+        persistKeyLocation: persistKeyLocationForRun,
         ...(nextKind === 'research'
           ? { researchMeta: defaultResearchMeta({ tabId, outputDir }) }
           : {})
@@ -1553,6 +1637,7 @@ export function startHttpApi({
       inflight.queries += 1;
       const controller = tabs.getControllerById(tabId);
       const executeRetry = async () => {
+        const imageGeneration = !!original.logicalRequest?.imageGeneration;
         if (nextKind === 'research') {
           return await executeResearchFlow({
             op,
@@ -1580,13 +1665,17 @@ export function startHttpApi({
             prompt: String(replay.prompt || ''),
             attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
             timeoutMs: effectiveTimeoutMs,
-            onProgress: (patch) => patchActiveQuery(tabId, patch)
+            onProgress: (patch) => patchActiveQuery(tabId, patch),
+            imageGeneration,
+            modeIntent: originalModeIntent
           });
         });
         const conversationUrl = typeof controller.getUrl === 'function'
           ? await controller.getUrl().catch(() => originalConversationUrl || null)
           : originalConversationUrl || null;
-        if (effectiveKey && conversationUrl) persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: originalProjectUrl });
+        if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
+          persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: originalProjectUrl });
+        }
         const outcome = successOutcomeForResult({ result, op, conversationUrl });
         setLastOutcome(tabId, outcome);
         await durableRunFinalizeFromOutcome(op.id, outcome);
@@ -1701,13 +1790,40 @@ export function startHttpApi({
         const vendor = resolveVendor({ body, vendors }) || defaultVendor(vendors);
         const settings = await getSettings?.() || {};
         const savedMeta = getPersistedKeyMeta(key);
-        const projectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
+        const isChatGpt = normalizeVendorToken(vendor?.id || '') === 'chatgpt';
+        const chatProfile = isChatGpt
+          ? resolveChatGptChatProfile({
+            key,
+            projectUrl: trimOrNull(body.projectUrl),
+            modeIntent: trimOrNull(body.modeIntent),
+            settings,
+            savedMeta
+          })
+          : null;
+        const projectUrl = chatProfile?.projectUrl || trimOrNull(body.projectUrl) || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
+        const modeIntent = chatProfile?.modeIntent || null;
         const tabId = key
-          ? await tabs.ensureTab({ key, name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl })
-          : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl });
-        if (projectUrl) {
-          tabs.updateTabMeta?.(tabId, { projectUrl });
-          if (key) persistKeyMeta(key, { projectUrl });
+          ? await tabs.ensureTab({
+            key,
+            name,
+            show,
+            url: vendor?.url,
+            vendorId: vendor?.id,
+            vendorName: vendor?.name,
+            projectUrl,
+            modeIntent
+          })
+          : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl, modeIntent });
+        const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
+        if (Object.keys(tabPatch).length) {
+          tabs.updateTabMeta?.(tabId, tabPatch);
+        }
+        if (key && isChatGpt) {
+          const persistedPatch = chatGptPersistedMetaPatch({
+            projectUrl,
+            modeIntent
+          });
+          if (Object.keys(persistedPatch).length) await persistKeyMeta(key, persistedPatch);
         }
         if (show) await onShow?.({ tabId }).catch(() => {});
         return sendJson(res, 200, { ok: true, tabId });
@@ -1778,10 +1894,22 @@ export function startHttpApi({
         const attachments = Array.isArray(body.attachments) ? body.attachments.map(String) : [];
         const contextPaths = Array.isArray(body.contextPaths) ? body.contextPaths.map(String) : [];
         const bundleName = String(body.bundleName || '').trim() || null;
-        const bodyProjectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || null;
         const tabKey = (body.key ? String(body.key).trim() : '') || null;
         const researchBody = { ...body, vendorId: 'chatgpt' };
-        const scope = requestScopeForBody(researchBody);
+        const settings = await getSettings?.() || {};
+        const savedMeta = getPersistedKeyMeta(tabKey);
+        const chatProfile = resolveChatGptChatProfile({
+          key: tabKey,
+          tabId: body?.tabId ? String(body.tabId).trim() : null,
+          projectUrl: trimOrNull(body.projectUrl),
+          modeIntent: trimOrNull(body.modeIntent),
+          settings,
+          savedMeta
+        });
+        const projectUrl = chatProfile.projectUrl;
+        const savedConversationUrl = chatProfile.conversationUrl;
+        const modeIntent = chatProfile.modeIntent;
+        const scope = requestScopeForBody(researchBody, { overrideKey: chatProfile.requestedKey });
         assertScopeNotBusy(scope);
         const advisoryTabId = body?.tabId
           ? String(body.tabId).trim() || null
@@ -1796,10 +1924,6 @@ export function startHttpApi({
             })();
         const advisoryTabScope = advisoryTabId && `tab:${advisoryTabId}` !== scope ? `tab:${advisoryTabId}` : null;
         if (advisoryTabScope) assertScopeNotBusy(advisoryTabScope);
-        const settings = await getSettings?.() || {};
-        const savedMeta = getPersistedKeyMeta(tabKey);
-        const projectUrl = bodyProjectUrl || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
-        const savedConversationUrl = savedMeta?.conversationUrl || null;
         const op = {
           id: crypto.randomUUID(),
           kind: 'research',
@@ -1817,7 +1941,11 @@ export function startHttpApi({
         reserveScope(scope, op);
         if (advisoryTabScope) reserveScope(advisoryTabScope, op);
         try {
-          if (bodyProjectUrl && tabKey) persistKeyMeta(tabKey, { projectUrl: bodyProjectUrl });
+          const researchPersistPatch = chatGptPersistedMetaPatch({
+            projectUrl: trimOrNull(body.projectUrl),
+            modeIntent: trimOrNull(body.modeIntent) ? modeIntent : null
+          });
+          if (tabKey && Object.keys(researchPersistPatch).length) await persistKeyMeta(tabKey, researchPersistPatch);
           await createRunRecord({
             id: op.id,
             kind: 'research',
@@ -1829,6 +1957,7 @@ export function startHttpApi({
             vendorId: 'chatgpt',
             vendorName: 'ChatGPT',
             projectUrl: projectUrl || null,
+            modeIntent: modeIntent || null,
             conversationUrl: savedConversationUrl || null,
             promptPreview: op.promptPreview,
             startedAt: op.startedAt,
@@ -1840,7 +1969,8 @@ export function startHttpApi({
               bundleName,
               timeoutMs,
               source,
-              projectUrl
+              projectUrl,
+              modeIntent
             }),
             researchMeta: defaultResearchMeta({ tabId: op.tabId || null })
           });
@@ -1866,7 +1996,8 @@ export function startHttpApi({
               reserveScope(resolvedTabScope, { ...op, tabId, scope: resolvedTabScope });
             }
             let tabMeta = assertResearchTab(tabId);
-            if (projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl });
+            const researchTabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
+            if (Object.keys(researchTabPatch).length) tabs.updateTabMeta?.(tabId, researchTabPatch);
             op.tabId = tabId;
             const effectiveKey = tabKey || tabMeta?.key || null;
             const outputDir = await ensureRunArtifactsDir({
@@ -1883,6 +2014,7 @@ export function startHttpApi({
               vendorId: tabMeta?.vendorId || 'chatgpt',
               vendorName: tabMeta?.vendorName || 'ChatGPT',
               projectUrl: projectUrl || null,
+              modeIntent: modeIntent || null,
               researchMeta: defaultResearchMeta({ tabId, outputDir })
             };
             await patchRunRecord(op.id, {
@@ -1893,6 +2025,7 @@ export function startHttpApi({
               vendorId: activeOp.vendorId,
               vendorName: activeOp.vendorName,
               projectUrl: projectUrl || null,
+              modeIntent: modeIntent || null,
               researchMeta: activeOp.researchMeta
             });
             setActiveQuery(tabId, activeOp);
@@ -1996,19 +2129,44 @@ export function startHttpApi({
         if (!prompt.trim()) throw new Error('missing_prompt');
         if (prompt.length > 200_000) throw new Error('prompt_too_large');
         const source = requestSourceForBody(body);
-        const scope = requestScopeForBody(body);
-        assertScopeNotBusy(scope);
         const attachments = Array.isArray(body.attachments) ? body.attachments.map(String) : [];
         const contextPaths = Array.isArray(body.contextPaths) ? body.contextPaths.map(String) : [];
         const promptPrefix = String(body.promptPrefix || '');
         const bundleName = String(body.bundleName || '').trim() || null;
-        const bodyProjectUrl = (body.projectUrl ? String(body.projectUrl).trim() : '') || null;
+        const imageGeneration = !!body.imageGeneration;
         const fireAndForget = !!body.fireAndForget;
         const tabKey = (body.key ? String(body.key).trim() : '') || null;
         const settings = await getSettings?.() || {};
-        const savedMeta = getPersistedKeyMeta(tabKey);
-        const projectUrl = bodyProjectUrl || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
-        const savedConversationUrl = savedMeta?.conversationUrl || null;
+        const vendor = resolveVendor({ body, vendors }) || defaultVendor(vendors);
+        const advisoryTabMeta = body?.tabId
+          ? getTabMeta(tabs, String(body.tabId).trim() || null)
+          : tabKey
+            ? ((tabs.listTabs?.() || []).find((item) => item?.key === tabKey) || null)
+            : null;
+        const effectiveVendorId = normalizeVendorToken(advisoryTabMeta?.vendorId || vendor?.id || '');
+        const isChatGpt = effectiveVendorId === 'chatgpt';
+        const initialSavedMeta = getPersistedKeyMeta(tabKey);
+        const chatProfile = isChatGpt
+          ? resolveChatGptQueryProfile({
+            imageGeneration,
+            key: tabKey,
+            tabId: body?.tabId ? String(body.tabId).trim() : null,
+            projectUrl: trimOrNull(body.projectUrl),
+            modeIntent: trimOrNull(body.modeIntent),
+            settings,
+            savedMeta: initialSavedMeta
+          })
+          : null;
+        const requestedKey = chatProfile?.requestedKey || tabKey;
+        const scope = requestScopeForBody(body, { overrideKey: requestedKey });
+        assertScopeNotBusy(scope);
+        const savedMeta = getPersistedKeyMeta(requestedKey);
+        const projectUrl = chatProfile?.projectUrl || trimOrNull(body.projectUrl) || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
+        const savedConversationUrl = chatProfile
+          ? chatProfile.conversationUrl
+          : (imageGeneration ? null : savedMeta?.conversationUrl || null);
+        const modeIntent = chatProfile?.modeIntent || null;
+        const persistKeyLocationForRun = chatProfile ? chatProfile.persistKeyLocation : !imageGeneration;
         const op = {
           id: crypto.randomUUID(),
           kind: 'query',
@@ -2027,20 +2185,30 @@ export function startHttpApi({
         let tabId = null;
         let runCreated = false;
         try {
-          tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
+          const resolutionBody = requestedKey && !tabKey ? { ...body, key: requestedKey } : body;
+          tabId = await resolveTab({ tabs, defaultTabId, body: resolutionBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
-          if (projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl });
-          if (bodyProjectUrl && tabKey) persistKeyMeta(tabKey, { projectUrl: bodyProjectUrl });
+          const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
+          if (Object.keys(tabPatch).length) tabs.updateTabMeta?.(tabId, tabPatch);
+          const queryPersistPatch = requestedKey && persistKeyLocationForRun
+            ? chatGptPersistedMetaPatch({
+              projectUrl: trimOrNull(body.projectUrl),
+              modeIntent: trimOrNull(body.modeIntent) ? modeIntent : null
+            })
+            : {};
+          if (requestedKey && Object.keys(queryPersistPatch).length) await persistKeyMeta(requestedKey, queryPersistPatch);
           op.tabId = tabId;
           const tabMeta = getTabMeta(tabs, tabId);
-          const effectiveKey = tabKey || tabMeta?.key || null;
+          const effectiveKey = requestedKey || tabMeta?.key || null;
           const activeOp = {
             ...op,
             key: effectiveKey,
             vendorId: tabMeta?.vendorId || null,
             vendorName: tabMeta?.vendorName || null,
             projectUrl: projectUrl || null,
-            conversationUrl: savedConversationUrl || null
+            modeIntent: modeIntent || null,
+            conversationUrl: savedConversationUrl || null,
+            persistKeyLocation: persistKeyLocationForRun
           };
           // Set active query before the durable disk write so /status reflects
           // in-flight queries without waiting for run-record persistence.
@@ -2056,6 +2224,7 @@ export function startHttpApi({
             vendorId: tabMeta?.vendorId || null,
             vendorName: tabMeta?.vendorName || null,
             projectUrl: projectUrl || null,
+            modeIntent: modeIntent || null,
             conversationUrl: savedConversationUrl || null,
             promptPreview: op.promptPreview,
             startedAt: op.startedAt,
@@ -2069,7 +2238,9 @@ export function startHttpApi({
               timeoutMs,
               source,
               fireAndForget,
-              projectUrl
+              projectUrl,
+              imageGeneration,
+              modeIntent
             })
           });
           runCreated = true;
@@ -2136,12 +2307,16 @@ export function startHttpApi({
                   prompt: packed.prompt,
                   attachments: packed.attachments,
                   timeoutMs,
-                  onProgress: (patch) => patchActiveQuery(tabId, patch)
+                  onProgress: (patch) => patchActiveQuery(tabId, patch),
+                  imageGeneration,
+                  modeIntent
                 });
               });
               // Capture conversation URL after successful query
               const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
-              if (effectiveKey && conversationUrl) persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: effectiveProjectUrl });
+              if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
+                persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: effectiveProjectUrl });
+              }
               const outcome = successOutcomeForResult({ result, op, conversationUrl });
               setLastOutcome(tabId, outcome);
               await durableRunFinalizeFromOutcome(op.id, outcome);

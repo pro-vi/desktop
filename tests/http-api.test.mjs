@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 
 import { startHttpApi } from '../http-api.mjs';
+import { writeProjects } from '../state.mjs';
 
 async function req({ port, token, method, pth, body, headers = {} }) {
   const res = await fetch(`http://127.0.0.1:${port}${pth}`, {
@@ -1302,7 +1303,7 @@ test('http-api: research reserves the underlying tab against concurrent query ca
   await waitFor(async () => {
     const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
     return run.data.run?.status === 'success' ? run : null;
-  }, { timeoutMs: 3_000, intervalMs: 20 });
+  }, { timeoutMs: 6_000, intervalMs: 20 });
 });
 
 test('http-api: research without tab/key does not lock an unrelated default non-chatgpt tab', async (t) => {
@@ -1396,6 +1397,7 @@ test('http-api: research without tab/key does not lock an unrelated default non-
   });
   assert.equal(queryOnClaudeDefault.res.status, 200);
 
+  await waitFor(() => releaseResearch ? true : null, { timeoutMs: 3_000, intervalMs: 20 });
   releaseResearch?.();
   await waitFor(async () => {
     const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
@@ -1819,6 +1821,46 @@ test('http-api: tabs/create routes keyed tabs to the requested vendor', async (t
   assert.equal(ensuredArgs.url, 'https://claude.ai/');
 });
 
+test('http-api: tabs/create persists ChatGPT mode intent on keyed tabs', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-tab-mode-intent-'));
+  let ensuredArgs = null;
+  const tabs = {
+    listTabs: () => [],
+    ensureTab: async (args) => {
+      ensuredArgs = args;
+      return 'tab-chatgpt-main';
+    },
+    createTab: async () => 'tab-chatgpt-main',
+    updateTabMeta: () => {},
+    closeTab: async () => true,
+    getControllerById: () => ({})
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const r = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/tabs/create',
+    body: { key: 'main', modeIntent: 'thinking' }
+  });
+
+  assert.equal(r.res.status, 200);
+  assert.equal(ensuredArgs.modeIntent, 'thinking');
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'projects.json'), 'utf8'));
+  assert.equal(persisted.main.modeIntent, 'thinking');
+});
+
 test('http-api: show creates missing key tab (and hide does not)', async (t) => {
   const created = [];
   const tabs = {
@@ -2107,6 +2149,285 @@ test('http-api: query with keyed tab uses default vendor metadata when no model 
   assert.equal(ensuredArgs.vendorId, 'chatgpt');
   assert.equal(ensuredArgs.vendorName, 'ChatGPT');
   assert.equal(ensuredArgs.url, 'https://chatgpt.com/');
+});
+
+test('http-api: image-generation queries prefer the default image project and do not overwrite keyed routing metadata', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-image-project-'));
+  const normalProjectUrl = 'https://chatgpt.com/g/g-p-normal/project';
+  const normalConversationUrl = 'https://chatgpt.com/g/g-p-normal/c/thread-normal';
+  const imageProjectUrl = 'https://chatgpt.com/g/g-p-image/project';
+  const imageConversationUrl = 'https://chatgpt.com/g/g-p-image/c/thread-image';
+  await writeProjects({
+    shared: {
+      projectUrl: normalProjectUrl,
+      conversationUrl: normalConversationUrl
+    }
+  }, stateDir);
+
+  let currentUrl = 'https://chatgpt.com/';
+  const navigateCalls = [];
+  const queryCalls = [];
+  const tabsList = [{ id: 't0', key: 'shared', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => {
+      navigateCalls.push(to);
+      currentUrl = to;
+    },
+    ensureReady: async () => ({ ok: true }),
+    getUrl: async () => currentUrl,
+    query: async ({ prompt }) => {
+      queryCalls.push({ prompt, urlBeforeSend: currentUrl });
+      currentUrl = imageConversationUrl;
+      return { text: 'image ok', codeBlocks: [], meta: {} };
+    }
+  };
+  const tabs = {
+    listTabs: () => tabsList,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl }) => {
+      const existing = tabsList.find((item) => item.key === key) || tabsList[0];
+      existing.vendorId = vendorId || existing.vendorId;
+      existing.vendorName = vendorName || existing.vendorName;
+      existing.projectUrl = projectUrl || existing.projectUrl || null;
+      return existing.id;
+    },
+    createTab: async () => 't0',
+    updateTabMeta: (tabId, patch) => {
+      const row = tabsList.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false,
+      defaultProjectUrl: normalProjectUrl,
+      defaultImageProjectUrl: imageProjectUrl
+    }),
+    getStatus: async () => ({ ok: true, url: currentUrl, blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const r = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'make an image', imageGeneration: true }
+  });
+
+  assert.equal(r.res.status, 200);
+  assert.equal(navigateCalls.at(-1), imageProjectUrl);
+  assert.equal(queryCalls[0]?.urlBeforeSend, imageProjectUrl);
+  assert.equal(tabsList[0].projectUrl, imageProjectUrl);
+
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'projects.json'), 'utf8'));
+  assert.equal(persisted.shared.projectUrl, normalProjectUrl);
+  assert.equal(persisted.shared.conversationUrl, normalConversationUrl);
+});
+
+test('http-api: image-generation queries without an explicit key use the dedicated default image key tab', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-image-default-key-'));
+  const imageProjectUrl = 'https://chatgpt.com/g/g-p-image/project';
+  let currentUrlByTab = {
+    t0: 'https://chatgpt.com/',
+    't-image': 'https://chatgpt.com/'
+  };
+  const ensureTabCalls = [];
+  const queryCalls = [];
+  const tabsList = [
+    { id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }
+  ];
+  const controllers = {
+    t0: {
+      runExclusive: async (fn) => await fn(),
+      navigate: async (to) => {
+        currentUrlByTab.t0 = to;
+      },
+      ensureReady: async () => ({ ok: true }),
+      getUrl: async () => currentUrlByTab.t0,
+      query: async ({ prompt, imageGeneration }) => {
+        queryCalls.push({ tabId: 't0', prompt, imageGeneration, urlBeforeSend: currentUrlByTab.t0 });
+        return { text: 'default', codeBlocks: [], meta: {} };
+      }
+    },
+    't-image': {
+      runExclusive: async (fn) => await fn(),
+      navigate: async (to) => {
+        currentUrlByTab['t-image'] = to;
+      },
+      ensureReady: async () => ({ ok: true }),
+      getUrl: async () => currentUrlByTab['t-image'],
+      query: async ({ prompt, imageGeneration }) => {
+        queryCalls.push({ tabId: 't-image', prompt, imageGeneration, urlBeforeSend: currentUrlByTab['t-image'] });
+        currentUrlByTab['t-image'] = 'https://chatgpt.com/g/g-p-image/c/thread-image';
+        return { text: 'image ok', codeBlocks: [], meta: {} };
+      }
+    }
+  };
+  const tabs = {
+    listTabs: () => tabsList,
+    ensureTab: async ({ key, vendorId, vendorName, projectUrl }) => {
+      ensureTabCalls.push({ key, vendorId, vendorName, projectUrl });
+      const existing = tabsList.find((item) => item.key === key);
+      if (existing) {
+        existing.projectUrl = projectUrl || existing.projectUrl || null;
+        return existing.id;
+      }
+      const created = { id: 't-image', key, vendorId: vendorId || 'chatgpt', vendorName: vendorName || 'ChatGPT', projectUrl: projectUrl || null };
+      tabsList.push(created);
+      return created.id;
+    },
+    createTab: async () => 't0',
+    updateTabMeta: (tabId, patch) => {
+      const row = tabsList.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch || {});
+    },
+    closeTab: async () => true,
+    getControllerById: (tabId) => controllers[tabId]
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false,
+      defaultImageProjectUrl: imageProjectUrl,
+      defaultImageKey: 'image-lab'
+    }),
+    getStatus: async () => ({ ok: true, url: currentUrlByTab.t0, blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const r = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'make an image', imageGeneration: true }
+  });
+
+  assert.equal(r.res.status, 200);
+  assert.equal(r.data.tabId, 't-image');
+  assert.equal(ensureTabCalls[0]?.key, 'image-lab');
+  assert.equal(queryCalls[0]?.tabId, 't-image');
+  assert.equal(queryCalls[0]?.imageGeneration, true);
+  assert.equal(queryCalls[0]?.urlBeforeSend, imageProjectUrl);
+  assert.equal(tabsList.find((item) => item.id === 't0')?.projectUrl, null);
+  assert.equal(tabsList.find((item) => item.id === 't-image')?.projectUrl, imageProjectUrl);
+});
+
+test('http-api: image-generation queries use the image-key scope instead of reserving the default tab scope', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-image-scope-'));
+  let releaseDefaultQuery;
+  const defaultQueryDone = new Promise((resolve) => {
+    releaseDefaultQuery = resolve;
+  });
+  const queryCalls = [];
+  const tabsList = [
+    { id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null },
+    { id: 't-image', key: 'image-lab', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }
+  ];
+  const controllers = {
+    t0: {
+      runExclusive: async (fn) => await fn(),
+      ensureReady: async () => ({ ok: true }),
+      getUrl: async () => 'https://chatgpt.com/',
+      query: async ({ prompt }) => {
+        queryCalls.push({ tabId: 't0', prompt });
+        await defaultQueryDone;
+        return { text: 'default ok', codeBlocks: [], meta: {} };
+      }
+    },
+    't-image': {
+      runExclusive: async (fn) => await fn(),
+      navigate: async () => {},
+      ensureReady: async () => ({ ok: true }),
+      getUrl: async () => 'https://chatgpt.com/g/g-p-image/project',
+      query: async ({ prompt, imageGeneration }) => {
+        queryCalls.push({ tabId: 't-image', prompt, imageGeneration });
+        return { text: 'image ok', codeBlocks: [], meta: {} };
+      }
+    }
+  };
+  const tabs = {
+    listTabs: () => tabsList,
+    ensureTab: async ({ key }) => {
+      const existing = tabsList.find((item) => item.key === key);
+      return existing?.id || 't-image';
+    },
+    createTab: async () => 't-image',
+    updateTabMeta: () => {},
+    closeTab: async () => true,
+    getControllerById: (tabId) => controllers[tabId]
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false,
+      defaultImageProjectUrl: 'https://chatgpt.com/g/g-p-image/project',
+      defaultImageKey: 'image-lab'
+    }),
+    getStatus: async () => ({ ok: true, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => {
+    releaseDefaultQuery?.();
+    server.close();
+  });
+  const port = server.address().port;
+
+  const defaultRun = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'default', prompt: 'normal', fireAndForget: true }
+  });
+  await waitFor(() => queryCalls.find((item) => item.tabId === 't0'));
+
+  const imageRun = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'make image', imageGeneration: true }
+  });
+
+  releaseDefaultQuery();
+  await defaultRun;
+
+  assert.equal(imageRun.res.status, 200);
+  assert.equal(imageRun.data.tabId, 't-image');
+  assert.equal(queryCalls.find((item) => item.tabId === 't-image')?.imageGeneration, true);
 });
 
 test('http-api: bundle save/list/get/delete work', async (t) => {

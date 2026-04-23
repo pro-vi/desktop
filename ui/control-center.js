@@ -154,6 +154,11 @@ function defaultSettings() {
     minGlobalGapMs: 0,
     showTabsByDefault: false,
     allowAuthPopups: true,
+    defaultProjectUrl: null,
+    defaultChatModeIntent: 'extended-pro',
+    defaultImageProjectUrl: null,
+    defaultImageModeIntent: 'thinking',
+    defaultImageKey: 'image-default',
     acknowledgedAt: null
   };
 }
@@ -579,6 +584,11 @@ async function refresh() {
     setNum('setGlobalGap', settings.minGlobalGapMs);
     setChecked('setShowTabsDefault', settings.showTabsByDefault);
     setChecked('setAllowAuthPopups', settings.allowAuthPopups !== false);
+    el('setDefaultProjectUrl').value = settings.defaultProjectUrl || '';
+    el('setDefaultChatModeIntent').value = settings.defaultChatModeIntent || 'extended-pro';
+    el('setDefaultImageProjectUrl').value = settings.defaultImageProjectUrl || '';
+    el('setDefaultImageModeIntent').value = settings.defaultImageModeIntent || 'thinking';
+    el('setDefaultImageKey').value = settings.defaultImageKey || 'image-default';
     setChecked('setAcknowledge', false);
     el('btnSaveSettings').disabled = true;
     el('settingsHint').textContent = settings.acknowledgedAt ? `Last acknowledged: ${settings.acknowledgedAt}` : 'Not acknowledged yet.';
@@ -716,6 +726,11 @@ async function main() {
           minGlobalGapMs: num('setGlobalGap', 0),
           showTabsByDefault: !!el('setShowTabsDefault').checked,
           allowAuthPopups: !!el('setAllowAuthPopups').checked,
+          defaultProjectUrl: String(el('setDefaultProjectUrl').value || '').trim() || null,
+          defaultChatModeIntent: String(el('setDefaultChatModeIntent').value || 'extended-pro').trim() || 'extended-pro',
+          defaultImageProjectUrl: String(el('setDefaultImageProjectUrl').value || '').trim() || null,
+          defaultImageModeIntent: String(el('setDefaultImageModeIntent').value || 'thinking').trim() || 'thinking',
+          defaultImageKey: String(el('setDefaultImageKey').value || '').trim() || 'image-default',
           acknowledge: true
         },
         { required: true }

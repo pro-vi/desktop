@@ -169,6 +169,39 @@
               <div class="label">Min global gap (ms)</div>
               <input id="setGlobalGap" class="compactNum" type="number" min="0" max="10000" step="10" />
             </label>
+            <label class="field">
+              <div class="label">Default ChatGPT project URL</div>
+              <input id="setDefaultProjectUrl" type="text" placeholder="https://chatgpt.com/g/g-p-.../project" autocomplete="off" />
+              <div class="fieldHelp">Used by normal ChatGPT queries when no explicit `projectUrl` is supplied.</div>
+            </label>
+            <label class="field">
+              <div class="label">Default ChatGPT mode intent</div>
+              <select id="setDefaultChatModeIntent">
+                <option value="extended-pro">Extended Pro</option>
+                <option value="thinking">Thinking</option>
+                <option value="instant">Instant</option>
+              </select>
+              <div class="fieldHelp">Declarative default for normal ChatGPT queries. This records which ChatGPT lane the tab should use; it does not overload the vendor `model` hint.</div>
+            </label>
+            <label class="field">
+              <div class="label">Default image project URL</div>
+              <input id="setDefaultImageProjectUrl" type="text" placeholder="https://chatgpt.com/g/g-p-.../project" autocomplete="off" />
+              <div class="fieldHelp">Used by image-generation calls. Keep this project on Instant or Thinking, not Pro.</div>
+            </label>
+            <label class="field">
+              <div class="label">Default image mode intent</div>
+              <select id="setDefaultImageModeIntent">
+                <option value="thinking">Thinking</option>
+                <option value="instant">Instant</option>
+                <option value="extended-pro">Extended Pro</option>
+              </select>
+              <div class="fieldHelp">Declarative default for image-generation requests. `Thinking` is the safe default because Pro does not reliably support image creation.</div>
+            </label>
+            <label class="field">
+              <div class="label">Default image key</div>
+              <input id="setDefaultImageKey" type="text" placeholder="image-default" autocomplete="off" />
+              <div class="fieldHelp">If an image request omits `key`, it is routed to this dedicated tab so image mode does not leak into normal chat tabs.</div>
+            </label>
           </div>
           <div class="row">
             <label class="checkbox">

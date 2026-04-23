@@ -103,6 +103,9 @@ npm run start
 2. In the Control Center:
 - set `Browser backend` to `Chrome CDP`
 - keep `Chrome profile mode` as `Agentify isolated profile`
+- optionally set `Default ChatGPT project URL` for normal chats
+- set `Default image project URL` if image requests should always land on a separate Instant/Thinking project
+- keep `Default image key` on its own tab namespace so image-mode UI state never bleeds into normal chat tabs
 - click `Save`
 - restart Agentify Desktop if you changed the backend
 
@@ -201,6 +204,8 @@ That proves the artifact loop:
 - generate in a real web session
 - save locally without manual browser downloads
 - reuse the saved file path in the next MCP prompt
+
+If your normal ChatGPT workflow uses a Pro-only project, keep image generation on a separate key or project. `agentify_query`, `agentify_image_gen`, and `agentify_tab_create` also accept a ChatGPT `modeIntent` (`extended-pro`, `thinking`, or `instant`) as a first-class routing hint. The Control Center now has separate defaults for normal ChatGPT mode intent and image mode intent, and image-generation calls still honor the dedicated image key/project path without overwriting normal keyed chat routing.
 
 ### First codebase stuffing workflow
 Use this when you want to hand a repo or folder tree to the model without manually copy/pasting files.

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { normalizeChatGptModeIntent } from './chatgpt-mode-intent.mjs';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -29,6 +30,24 @@ function looksLikeResearchShellText(value) {
     /^deep research(?:\s+apps)?(?:\s+sites)?(?:\s+chatgpt can make mistakes\. check important info\.)?$/.test(text)
   );
 }
+
+const IMAGE_PLACEHOLDER_RE = /(^|(?:\\n)|\n)\s*(creating|generating)\s+images?(?:\s*(?:\\n|\n|$))/i;
+const IMAGE_THINKING_LINE_RE = /(^|(?:\\n)|\n)\s*thinking(?:\s*(?:\\n|\n|$))/i;
+const CHATGPT_MODE_INTENT_META = {
+  'extended-pro': {
+    label: 'Extended Pro',
+    pattern: '\\bextended\\s*pro\\b|\\bpro\\b'
+  },
+  thinking: {
+    label: 'Thinking',
+    pattern: '\\bthinking\\b|\\breasoning\\b'
+  },
+  instant: {
+    label: 'Instant',
+    pattern: '\\binstant\\b|\\bfast\\b'
+  }
+};
+const CHATGPT_ANY_MODE_PATTERN = Object.values(CHATGPT_MODE_INTENT_META).map((item) => item.pattern).join('|');
 
 function extractConversationUrl(value) {
   const text = String(value || '').trim();
@@ -454,6 +473,337 @@ export class ChatGPTController {
     return last;
   }
 
+  async #applyModeIntent({ modeIntent, timeoutMs = 20_000 } = {}) {
+    const normalizedIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
+    if (!normalizedIntent) return { active: true, reason: 'mode_intent_not_requested', targetIntent: null };
+
+    const meta = CHATGPT_MODE_INTENT_META[normalizedIntent];
+    if (!meta) return { active: true, reason: 'mode_intent_unsupported', targetIntent: normalizedIntent };
+
+    await this.#focusPrompt({ clickPrompt: false });
+    await this.#emitProgress({ phase: 'activating_mode_intent', modeIntent: normalizedIntent });
+
+    const buttonSel = JSON.stringify(this.selectors.chatModeButton || '');
+    const menuSel = JSON.stringify(this.selectors.chatModeMenu || this.selectors.composerMenu || '');
+    const optionSel = JSON.stringify(this.selectors.chatModeOption || '');
+    const activeSel = JSON.stringify(this.selectors.chatModeActive || '');
+    const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
+    const targetIntentSource = JSON.stringify(normalizedIntent);
+    const targetPatternSource = JSON.stringify(meta.pattern);
+    const anyModePatternSource = JSON.stringify(CHATGPT_ANY_MODE_PATTERN);
+    const start = Date.now();
+    let last = null;
+    let lastClickAt = 0;
+    const blockedTriggerSignatures = new Set();
+    let pendingTriggerSignature = null;
+
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      const snap = await this.#eval(`(() => {
+        const targetIntent = ${targetIntentSource};
+        const targetRe = new RegExp(${targetPatternSource}, 'i');
+        const extRe = new RegExp(${JSON.stringify(CHATGPT_MODE_INTENT_META['extended-pro'].pattern)}, 'i');
+        const thinkingRe = new RegExp(${JSON.stringify(CHATGPT_MODE_INTENT_META.thinking.pattern)}, 'i');
+        const instantRe = new RegExp(${JSON.stringify(CHATGPT_MODE_INTENT_META.instant.pattern)}, 'i');
+        const anyModeRe = new RegExp(${anyModePatternSource}, 'i');
+        const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
+        const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
+        ${HOST_DOM_COLLECTION_HELPERS_JS}
+        const labelOf = (n) =>
+          [
+            n?.getAttribute?.('aria-label') || '',
+            n?.getAttribute?.('title') || '',
+            n?.getAttribute?.('data-testid') || '',
+            n?.textContent || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const intentForLabel = (label) => {
+          const text = String(label || '').trim().toLowerCase();
+          if (!text) return null;
+          if (thinkingRe.test(text)) return 'thinking';
+          if (instantRe.test(text)) return 'instant';
+          if (extRe.test(text)) return 'extended-pro';
+          return null;
+        };
+        const isActive = (n) => {
+          const ariaPressed = String(n?.getAttribute?.('aria-pressed') || '').trim().toLowerCase();
+          const ariaChecked = String(n?.getAttribute?.('aria-checked') || '').trim().toLowerCase();
+          const ariaSelected = String(n?.getAttribute?.('aria-selected') || '').trim().toLowerCase();
+          const ariaCurrent = String(n?.getAttribute?.('aria-current') || '').trim().toLowerCase();
+          const dataState = String(n?.getAttribute?.('data-state') || '').trim().toLowerCase();
+          const classes = String(n?.className || '').trim().toLowerCase();
+          return (
+            ariaPressed === 'true' ||
+            ariaChecked === 'true' ||
+            ariaSelected === 'true' ||
+            (ariaCurrent && ariaCurrent !== 'false') ||
+            dataState === 'active' ||
+            dataState === 'on' ||
+            /\\bactive\\b|\\bselected\\b|\\bcurrent\\b/.test(classes)
+          );
+        };
+        const rectOf = (n) => {
+          const r = n.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        };
+        const signatureOf = (rect, label) =>
+          [
+            Math.round(rect?.x || 0),
+            Math.round(rect?.y || 0),
+            Math.round(rect?.w || 0),
+            Math.round(rect?.h || 0),
+            String(label || '')
+          ].join(':');
+        const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
+        const explicitActive = explicitActiveNodes
+          .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)) }))
+          .find((item) => item.intent === targetIntent) || null;
+        if (explicitActive) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'mode_already_active',
+            targetIntent,
+            activeIntent: explicitActive.intent,
+            label: explicitActive.label || null
+          };
+        }
+
+        const menuRoots = uniq([
+          ...queryAll(${menuSel}),
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [role="dialog"], [role="alertdialog"]'))
+        ]).filter(visible);
+        const insideMenu = (node) => menuRoots.some((root) => root === node || root.contains(node));
+        const promptCandidates = uniq([
+          ...queryAll(${promptSel}),
+          ...Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]'))
+        ]).filter(visible);
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const scorePrompt = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
+        let prompt = null;
+        let bestPromptScore = -Infinity;
+        for (const n of promptCandidates) {
+          if (!editable(n)) continue;
+          const s = scorePrompt(n);
+          if (s > bestPromptScore) {
+            bestPromptScore = s;
+            prompt = n;
+          }
+        }
+        const composerRoot =
+          prompt?.closest('form') ||
+          prompt?.closest('[data-testid*="composer" i], [data-testid*="prompt" i], [data-testid*="chat-input" i], [aria-label*="message" i], [aria-label*="prompt" i]') ||
+          prompt?.closest('main') ||
+          document.body;
+        const promptRect = prompt ? rectOf(prompt) : null;
+        const triggerPool = uniq([
+          ...queryAll(${buttonSel}),
+          ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]')),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]'))
+        ]).filter((n) => visible(n) && !insideMenu(n));
+        const optionPool = uniq([
+          ...queryAll(${optionSel}),
+          ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state], label, li, div, span'))),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state]'))
+        ]).filter((n) => visible(n) && !menuRoots.includes(n));
+        const menuText = menuRoots
+          .map((root) => String(root?.innerText || '').replace(/\\s+/g, ' ').trim())
+          .filter(Boolean)
+          .join(' | ')
+          .slice(0, 240);
+        const optionHints = optionPool
+          .map((n) => labelOf(n))
+          .filter(Boolean)
+          .filter((label, index, arr) => arr.indexOf(label) === index)
+          .slice(0, 12);
+
+        const triggerCandidates = triggerPool
+          .map((node) => {
+            const label = labelOf(node);
+            const intent = intentForLabel(label);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const boostsFromComposer = !intent || intent === targetIntent;
+            let score = -1;
+            if (intent) {
+              score = intent === targetIntent ? 180 : isActive(node) ? 70 : 40;
+            } else if (/model selector|model-switcher-dropdown-button/.test(label)) {
+              score = 170;
+            } else if (anyModeRe.test(label)) {
+              score = targetRe.test(label) ? 175 : 145;
+            } else if (/\\bmode\\b|\\bmodel\\b|\\breason\\b|\\bthink\\b/.test(label)) {
+              score = 120;
+            }
+            if (score >= 0 && String(node?.getAttribute?.('data-testid') || '').trim()) score += 10;
+            if (score >= 0 && boostsFromComposer && composerRoot && composerRoot.contains(node)) score += 90;
+            if (score >= 0 && boostsFromComposer && promptRect) {
+              const cx = rect.x + rect.w / 2;
+              const cy = rect.y + rect.h / 2;
+              const dx = Math.abs(cx - (promptRect.x + promptRect.w / 2));
+              const dy = Math.abs(cy - (promptRect.y + promptRect.h / 2));
+              score += Math.max(0, 180 - dx / 8 - dy / 5);
+            }
+            if (score >= 0 && area > 25_000) score -= 80;
+            else if (score >= 0 && area > 12_000) score -= 35;
+            if (score >= 0 && rect.w > 240) score -= 30;
+            if (score >= 0 && rect.h > 72) score -= 20;
+            if (score >= 0 && rect.y < 80) score -= 40;
+            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label) };
+          })
+          .filter((item) => !blockedTriggerSignatures.has(item.signature))
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score);
+        const activeTrigger = triggerCandidates.find((item) => item.active && item.intent) || null;
+        if (activeTrigger?.intent === targetIntent) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'mode_already_active',
+            targetIntent,
+            activeIntent: activeTrigger.intent,
+            label: activeTrigger.label || null
+          };
+        }
+        if (clickedRecently) {
+          const targetTrigger = triggerCandidates.find((item) => item.intent === targetIntent) || null;
+          if (targetTrigger) {
+            return {
+              active: true,
+              action: 'none',
+              reason: 'mode_latched_after_click',
+              targetIntent,
+              activeIntent: targetTrigger.intent,
+              label: targetTrigger.label || null
+            };
+          }
+        }
+
+        const optionCandidates = optionPool
+          .map((node) => {
+            const label = labelOf(node);
+            const intent = intentForLabel(label);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            let score = -1;
+            if (intent === targetIntent) score = 240;
+            else if (targetRe.test(label)) score = 210;
+            if (score >= 0 && menuRoots.some((root) => root === node || root.contains(node))) score += 20;
+            if (score >= 0 && String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true') score += 10;
+            if (score >= 0 && isActive(node)) score -= 5;
+            if (score >= 0 && area > 80_000) score -= 120;
+            else if (score >= 0 && area > 20_000) score -= 30;
+            if (score >= 0 && rect.h > 120) score -= 80;
+            if (score >= 0 && rect.w > 600) score -= 60;
+            if (score >= 0 && label.length > 180) score -= 120;
+            return { node, label, intent, score, rect };
+          })
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score);
+        const targetOption = optionCandidates[0] || null;
+        if (targetOption && menuRoots.length) {
+          return {
+            active: false,
+            action: 'pointer_option',
+            reason: 'clicked_mode_option',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: targetOption.label || null,
+            rect: targetOption.rect,
+            menuOpen: true,
+            menuText,
+            optionHints
+          };
+        }
+
+        const trigger = triggerCandidates[0] || null;
+        if (trigger) {
+          return {
+            active: false,
+            action: 'pointer_trigger',
+            reason: 'clicked_mode_trigger',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: trigger.label || null,
+            rect: trigger.rect,
+            signature: trigger.signature,
+            menuOpen: menuRoots.length > 0,
+            menuText,
+            optionHints
+          };
+        }
+
+        const composerHints = triggerPool
+          .map((n) => labelOf(n))
+          .filter(Boolean)
+          .filter((label, index, arr) => arr.indexOf(label) === index)
+          .slice(0, 12);
+        return {
+          active: false,
+          action: 'none',
+          reason: 'mode_controls_not_found',
+          targetIntent,
+          activeIntent: activeTrigger?.intent || null,
+          menuOpen: menuRoots.length > 0,
+          menuText,
+          optionHints,
+          composerHints
+        };
+      })()`);
+      last = snap;
+      if (pendingTriggerSignature && snap?.action === 'pointer_trigger' && !snap?.menuOpen && snap?.signature === pendingTriggerSignature) {
+        blockedTriggerSignatures.add(pendingTriggerSignature);
+        pendingTriggerSignature = null;
+        await sleep(200);
+        continue;
+      }
+      if (pendingTriggerSignature && (snap?.menuOpen || snap?.signature !== pendingTriggerSignature || snap?.action !== 'pointer_trigger')) {
+        pendingTriggerSignature = null;
+      }
+      if (snap?.active) return snap;
+      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
+        const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
+        await this.#clickAt(cx, cy);
+        if (snap.action === 'pointer_trigger' && snap.signature) pendingTriggerSignature = snap.signature;
+        lastClickAt = Date.now();
+        await sleep(450);
+        continue;
+      }
+      await sleep(250);
+    }
+
+    const err = new Error('mode_intent_activation_failed');
+    err.data = {
+      reason: clipText(last?.reason || 'mode_activation_timeout', 160) || 'mode_activation_timeout',
+      targetIntent: normalizedIntent,
+      state: last || null
+    };
+    throw err;
+  }
+
   async detectChallenge() {
     const result = await this.#eval(`(() => {
       const url = location.href || '';
@@ -717,8 +1067,8 @@ export class ChatGPTController {
     await this.page.mouseUp(x, y, { button: 'left', clickCount: 1 });
   }
 
-  async #typePrompt(prompt) {
-    await this.#emitProgress({ phase: 'typing_prompt' });
+  async #focusPrompt({ phase = null, clickPrompt = true } = {}) {
+    if (phase) await this.#emitProgress({ phase });
     const sel = JSON.stringify(this.selectors.promptTextarea);
     const ok = await this.#eval(`(() => {
       const visible = (n) => {
@@ -782,12 +1132,17 @@ export class ChatGPTController {
       throw err;
     }
 
-    // Human-like click + select-all + type.
-    if (ok?.rect?.w > 0 && ok?.rect?.h > 0) {
+    if (clickPrompt && ok?.rect?.w > 0 && ok?.rect?.h > 0) {
       const cx = Math.round(ok.rect.x + Math.min(ok.rect.w - 6, 18));
       const cy = Math.round(ok.rect.y + Math.min(ok.rect.h - 6, 18));
       await this.#clickAt(cx, cy);
     }
+
+    return ok;
+  }
+
+  async #typePrompt(prompt, { clickPrompt = true } = {}) {
+    await this.#focusPrompt({ phase: 'typing_prompt', clickPrompt });
 
     const isMac = process.platform === 'darwin';
     await sleep(jitter(25, 80));
@@ -1702,13 +2057,15 @@ export class ChatGPTController {
     preSendPageText = '',
     minimumTimeoutMs = 0,
     minimumStableMs = 0,
-    extraThinkingPattern = ''
+    extraThinkingPattern = '',
+    imageGeneration = false
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const extraThinkingSource = JSON.stringify(String(extraThinkingPattern || '').trim());
+    const imageGenerationSource = imageGeneration ? 'true' : 'false';
     const effectiveTimeoutMs = Math.max(
       Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Math.floor(Number(timeoutMs)) : 0,
       Number.isFinite(Number(minimumTimeoutMs)) && Number(minimumTimeoutMs) > 0 ? Math.floor(Number(minimumTimeoutMs)) : 0,
@@ -1739,10 +2096,22 @@ export class ChatGPTController {
         const lastNode = nodes[nodes.length - 1];
         const fallbackMainText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         const txt = (lastNode?.innerText || fallbackMainText).trim();
+        const imageRoot = lastNode || document.querySelector('main') || document.body;
         const currentUrl = window.location.href || '';
         const hasContinue = Array.from(document.querySelectorAll('button, a')).some(b => /continue generating/i.test((b.textContent||'').trim()));
         const hasRegenerate = Array.from(document.querySelectorAll('button, a')).some(b => /regenerate/i.test((b.textContent||'').trim()));
         const hasError = /something went wrong|try again|error/i.test(txt) && txt.length < 500;
+        const isImagePlaceholder = ${IMAGE_PLACEHOLDER_RE}.test(txt);
+        const imageVisuals = imageRoot
+          ? Array.from(imageRoot.querySelectorAll('img, canvas')).filter((el) => {
+              const r = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              if (style.visibility === 'hidden' || style.display === 'none') return false;
+              return r.width >= 96 && r.height >= 96;
+            })
+          : [];
+        const imageCandidateCount = imageVisuals.length;
+        const hasThinkingLine = ${IMAGE_THINKING_LINE_RE}.test(txt);
         // Detect thinking state from UI chrome (banners, status elements), NOT from the
         // assistant response text — responses that mention "reasoning" or "thinking" must
         // not trigger this. Scan elements outside the assistant message nodes.
@@ -1756,12 +2125,30 @@ export class ChatGPTController {
           if (extraThinkingRe && extraThinkingRe.test(text)) return true;
           return false;
         });
-        const isThinking = thinkingBanner;
-        return { stop, sendEnabled, sendFound, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate, isThinking, pageText: fallbackMainText, currentUrl };
+        const isThinking = thinkingBanner || isImagePlaceholder || (${imageGenerationSource} && imageCandidateCount === 0 && hasThinkingLine);
+        return {
+          stop,
+          sendEnabled,
+          sendFound,
+          txt,
+          count: nodes.length,
+          usedFallback: !lastNode,
+          hasError,
+          hasContinue,
+          hasRegenerate,
+          isThinking,
+          imageCandidateCount,
+          pageText: fallbackMainText,
+          currentUrl
+        };
       })()`);
 
       const txt = String(snap?.txt || '');
       const pageText = String(snap?.pageText || '');
+      const hasImageOutput = Number(snap?.imageCandidateCount || 0) > 0;
+      const imagePlaceholder = IMAGE_PLACEHOLDER_RE.test(txt);
+      const hasThinkingLine = IMAGE_THINKING_LINE_RE.test(txt);
+      const thinking = !!snap?.isThinking || imagePlaceholder || (imageGeneration && !hasImageOutput && hasThinkingLine);
       const conversationUrl = extractConversationUrl(snap?.currentUrl || '');
       if (conversationUrl && conversationUrl !== emittedConversationUrl) {
         emittedConversationUrl = conversationUrl;
@@ -1777,10 +2164,10 @@ export class ChatGPTController {
       // Detect whether we've seen a NEW response (not pre-existing page content).
       // A new response is indicated by: more assistant nodes than before send,
       // or different text than the pre-send last message, or a stop button appearing.
-      if (snap?.stop || snap?.isThinking) generationObserved = true;
+      if (snap?.stop || thinking) generationObserved = true;
 
       if (!newResponseSeen) {
-        if (assistantAdvanced || snap?.stop || snap?.isThinking || (preSendCount === 0 && pageChanged)) {
+        if (assistantAdvanced || snap?.stop || thinking || (preSendCount === 0 && pageChanged)) {
           newResponseSeen = true;
           lastChange = Date.now(); // Reset stability timer for the new response
         }
@@ -1791,7 +2178,7 @@ export class ChatGPTController {
       // A missing send button alone is NOT treated as generating — the selector may
       // simply not match the current UI. Only block completion when there's active
       // evidence of generation (stop button or thinking state).
-      const generating = (!!snap?.stop && !snap?.sendEnabled) || snap?.isThinking || (!!snap?.stop && !snap?.sendFound);
+      const generating = (!!snap?.stop && !snap?.sendEnabled) || thinking || (!!snap?.stop && !snap?.sendFound);
       if (generating) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
@@ -1816,11 +2203,13 @@ export class ChatGPTController {
       const readyByNodes = (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
-      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !snap?.isThinking);
+      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !thinking);
       const fallbackReady = fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
+      const contentReady = readyByNodes || fallbackReady || hasImageOutput || snap?.hasError;
+      const responseReady = snap?.hasError || (imageGeneration ? (hasImageOutput || (txt.length > 0 && !thinking)) : txt.length > 0);
       const done = newResponseSeen && (
-        (!generating && stopGoneLongEnough && sendReady && stable && txt.length > 0 && (readyByNodes || fallbackReady)) ||
-        (!generating && !snap?.isThinking && fallbackStableLongEnough && (readyByNodes || fallbackReady)));
+        (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
+        (!generating && !thinking && fallbackStableLongEnough && contentReady));
       if (done) {
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
@@ -1844,7 +2233,14 @@ export class ChatGPTController {
     throw err;
   }
 
-  async query({ prompt, attachments = [], timeoutMs = 10 * 60_000, onProgress = null } = {}) {
+  async query({
+    prompt,
+    attachments = [],
+    timeoutMs = 10 * 60_000,
+    onProgress = null,
+    imageGeneration = false,
+    modeIntent = null
+  } = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
     const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress };
@@ -1853,6 +2249,7 @@ export class ChatGPTController {
       await this.ensureReady({ timeoutMs });
       await this.#attachFiles(attachments);
       await this.#typePrompt(prompt);
+      await this.#applyModeIntent({ modeIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
       // Snapshot existing assistant messages before sending, so #waitForAssistantStable
       // can distinguish pre-existing responses from the new one.
       const assistantSel = JSON.stringify(this.selectors.assistantMessage);
@@ -1867,7 +2264,8 @@ export class ChatGPTController {
         timeoutMs,
         preSendCount: preSend?.count || 0,
         preSendText: preSend?.lastText || '',
-        preSendPageText: preSend?.pageText || ''
+        preSendPageText: preSend?.pageText || '',
+        imageGeneration
       });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
@@ -2464,9 +2862,24 @@ export class ChatGPTController {
     const out = await this.#eval(`(async () => {
       const nodes = Array.from(document.querySelectorAll(${assistantSel}));
       const last = nodes[nodes.length - 1];
-      if (!last) return [];
-      const imgs = Array.from(last.querySelectorAll('img'));
-      const canvases = Array.from(last.querySelectorAll('canvas'));
+      const main = document.querySelector('main') || document.body;
+      const visibleVisuals = (root) => {
+        if (!root) return [];
+        return Array.from(root.querySelectorAll('img, canvas'))
+          .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+          .filter(({ el, rect }) => {
+            const style = getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none') return false;
+            return rect.width >= 96 && rect.height >= 96;
+          })
+          .sort((a, b) => (b.rect.y - a.rect.y) || ((b.rect.width * b.rect.height) - (a.rect.width * a.rect.height)))
+          .map(({ el }) => el);
+      };
+      let visuals = visibleVisuals(last);
+      if (!visuals.length && main && main !== last) visuals = visibleVisuals(main);
+      if (!visuals.length) return [];
+      const imgs = visuals.filter((el) => el.tagName === 'IMG');
+      const canvases = visuals.filter((el) => el.tagName === 'CANVAS');
       const results = [];
       for (const img of imgs.slice(0, ${maxImages})) {
         const src = img.currentSrc || img.src || '';
@@ -2502,9 +2915,12 @@ export class ChatGPTController {
 
       // Background-image urls (rare but possible)
       if (results.length < ${maxImages}) {
-        const bgEls = Array.from(last.querySelectorAll('*')).filter(el => {
+        const bgRoot = last || main;
+        const bgEls = Array.from(bgRoot?.querySelectorAll('*') || []).filter(el => {
           const s = getComputedStyle(el);
-          return s && s.backgroundImage && s.backgroundImage.includes('url(');
+          if (!s || !s.backgroundImage || !s.backgroundImage.includes('url(')) return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 96 && r.height >= 96;
         }).slice(0, 50);
         for (const el of bgEls) {
           if (results.length >= ${maxImages}) break;
