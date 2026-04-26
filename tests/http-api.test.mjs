@@ -239,7 +239,25 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-sync-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'durable answer', codeBlocks: [], meta: {} }),
+    query: async ({ onProgress }) => {
+      await onProgress?.({
+        phase: 'mode_intent_confirmed',
+        modeIntent: 'extended-pro',
+        modeIntentProvenance: {
+          requestedIntent: 'extended-pro',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          confirmed: true,
+          reason: 'mode_already_active',
+          label: 'Extended Pro',
+          clicked: false,
+          attempts: [],
+          stage: 'before_send',
+          confirmedAt: '2026-04-26T12:00:00.000Z'
+        }
+      });
+      return { text: 'durable answer', codeBlocks: [], meta: {} };
+    },
     getUrl: async () => 'https://chatgpt.com/c/durable-run'
   };
   const tabs = {
@@ -282,6 +300,9 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(persisted.materializedReplay?.prompt, 'make this durable');
   assert.equal(persisted.conversationUrl, 'https://chatgpt.com/c/durable-run');
   assert.equal(persisted.promptPreview, 'make this durable');
+  assert.equal(persisted.modeIntent, 'extended-pro');
+  assert.equal(persisted.modeIntentProvenance?.confirmed, true);
+  assert.equal(persisted.modeIntentProvenance?.stage, 'before_send');
   assert.equal(typeof persisted.finishedAt, 'number');
 });
 

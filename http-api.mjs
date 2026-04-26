@@ -1084,6 +1084,9 @@ export function startHttpApi({
         blockedTitle: item.blockedTitle || null,
         stopRequested: !!item.stopRequested,
         stopRequestedAt: item.stopRequestedAt || null,
+        ...(item.modeIntentProvenance
+          ? { modeIntentProvenance: JSON.parse(JSON.stringify(item.modeIntentProvenance)) }
+          : {}),
         ...(item.conversationUrl
           ? { conversationUrl: item.conversationUrl }
           : {}),

@@ -73,6 +73,49 @@ function buildResearchMeta({ activated = false, error = null, tabId = null, conv
   };
 }
 
+function modeIntentClickAttempt(snap = {}) {
+  return {
+    action: String(snap?.action || 'none'),
+    reason: clipText(snap?.reason || '', 160) || null,
+    label: clipText(snap?.label || '', 160) || null,
+    activeIntent: snap?.activeIntent ? String(snap.activeIntent) : null,
+    menuOpen: typeof snap?.menuOpen === 'boolean' ? snap.menuOpen : null,
+    at: new Date().toISOString()
+  };
+}
+
+function buildModeIntentProvenance({ activation, modeIntent, stage = 'before_send' } = {}) {
+  if (!activation?.targetIntent && !modeIntent) return null;
+  return {
+    requestedIntent: normalizeChatGptModeIntent(modeIntent || activation?.targetIntent, { fallback: null }),
+    targetIntent: activation?.targetIntent ? String(activation.targetIntent) : null,
+    activeIntent: activation?.activeIntent ? String(activation.activeIntent) : null,
+    confirmed: !!activation?.active,
+    reason: clipText(activation?.reason || '', 160) || null,
+    label: clipText(activation?.label || '', 160) || null,
+    clicked: Array.isArray(activation?.attempts) && activation.attempts.length > 0,
+    attempts: Array.isArray(activation?.attempts) ? activation.attempts.map((item) => ({ ...item })) : [],
+    stage,
+    confirmedAt: new Date().toISOString()
+  };
+}
+
+function modeIntentLabelLooksUsable(label, targetIntent) {
+  const text = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const target = normalizeChatGptModeIntent(targetIntent, { fallback: null });
+  if (!text || !target || text.length > 180) return false;
+  if (/\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text)) return false;
+  if (target === 'extended-pro') return /\bextended\s*pro\b/.test(text) || /^pro(?:\b|[\s,.:;()_-])/.test(text);
+  if (target === 'thinking') return /\bthinking\b|\breasoning\b/.test(text);
+  if (target === 'instant') return /\binstant\b|\bfast\b/.test(text);
+  return false;
+}
+
+function modeIntentActivationLooksTrusted(snap = {}) {
+  if (!snap?.active) return true;
+  return modeIntentLabelLooksUsable(snap.label, snap.targetIntent);
+}
+
 function safeClone(value) {
   return globalThis.structuredClone
     ? globalThis.structuredClone(value)
@@ -496,6 +539,7 @@ export class ChatGPTController {
     let lastClickAt = 0;
     const blockedTriggerSignatures = new Set();
     let pendingTriggerSignature = null;
+    const attempts = [];
 
     while (Date.now() - start < timeoutMs) {
       this.#throwIfStopRequested();
@@ -519,9 +563,11 @@ export class ChatGPTController {
         const intentForLabel = (label) => {
           const text = String(label || '').trim().toLowerCase();
           if (!text) return null;
+          if (text.length > 180) return null;
+          if (/\\bfeedback\\b|click to remove|remove attached|remove file|\\battachment\\b|\\buploaded\\b/.test(text)) return null;
           if (thinkingRe.test(text)) return 'thinking';
           if (instantRe.test(text)) return 'instant';
-          if (extRe.test(text)) return 'extended-pro';
+          if (/\\bextended\\s*pro\\b/.test(text) || /^pro(?:\\b|[\\s,.:;()_-])/.test(text)) return 'extended-pro';
           return null;
         };
         const isActive = (n) => {
@@ -553,21 +599,6 @@ export class ChatGPTController {
             Math.round(rect?.h || 0),
             String(label || '')
           ].join(':');
-        const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
-        const explicitActive = explicitActiveNodes
-          .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)) }))
-          .find((item) => item.intent === targetIntent) || null;
-        if (explicitActive) {
-          return {
-            active: true,
-            action: 'none',
-            reason: 'mode_already_active',
-            targetIntent,
-            activeIntent: explicitActive.intent,
-            label: explicitActive.label || null
-          };
-        }
-
         const menuRoots = uniq([
           ...queryAll(${menuSel}),
           ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [role="dialog"], [role="alertdialog"]'))
@@ -619,6 +650,47 @@ export class ChatGPTController {
           prompt?.closest('main') ||
           document.body;
         const promptRect = prompt ? rectOf(prompt) : null;
+        const composerRootIsBroad =
+          !composerRoot ||
+          composerRoot === document.body ||
+          String(composerRoot.tagName || '').toLowerCase() === 'main';
+        const isNearPrompt = (rect) => {
+          if (!promptRect || !rect) return false;
+          const cx = rect.x + rect.w / 2;
+          const cy = rect.y + rect.h / 2;
+          const pcx = promptRect.x + promptRect.w / 2;
+          const pcy = promptRect.y + promptRect.h / 2;
+          return Math.abs(cx - pcx) <= 640 && Math.abs(cy - pcy) <= 280;
+        };
+        const isHighConfidenceModeControl = (node, label) => {
+          const dataTestId = String(node?.getAttribute?.('data-testid') || '').toLowerCase();
+          const aria = String(node?.getAttribute?.('aria-label') || '').toLowerCase();
+          const title = String(node?.getAttribute?.('title') || '').toLowerCase();
+          const text = [label, dataTestId, aria, title].join(' ');
+          return /model-switcher|model selector|model-selector|model_picker|model-picker|mode selector|mode-selector/.test(text);
+        };
+        const inModeControlRegion = (node, label, rect = null) => {
+          const r = rect || rectOf(node);
+          return (
+            isHighConfidenceModeControl(node, label) ||
+            (!composerRootIsBroad && composerRoot.contains(node)) ||
+            isNearPrompt(r)
+          );
+        };
+        const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
+        const explicitActive = explicitActiveNodes
+          .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)), rect: rectOf(n) }))
+          .find((item) => item.intent === targetIntent && inModeControlRegion(item.node, item.label, item.rect)) || null;
+        if (explicitActive) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'mode_already_active',
+            targetIntent,
+            activeIntent: explicitActive.intent,
+            label: explicitActive.label || null
+          };
+        }
         const triggerPool = uniq([
           ...queryAll(${buttonSel}),
           ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]')),
@@ -646,13 +718,15 @@ export class ChatGPTController {
             const intent = intentForLabel(label);
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const highConfidence = isHighConfidenceModeControl(node, label);
+            const modeRegion = inModeControlRegion(node, label, rect);
             const boostsFromComposer = !intent || intent === targetIntent;
             let score = -1;
             if (intent) {
               score = intent === targetIntent ? 180 : isActive(node) ? 70 : 40;
             } else if (/model selector|model-switcher-dropdown-button/.test(label)) {
               score = 170;
-            } else if (anyModeRe.test(label)) {
+            } else if (highConfidence && anyModeRe.test(label)) {
               score = targetRe.test(label) ? 175 : 145;
             } else if (/\\bmode\\b|\\bmodel\\b|\\breason\\b|\\bthink\\b/.test(label)) {
               score = 120;
@@ -671,7 +745,8 @@ export class ChatGPTController {
             if (score >= 0 && rect.w > 240) score -= 30;
             if (score >= 0 && rect.h > 72) score -= 20;
             if (score >= 0 && rect.y < 80) score -= 40;
-            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label) };
+            if (score >= 0 && !modeRegion && !highConfidence) score = -1;
+            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modeRegion, highConfidence };
           })
           .filter((item) => !blockedTriggerSignatures.has(item.signature))
           .filter((item) => item.score >= 0)
@@ -707,10 +782,10 @@ export class ChatGPTController {
             const intent = intentForLabel(label);
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
             let score = -1;
             if (intent === targetIntent) score = 240;
-            else if (targetRe.test(label)) score = 210;
-            if (score >= 0 && menuRoots.some((root) => root === node || root.contains(node))) score += 20;
+            if (score >= 0 && optionInsideMenu) score += 20;
             if (score >= 0 && String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true') score += 10;
             if (score >= 0 && isActive(node)) score -= 5;
             if (score >= 0 && area > 80_000) score -= 120;
@@ -718,9 +793,9 @@ export class ChatGPTController {
             if (score >= 0 && rect.h > 120) score -= 80;
             if (score >= 0 && rect.w > 600) score -= 60;
             if (score >= 0 && label.length > 180) score -= 120;
-            return { node, label, intent, score, rect };
+            return { node, label, intent, score, rect, optionInsideMenu };
           })
-          .filter((item) => item.score >= 0)
+          .filter((item) => item.score >= 0 && item.optionInsideMenu)
           .sort((a, b) => b.score - a.score);
         const targetOption = optionCandidates[0] || null;
         if (targetOption && menuRoots.length) {
@@ -782,8 +857,20 @@ export class ChatGPTController {
       if (pendingTriggerSignature && (snap?.menuOpen || snap?.signature !== pendingTriggerSignature || snap?.action !== 'pointer_trigger')) {
         pendingTriggerSignature = null;
       }
-      if (snap?.active) return snap;
+      if (snap?.active) {
+        const activation = { ...snap, clicked: attempts.length > 0, attempts: attempts.map((item) => ({ ...item })) };
+        if (modeIntentActivationLooksTrusted(activation)) return activation;
+        last = {
+          ...activation,
+          active: false,
+          reason: 'mode_activation_untrusted',
+          untrustedReason: activation.reason || null
+        };
+        await sleep(250);
+        continue;
+      }
       if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        attempts.push(modeIntentClickAttempt(snap));
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
         const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
         await this.#clickAt(cx, cy);
@@ -799,6 +886,7 @@ export class ChatGPTController {
     err.data = {
       reason: clipText(last?.reason || 'mode_activation_timeout', 160) || 'mode_activation_timeout',
       targetIntent: normalizedIntent,
+      attempts: attempts.map((item) => ({ ...item })),
       state: last || null
     };
     throw err;
@@ -2249,7 +2337,7 @@ export class ChatGPTController {
       await this.ensureReady({ timeoutMs });
       await this.#attachFiles(attachments);
       await this.#typePrompt(prompt);
-      await this.#applyModeIntent({ modeIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
+      const modeIntentActivation = await this.#applyModeIntent({ modeIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
       // Snapshot existing assistant messages before sending, so #waitForAssistantStable
       // can distinguish pre-existing responses from the new one.
       const assistantSel = JSON.stringify(this.selectors.assistantMessage);
@@ -2259,6 +2347,14 @@ export class ChatGPTController {
         const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
       })()`);
+      const modeIntentProvenance = buildModeIntentProvenance({ activation: modeIntentActivation, modeIntent, stage: 'before_send' });
+      if (modeIntentProvenance) {
+        await this.#emitProgress({
+          phase: 'mode_intent_confirmed',
+          modeIntent: modeIntentProvenance.requestedIntent,
+          modeIntentProvenance
+        });
+      }
       await this.#clickSend();
       return await this.#waitForAssistantStable({
         timeoutMs,

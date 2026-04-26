@@ -312,6 +312,7 @@ test('chatgpt-controller: query emits conversationUrl progress when a new thread
 test('chatgpt-controller: query applies the requested mode intent before sending', async () => {
   const progress = [];
   const pointerEvents = [];
+  const events = [];
   let modeChecks = 0;
 
   const page = {
@@ -393,6 +394,7 @@ test('chatgpt-controller: query applies the requested mode intent before sending
     },
     async mouseDown(x, y) {
       pointerEvents.push(`down:${x},${y}`);
+      events.push(x > 300 ? 'mouseDown:send' : 'mouseDown:mode');
     },
     async mouseUp(x, y) {
       pointerEvents.push(`up:${x},${y}`);
@@ -420,6 +422,7 @@ test('chatgpt-controller: query applies the requested mode intent before sending
     modeIntent: 'extended-pro',
     onProgress: async (patch) => {
       progress.push(patch);
+      if (patch?.phase) events.push(`progress:${patch.phase}`);
     }
   });
 
@@ -427,6 +430,18 @@ test('chatgpt-controller: query applies the requested mode intent before sending
   assert.equal(modeChecks >= 3, true);
   assert.equal(pointerEvents.filter((item) => item.startsWith('down:')).length, 4);
   assert.equal(progress.some((patch) => patch?.phase === 'activating_mode_intent' && patch?.modeIntent === 'extended-pro'), true);
+  const provenancePatch = progress.find((patch) => patch?.phase === 'mode_intent_confirmed');
+  assert.equal(provenancePatch?.modeIntent, 'extended-pro');
+  assert.equal(provenancePatch?.modeIntentProvenance?.confirmed, true);
+  assert.equal(provenancePatch?.modeIntentProvenance?.clicked, true);
+  assert.equal(provenancePatch?.modeIntentProvenance?.stage, 'before_send');
+  assert.equal(provenancePatch?.modeIntentProvenance?.attempts?.length, 2);
+  assert.equal(
+    events.indexOf('progress:mode_intent_confirmed') > -1 &&
+      events.indexOf('progress:mode_intent_confirmed') < events.indexOf('progress:sending_prompt') &&
+      events.indexOf('progress:mode_intent_confirmed') < events.indexOf('mouseDown:send'),
+    true
+  );
 });
 
 test('chatgpt-controller: query does not click mode controls when the requested intent is already active', async () => {
@@ -573,6 +588,72 @@ test('chatgpt-controller: query fails closed when mode intent cannot be confirme
         return true;
       }
     );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: query rejects unrelated Pro-labeled UI as mode confirmation', async () => {
+  const realNow = Date.now;
+  let fakeNow = 7_000_000;
+  Date.now = () => {
+    fakeNow += 5_000;
+    return fakeNow;
+  };
+
+  let sendAttempted = false;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) {
+        sendAttempted = true;
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_latched_after_click',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          label: 'pro feedback'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro' }),
+      (error) => {
+        assert.equal(error?.message, 'mode_intent_activation_failed');
+        assert.equal(error?.data?.reason, 'mode_activation_untrusted');
+        return true;
+      }
+    );
+    assert.equal(sendAttempted, false);
   } finally {
     Date.now = realNow;
   }
