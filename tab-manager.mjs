@@ -62,7 +62,8 @@ export class TabManager {
     vendorId = null,
     vendorName = null,
     projectUrl = null,
-    modeIntent = null
+    modeIntent = null,
+    modelIntent = null
   } = {}) {
     return await this.mutex.run(async () => {
       if (key && this.keyToId.has(key)) return this.keyToId.get(key);
@@ -112,6 +113,7 @@ export class TabManager {
         protectedTab: !!protectedTab,
         projectUrl: projectUrl || null,
         modeIntent: modeIntent || null,
+        modelIntent: modelIntent || null,
         createdAt: Date.now(),
         lastUsedAt: Date.now()
       };
@@ -123,19 +125,19 @@ export class TabManager {
     });
   }
 
-  async ensureTab({ key, name, url, vendorId, vendorName, show, projectUrl, modeIntent } = {}) {
+  async ensureTab({ key, name, url, vendorId, vendorName, show, projectUrl, modeIntent, modelIntent } = {}) {
     if (!key) throw new Error('missing_key');
     const existing = this.keyToId.get(key);
     if (existing) {
       const tab = this.tabs.get(existing);
       if (!tab) {
         this.keyToId.delete(key);
-        return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent });
+        return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent, modelIntent });
       }
       if (!tabMatchesVendor(tab, { vendorId, url })) throw new Error('key_vendor_mismatch');
       return existing;
     }
-    return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent });
+    return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent, modelIntent });
   }
 
   listTabs() {
@@ -150,6 +152,7 @@ export class TabManager {
         url: t.url || null,
         projectUrl: t.projectUrl || null,
         modeIntent: t.modeIntent || null,
+        modelIntent: t.modelIntent || null,
         protectedTab: !!t.protectedTab,
         createdAt: t.createdAt,
         lastUsedAt: t.lastUsedAt
@@ -173,6 +176,7 @@ export class TabManager {
     if (patch && typeof patch === 'object') {
       if ('projectUrl' in patch) tab.projectUrl = patch.projectUrl || null;
       if ('modeIntent' in patch) tab.modeIntent = patch.modeIntent || null;
+      if ('modelIntent' in patch) tab.modelIntent = patch.modelIntent || null;
     }
     this.onChanged?.();
   }

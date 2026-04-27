@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { normalizeChatGptModeIntent } from './chatgpt-mode-intent.mjs';
+import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -48,6 +48,17 @@ const CHATGPT_MODE_INTENT_META = {
   }
 };
 const CHATGPT_ANY_MODE_PATTERN = Object.values(CHATGPT_MODE_INTENT_META).map((item) => item.pattern).join('|');
+const CHATGPT_MODEL_INTENT_META = {
+  'gpt-5.5-pro': {
+    label: 'GPT-5.5 Pro',
+    pattern: '\\bgpt\\s*[- ]?5\\.5\\b|\\b5\\.5\\s*(?:pro)?\\b'
+  },
+  'gpt-5.4-pro': {
+    label: 'GPT-5.4 Pro',
+    pattern: '\\bgpt\\s*[- ]?5\\.4\\b|\\b5\\.4\\s*(?:pro)?\\b|\\blegacy\\s+pro\\b'
+  }
+};
+const CHATGPT_ANY_MODEL_PATTERN = Object.values(CHATGPT_MODEL_INTENT_META).map((item) => item.pattern).join('|');
 
 function extractConversationUrl(value) {
   const text = String(value || '').trim();
@@ -100,6 +111,33 @@ function buildModeIntentProvenance({ activation, modeIntent, stage = 'before_sen
   };
 }
 
+function modelIntentClickAttempt(snap = {}) {
+  return {
+    action: String(snap?.action || 'none'),
+    reason: clipText(snap?.reason || '', 160) || null,
+    label: clipText(snap?.label || '', 160) || null,
+    activeIntent: snap?.activeIntent ? String(snap.activeIntent) : null,
+    menuOpen: typeof snap?.menuOpen === 'boolean' ? snap.menuOpen : null,
+    at: new Date().toISOString()
+  };
+}
+
+function buildModelIntentProvenance({ activation, modelIntent, stage = 'before_prompt' } = {}) {
+  if (!activation?.targetIntent && !modelIntent) return null;
+  return {
+    requestedIntent: normalizeChatGptModelIntent(modelIntent || activation?.targetIntent, { fallback: null }),
+    targetIntent: activation?.targetIntent ? String(activation.targetIntent) : null,
+    activeIntent: activation?.activeIntent ? String(activation.activeIntent) : null,
+    confirmed: !!activation?.active,
+    reason: clipText(activation?.reason || '', 160) || null,
+    label: clipText(activation?.label || '', 160) || null,
+    clicked: Array.isArray(activation?.attempts) && activation.attempts.length > 0,
+    attempts: Array.isArray(activation?.attempts) ? activation.attempts.map((item) => ({ ...item })) : [],
+    stage,
+    confirmedAt: new Date().toISOString()
+  };
+}
+
 function modeIntentLabelLooksUsable(label, targetIntent) {
   const text = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const target = normalizeChatGptModeIntent(targetIntent, { fallback: null });
@@ -111,9 +149,24 @@ function modeIntentLabelLooksUsable(label, targetIntent) {
   return false;
 }
 
+function modelIntentLabelLooksUsable(label, targetIntent) {
+  const text = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const target = normalizeChatGptModelIntent(targetIntent, { fallback: null });
+  if (!text || !target || text.length > 180) return false;
+  if (/\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text)) return false;
+  if (target === 'gpt-5.5-pro') return /\bgpt\s*[- ]?5\.5\b|\b5\.5\s*(?:pro)?\b/.test(text);
+  if (target === 'gpt-5.4-pro') return /\bgpt\s*[- ]?5\.4\b|\b5\.4\s*(?:pro)?\b|\blegacy\s+pro\b/.test(text);
+  return false;
+}
+
 function modeIntentActivationLooksTrusted(snap = {}) {
   if (!snap?.active) return true;
   return modeIntentLabelLooksUsable(snap.label, snap.targetIntent);
+}
+
+function modelIntentActivationLooksTrusted(snap = {}) {
+  if (!snap?.active) return true;
+  return modelIntentLabelLooksUsable(snap.label, snap.targetIntent);
 }
 
 function safeClone(value) {
@@ -534,6 +587,386 @@ export class ChatGPTController {
     }
 
     return last;
+  }
+
+  async #applyModelIntent({ modelIntent, timeoutMs = 20_000 } = {}) {
+    const normalizedIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
+    if (!normalizedIntent) return { active: true, reason: 'model_intent_not_requested', targetIntent: null };
+
+    const meta = CHATGPT_MODEL_INTENT_META[normalizedIntent];
+    if (!meta) return { active: true, reason: 'model_intent_unsupported', targetIntent: normalizedIntent };
+
+    await this.#focusPrompt({ clickPrompt: false });
+    await this.#emitProgress({ phase: 'activating_model_intent', modelIntent: normalizedIntent });
+
+    const buttonSel = JSON.stringify(this.selectors.chatModeButton || '');
+    const menuSel = JSON.stringify(this.selectors.chatModeMenu || this.selectors.composerMenu || '');
+    const optionSel = JSON.stringify(this.selectors.chatModeOption || '');
+    const activeSel = JSON.stringify(this.selectors.chatModeActive || '');
+    const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
+    const targetIntentSource = JSON.stringify(normalizedIntent);
+    const targetPatternSource = JSON.stringify(meta.pattern);
+    const anyModelPatternSource = JSON.stringify(CHATGPT_ANY_MODEL_PATTERN);
+    const modelEntriesSource = JSON.stringify(
+      Object.entries(CHATGPT_MODEL_INTENT_META).map(([intent, item]) => ({ intent, pattern: item.pattern }))
+    );
+    const start = Date.now();
+    let last = null;
+    let lastClickAt = 0;
+    const blockedTriggerSignatures = new Set();
+    let pendingTriggerSignature = null;
+    const attempts = [];
+
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      const snap = await this.#eval(`(() => {
+        const targetIntent = ${targetIntentSource};
+        const targetRe = new RegExp(${targetPatternSource}, 'i');
+        const anyModelRe = new RegExp(${anyModelPatternSource}, 'i');
+        const modelEntries = ${modelEntriesSource}.map((item) => ({ ...item, re: new RegExp(item.pattern, 'i') }));
+        const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
+        const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
+        ${HOST_DOM_COLLECTION_HELPERS_JS}
+        const labelOf = (n) =>
+          [
+            n?.getAttribute?.('aria-label') || '',
+            n?.getAttribute?.('title') || '',
+            n?.getAttribute?.('data-testid') || '',
+            n?.textContent || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const intentForLabel = (label) => {
+          const text = String(label || '').trim().toLowerCase();
+          if (!text) return null;
+          if (text.length > 180) return null;
+          if (/\\bfeedback\\b|click to remove|remove attached|remove file|\\battachment\\b|\\buploaded\\b/.test(text)) return null;
+          for (const item of modelEntries) {
+            if (item.re.test(text)) return item.intent;
+          }
+          return null;
+        };
+        const isActive = (n) => {
+          const ariaPressed = String(n?.getAttribute?.('aria-pressed') || '').trim().toLowerCase();
+          const ariaChecked = String(n?.getAttribute?.('aria-checked') || '').trim().toLowerCase();
+          const ariaSelected = String(n?.getAttribute?.('aria-selected') || '').trim().toLowerCase();
+          const ariaCurrent = String(n?.getAttribute?.('aria-current') || '').trim().toLowerCase();
+          const dataState = String(n?.getAttribute?.('data-state') || '').trim().toLowerCase();
+          const classes = String(n?.className || '').trim().toLowerCase();
+          return (
+            ariaPressed === 'true' ||
+            ariaChecked === 'true' ||
+            ariaSelected === 'true' ||
+            (ariaCurrent && ariaCurrent !== 'false') ||
+            dataState === 'active' ||
+            dataState === 'on' ||
+            /\\bactive\\b|\\bselected\\b|\\bcurrent\\b/.test(classes)
+          );
+        };
+        const rectOf = (n) => {
+          const r = n.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        };
+        const signatureOf = (rect, label) =>
+          [
+            Math.round(rect?.x || 0),
+            Math.round(rect?.y || 0),
+            Math.round(rect?.w || 0),
+            Math.round(rect?.h || 0),
+            String(label || '')
+          ].join(':');
+        const menuRoots = uniq([
+          ...queryAll(${menuSel}),
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [role="dialog"], [role="alertdialog"]'))
+        ]).filter(visible);
+        const insideMenu = (node) => menuRoots.some((root) => root === node || root.contains(node));
+        const promptCandidates = uniq([
+          ...queryAll(${promptSel}),
+          ...Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]'))
+        ]).filter(visible);
+        const editable = (n) => {
+          if (!n) return false;
+          if (!visible(n)) return false;
+          if (n.matches('textarea')) return !n.disabled && !n.readOnly;
+          if (n.matches('input')) return !n.disabled && !n.readOnly && !/password|search|email|url|number|tel/i.test(String(n.type || 'text'));
+          return !!n.isContentEditable || n.getAttribute('contenteditable') === 'true' || n.getAttribute('role') === 'textbox';
+        };
+        const scorePrompt = (n) => {
+          const r = n.getBoundingClientRect();
+          const label = [
+            n.getAttribute('aria-label') || '',
+            n.getAttribute('placeholder') || '',
+            n.getAttribute('name') || '',
+            n.getAttribute('id') || '',
+            n.getAttribute('data-testid') || ''
+          ].join(' ').toLowerCase();
+          let s = 0;
+          if (/prompt|message|ask|chat|query|input/.test(label)) s += 80;
+          if (n.matches('textarea')) s += 50;
+          if (n.isContentEditable || n.getAttribute('contenteditable') === 'true') s += 35;
+          if (n.getAttribute('role') === 'textbox') s += 25;
+          if (r.width >= 260 && r.height >= 26) s += 20;
+          s += Math.min(180, Math.max(0, (r.width * r.height) / 2500));
+          s += Math.max(0, r.y / 8);
+          return s;
+        };
+        let prompt = null;
+        let bestPromptScore = -Infinity;
+        for (const n of promptCandidates) {
+          if (!editable(n)) continue;
+          const s = scorePrompt(n);
+          if (s > bestPromptScore) {
+            bestPromptScore = s;
+            prompt = n;
+          }
+        }
+        const composerRoot =
+          prompt?.closest('form') ||
+          prompt?.closest('[data-testid*="composer" i], [data-testid*="prompt" i], [data-testid*="chat-input" i], [aria-label*="message" i], [aria-label*="prompt" i]') ||
+          prompt?.closest('main') ||
+          document.body;
+        const promptRect = prompt ? rectOf(prompt) : null;
+        const composerRootIsBroad =
+          !composerRoot ||
+          composerRoot === document.body ||
+          String(composerRoot.tagName || '').toLowerCase() === 'main';
+        const isNearPrompt = (rect) => {
+          if (!promptRect || !rect) return false;
+          const cx = rect.x + rect.w / 2;
+          const cy = rect.y + rect.h / 2;
+          const pcx = promptRect.x + promptRect.w / 2;
+          const pcy = promptRect.y + promptRect.h / 2;
+          return Math.abs(cx - pcx) <= 640 && Math.abs(cy - pcy) <= 280;
+        };
+        const isHighConfidenceModelControl = (node, label) => {
+          const dataTestId = String(node?.getAttribute?.('data-testid') || '').toLowerCase();
+          const aria = String(node?.getAttribute?.('aria-label') || '').toLowerCase();
+          const title = String(node?.getAttribute?.('title') || '').toLowerCase();
+          const text = [label, dataTestId, aria, title].join(' ');
+          const isButtonLike = node?.matches?.('button, [role="button"], [role="tab"], [aria-haspopup], summary');
+          return (
+            /model-switcher|model selector|model-selector|model_picker|model-picker|model switch|switch model|choose model|current model/.test(text) ||
+            (isButtonLike && /\\bgpt\\s*[- ]?5\\.[45]\\b/.test(text))
+          );
+        };
+        const isProjectOptionsControl = (node, label) => {
+          const dataTestId = String(node?.getAttribute?.('data-testid') || '').toLowerCase();
+          const aria = String(node?.getAttribute?.('aria-label') || '').toLowerCase();
+          const title = String(node?.getAttribute?.('title') || '').toLowerCase();
+          const text = [label, dataTestId, aria, title].join(' ');
+          const isButtonLike = node?.matches?.('button, [role="button"], [aria-haspopup], summary');
+          return !!isButtonLike && /\\bopen\\s+project\\s+options\\b|\\bproject\\s+options\\b/.test(text);
+        };
+        const inModelControlRegion = (node, label, rect = null) => {
+          const r = rect || rectOf(node);
+          return (
+            isHighConfidenceModelControl(node, label) ||
+            isProjectOptionsControl(node, label) ||
+            (!composerRootIsBroad && composerRoot.contains(node)) ||
+            isNearPrompt(r)
+          );
+        };
+        const explicitActiveNodes = uniq([
+          ...queryAll(${activeSel}),
+          ...Array.from(document.querySelectorAll('[aria-pressed="true"], [aria-checked="true"], [aria-selected="true"], [aria-current]:not([aria-current="false"]), [data-state="active"], [data-state="on"]'))
+        ]).filter(visible);
+        const triggerPool = uniq([
+          ...queryAll(${buttonSel}),
+          ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]')),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]'))
+        ]).filter((n) => visible(n) && !insideMenu(n));
+        const activeModel = uniq([...explicitActiveNodes, ...triggerPool])
+          .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)), rect: rectOf(n), active: isActive(n) }))
+          .find((item) =>
+            item.intent === targetIntent &&
+            inModelControlRegion(item.node, item.label, item.rect) &&
+            (item.active || isHighConfidenceModelControl(item.node, item.label))
+          ) || null;
+        if (activeModel) {
+          return {
+            active: true,
+            action: 'none',
+            reason: 'model_already_active',
+            targetIntent,
+            activeIntent: activeModel.intent,
+            label: activeModel.label || null
+          };
+        }
+        const optionPool = uniq([
+          ...queryAll(${optionSel}),
+          ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state], label, li, div, span'))),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state]'))
+        ]).filter((n) => visible(n) && !menuRoots.includes(n));
+        const menuText = menuRoots
+          .map((root) => String(root?.innerText || '').replace(/\\s+/g, ' ').trim())
+          .filter(Boolean)
+          .join(' | ')
+          .slice(0, 240);
+        const optionHints = optionPool
+          .map((n) => labelOf(n))
+          .filter(Boolean)
+          .filter((label, index, arr) => arr.indexOf(label) === index)
+          .slice(0, 12);
+
+        const triggerCandidates = triggerPool
+          .map((node) => {
+            const label = labelOf(node);
+            const intent = intentForLabel(label);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const highConfidence = isHighConfidenceModelControl(node, label);
+            const projectOptions = isProjectOptionsControl(node, label);
+            const modelRegion = inModelControlRegion(node, label, rect);
+            let score = -1;
+            if (intent === targetIntent && highConfidence) {
+              score = 220;
+            } else if (highConfidence) {
+              score = 180;
+            } else if (intent === targetIntent && modelRegion) {
+              score = 170;
+            } else if (anyModelRe.test(label) && modelRegion) {
+              score = targetRe.test(label) ? 165 : 120;
+            } else if (/\\bmodel\\b|\\bgpt\\b|\\b5\\.[45]\\b/.test(label) && modelRegion) {
+              score = 115;
+            } else if (projectOptions && !menuRoots.length) {
+              score = 90;
+            }
+            if (score >= 0 && String(node?.getAttribute?.('data-testid') || '').trim()) score += 10;
+            if (score >= 0 && composerRoot && composerRoot.contains(node)) score += 25;
+            if (score >= 0 && area > 40_000) score -= 80;
+            else if (score >= 0 && area > 18_000) score -= 35;
+            if (score >= 0 && rect.w > 320) score -= 30;
+            if (score >= 0 && rect.h > 90) score -= 25;
+            if (score >= 0 && !modelRegion && !highConfidence && !projectOptions) score = -1;
+            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modelRegion, highConfidence, projectOptions };
+          })
+          .filter((item) => !blockedTriggerSignatures.has(item.signature))
+          .filter((item) => item.score >= 0)
+          .sort((a, b) => b.score - a.score);
+        const activeTrigger = triggerCandidates.find((item) => item.intent === targetIntent && (item.active || item.highConfidence)) || null;
+        if (activeTrigger) {
+          return {
+            active: true,
+            action: 'none',
+            reason: clickedRecently ? 'model_latched_after_click' : 'model_already_active',
+            targetIntent,
+            activeIntent: activeTrigger.intent,
+            label: activeTrigger.label || null
+          };
+        }
+
+        const optionCandidates = optionPool
+          .map((node) => {
+            const label = labelOf(node);
+            const intent = intentForLabel(label);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
+            let score = -1;
+            if (intent === targetIntent) score = 260;
+            if (score >= 0 && optionInsideMenu) score += 20;
+            if (score >= 0 && String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true') score += 10;
+            if (score >= 0 && isActive(node)) score -= 5;
+            if (score >= 0 && area > 100_000) score -= 120;
+            else if (score >= 0 && area > 30_000) score -= 30;
+            if (score >= 0 && rect.h > 140) score -= 80;
+            if (score >= 0 && rect.w > 720) score -= 60;
+            if (score >= 0 && label.length > 180) score -= 120;
+            return { node, label, intent, score, rect, optionInsideMenu };
+          })
+          .filter((item) => item.score >= 0 && item.optionInsideMenu)
+          .sort((a, b) => b.score - a.score);
+        const targetOption = optionCandidates[0] || null;
+        if (targetOption && menuRoots.length) {
+          return {
+            active: false,
+            action: 'pointer_option',
+            reason: 'clicked_model_option',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: targetOption.label || null,
+            rect: targetOption.rect,
+            menuOpen: true,
+            menuText,
+            optionHints
+          };
+        }
+
+        const trigger = triggerCandidates[0] || null;
+        if (trigger) {
+          return {
+            active: false,
+            action: 'pointer_trigger',
+            reason: 'clicked_model_trigger',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: trigger.label || null,
+            rect: trigger.rect,
+            signature: trigger.signature,
+            menuOpen: menuRoots.length > 0,
+            menuText,
+            optionHints
+          };
+        }
+
+        const composerHints = triggerPool
+          .map((n) => labelOf(n))
+          .filter(Boolean)
+          .filter((label, index, arr) => arr.indexOf(label) === index)
+          .slice(0, 12);
+        return {
+          active: false,
+          action: 'none',
+          reason: 'model_controls_not_found',
+          targetIntent,
+          activeIntent: activeTrigger?.intent || null,
+          menuOpen: menuRoots.length > 0,
+          menuText,
+          optionHints,
+          composerHints
+        };
+      })()`);
+      last = snap;
+      if (pendingTriggerSignature && snap?.action === 'pointer_trigger' && !snap?.menuOpen && snap?.signature === pendingTriggerSignature) {
+        blockedTriggerSignatures.add(pendingTriggerSignature);
+        pendingTriggerSignature = null;
+        await sleep(200);
+        continue;
+      }
+      if (pendingTriggerSignature && (snap?.menuOpen || snap?.signature !== pendingTriggerSignature || snap?.action !== 'pointer_trigger')) {
+        pendingTriggerSignature = null;
+      }
+      if (snap?.active) {
+        const activation = { ...snap, clicked: attempts.length > 0, attempts: attempts.map((item) => ({ ...item })) };
+        if (modelIntentActivationLooksTrusted(activation)) return activation;
+        last = {
+          ...activation,
+          active: false,
+          reason: 'model_activation_untrusted',
+          untrustedReason: activation.reason || null
+        };
+        await sleep(250);
+        continue;
+      }
+      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        attempts.push(modelIntentClickAttempt(snap));
+        const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
+        const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
+        await this.#clickAt(cx, cy);
+        if (snap.action === 'pointer_trigger' && snap.signature) pendingTriggerSignature = snap.signature;
+        lastClickAt = Date.now();
+        await sleep(450);
+        continue;
+      }
+      await sleep(250);
+    }
+
+    const err = new Error('model_intent_activation_failed');
+    err.data = {
+      reason: clipText(last?.reason || 'model_activation_timeout', 160) || 'model_activation_timeout',
+      targetIntent: normalizedIntent,
+      attempts: attempts.map((item) => ({ ...item })),
+      state: last || null
+    };
+    throw err;
   }
 
   async #applyModeIntent({ modeIntent, timeoutMs = 20_000 } = {}) {
@@ -2347,7 +2780,8 @@ export class ChatGPTController {
     timeoutMs = 10 * 60_000,
     onProgress = null,
     imageGeneration = false,
-    modeIntent = null
+    modeIntent = null,
+    modelIntent = null
   } = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
@@ -2355,9 +2789,26 @@ export class ChatGPTController {
     this.currentRun = run;
     try {
       await this.ensureReady({ timeoutMs });
+      const modeIntentActivation = await this.#applyModeIntent({ modeIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
+      const modeIntentProvenance = buildModeIntentProvenance({ activation: modeIntentActivation, modeIntent, stage: 'before_send' });
+      if (modeIntentProvenance) {
+        await this.#emitProgress({
+          phase: 'mode_intent_confirmed',
+          modeIntent: modeIntentProvenance.requestedIntent,
+          modeIntentProvenance
+        });
+      }
+      const modelIntentActivation = await this.#applyModelIntent({ modelIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
+      const modelIntentProvenance = buildModelIntentProvenance({ activation: modelIntentActivation, modelIntent, stage: 'before_prompt' });
+      if (modelIntentProvenance) {
+        await this.#emitProgress({
+          phase: 'model_intent_confirmed',
+          modelIntent: modelIntentProvenance.requestedIntent,
+          modelIntentProvenance
+        });
+      }
       await this.#attachFiles(attachments);
       await this.#typePrompt(prompt);
-      const modeIntentActivation = await this.#applyModeIntent({ modeIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
       // Snapshot existing assistant messages before sending, so #waitForAssistantStable
       // can distinguish pre-existing responses from the new one.
       const assistantSel = JSON.stringify(this.selectors.assistantMessage);
@@ -2367,14 +2818,6 @@ export class ChatGPTController {
         const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
       })()`);
-      const modeIntentProvenance = buildModeIntentProvenance({ activation: modeIntentActivation, modeIntent, stage: 'before_send' });
-      if (modeIntentProvenance) {
-        await this.#emitProgress({
-          phase: 'mode_intent_confirmed',
-          modeIntent: modeIntentProvenance.requestedIntent,
-          modeIntentProvenance
-        });
-      }
       await this.#clickSend();
       return await this.#waitForAssistantStable({
         timeoutMs,

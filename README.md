@@ -104,6 +104,8 @@ npm run start
 - set `Browser backend` to `Chrome CDP`
 - keep `Chrome profile mode` as `Agentify isolated profile`
 - optionally set `Default ChatGPT project URL` for normal chats
+- optionally set `Default ChatGPT model intent` if normal chats should pin a specific Pro generation
+- optionally set `GPT-5.5 Pro project URL` and `GPT-5.4 Pro project URL` if you maintain separate projects for generation-specific Pro lanes
 - set `Default image project URL` if image requests should always land on a separate Instant/Thinking project
 - keep `Default image key` on its own tab namespace so image-mode UI state never bleeds into normal chat tabs
 - click `Save`
@@ -205,7 +207,7 @@ That proves the artifact loop:
 - save locally without manual browser downloads
 - reuse the saved file path in the next MCP prompt
 
-If your normal ChatGPT workflow uses a Pro-only project, keep image generation on a separate key or project. `agentify_query`, `agentify_image_gen`, and `agentify_tab_create` also accept a ChatGPT `modeIntent` (`extended-pro`, `thinking`, or `instant`) as a first-class routing hint. The Control Center now has separate defaults for normal ChatGPT mode intent and image mode intent, and image-generation calls still honor the dedicated image key/project path without overwriting normal keyed chat routing.
+If your normal ChatGPT workflow uses a Pro-only project, keep image generation on a separate key or project. `agentify_query`, `agentify_image_gen`, and `agentify_tab_create` accept a ChatGPT `modeIntent` (`extended-pro`, `thinking`, or `instant`) as a first-class routing hint. `agentify_query` and `agentify_tab_create` also accept `modelIntent` (`gpt-5.5-pro` or `gpt-5.4-pro`) to pin the ChatGPT UI model generation without overloading the vendor `model` hint. Normal ChatGPT keys prefer their explicit/saved/default Agentify project URL; a generation-specific project URL is only a fallback when no normal project route exists. If Agentify cannot confirm the requested generation through a project fallback or visible UI model picker, it fails closed before sending. The Control Center has separate defaults for normal ChatGPT mode/model intent, generation-specific Pro project URL fallbacks, and image mode intent, and image-generation calls still honor the dedicated image key/project path without overwriting normal keyed chat routing.
 
 ### First codebase stuffing workflow
 Use this when you want to hand a repo or folder tree to the model without manually copy/pasting files.

@@ -239,7 +239,25 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-sync-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async ({ onProgress }) => {
+    query: async ({ onProgress, modeIntent, modelIntent }) => {
+      assert.equal(modeIntent, 'extended-pro');
+      assert.equal(modelIntent, 'gpt-5.4-pro');
+      await onProgress?.({
+        phase: 'model_intent_confirmed',
+        modelIntent: 'gpt-5.4-pro',
+        modelIntentProvenance: {
+          requestedIntent: 'gpt-5.4-pro',
+          targetIntent: 'gpt-5.4-pro',
+          activeIntent: 'gpt-5.4-pro',
+          confirmed: true,
+          reason: 'model_already_active',
+          label: 'GPT-5.4 Pro',
+          clicked: false,
+          attempts: [],
+          stage: 'before_prompt',
+          confirmedAt: '2026-04-26T12:00:00.000Z'
+        }
+      });
       await onProgress?.({
         phase: 'mode_intent_confirmed',
         modeIntent: 'extended-pro',
@@ -285,7 +303,7 @@ test('http-api: query returns runId and persists durable run state', async (t) =
     token: 'secret',
     method: 'POST',
     pth: '/query',
-    body: { prompt: 'make this durable', source: 'mcp' }
+    body: { prompt: 'make this durable', source: 'mcp', modelIntent: 'legacy pro' }
   });
   assert.equal(response.res.status, 200);
   assert.equal(typeof response.data.runId, 'string');
@@ -297,12 +315,16 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(persisted.status, 'success');
   assert.equal(persisted.source, 'mcp');
   assert.equal(persisted.logicalRequest?.prompt, 'make this durable');
+  assert.equal(persisted.logicalRequest?.modelIntent, 'gpt-5.4-pro');
   assert.equal(persisted.materializedReplay?.prompt, 'make this durable');
   assert.equal(persisted.conversationUrl, 'https://chatgpt.com/c/durable-run');
   assert.equal(persisted.promptPreview, 'make this durable');
   assert.equal(persisted.modeIntent, 'extended-pro');
+  assert.equal(persisted.modelIntent, 'gpt-5.4-pro');
   assert.equal(persisted.modeIntentProvenance?.confirmed, true);
   assert.equal(persisted.modeIntentProvenance?.stage, 'before_send');
+  assert.equal(persisted.modelIntentProvenance?.confirmed, true);
+  assert.equal(persisted.modelIntentProvenance?.stage, 'before_prompt');
   assert.equal(typeof persisted.finishedAt, 'number');
 });
 
@@ -360,6 +382,64 @@ test('http-api: fire-and-forget query finalizes durable run on async error', asy
   assert.equal(persisted.label, 'Response timed out');
   assert.equal(persisted.conversationUrl, 'https://chatgpt.com/c/slow-run');
   assert.equal(typeof persisted.finishedAt, 'number');
+});
+
+test('http-api: query routes model intent through configured project URLs before UI selection', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-model-project-'));
+  let controllerArgs = null;
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async (args) => {
+      controllerArgs = args;
+      return { text: 'project routed answer', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/g/g-p-54/c/project-routed',
+    navigate: async () => {},
+    ensureReady: async () => ({ ok: true })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    updateTabMeta: () => {},
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false,
+      defaultGpt54ProProjectUrl: 'https://chatgpt.com/g/g-p-54/project'
+    }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'project route this', source: 'mcp', modelIntent: 'gpt-5.4-pro' }
+  });
+  assert.equal(response.res.status, 200);
+  assert.equal(controllerArgs?.modelIntent, null);
+
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${response.data.runId}.json`), 'utf8'));
+  assert.equal(persisted.projectUrl, 'https://chatgpt.com/g/g-p-54/project');
+  assert.equal(persisted.modelIntent, 'gpt-5.4-pro');
+  assert.equal(persisted.modelIntentProvenance?.confirmed, true);
+  assert.equal(persisted.modelIntentProvenance?.confirmationMethod, 'project-url');
 });
 
 test('http-api: runs list/get/archive expose durable query history', async (t) => {
@@ -1873,13 +1953,15 @@ test('http-api: tabs/create persists ChatGPT mode intent on keyed tabs', async (
     token: 'secret',
     method: 'POST',
     pth: '/tabs/create',
-    body: { key: 'main', modeIntent: 'thinking' }
+    body: { key: 'main', modeIntent: 'thinking', modelIntent: 'gpt 5.5 pro' }
   });
 
   assert.equal(r.res.status, 200);
   assert.equal(ensuredArgs.modeIntent, 'thinking');
+  assert.equal(ensuredArgs.modelIntent, 'gpt-5.5-pro');
   const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'projects.json'), 'utf8'));
   assert.equal(persisted.main.modeIntent, 'thinking');
+  assert.equal(persisted.main.modelIntent, 'gpt-5.5-pro');
 });
 
 test('http-api: show creates missing key tab (and hide does not)', async (t) => {

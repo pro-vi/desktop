@@ -56,6 +56,7 @@ function normalizeRun(input = {}) {
     projectUrl: normalizeString(input.projectUrl),
     conversationUrl: normalizeString(input.conversationUrl),
     modeIntent: normalizeString(input.modeIntent),
+    modelIntent: normalizeString(input.modelIntent),
     promptPreview: normalizeString(input.promptPreview),
     blocked: !!input.blocked,
     blockedKind: normalizeString(input.blockedKind),
@@ -73,6 +74,7 @@ function normalizeRun(input = {}) {
     packedContextSummary: normalizeObject(input.packedContextSummary),
     packedContextBudget: normalizeObject(input.packedContextBudget),
     modeIntentProvenance: normalizeObject(input.modeIntentProvenance),
+    modelIntentProvenance: normalizeObject(input.modelIntentProvenance),
     researchMeta: normalizeObject(input.researchMeta)
   };
 }

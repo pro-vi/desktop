@@ -38,6 +38,7 @@ registerTool(
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
       modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro, thinking, instant. This is separate from the vendor `model` hint.'),
+      modelIntent: z.string().optional().describe('ChatGPT UI model-version intent for this tab/query. Supported intents: gpt-5.5-pro, gpt-5.4-pro. This is separate from the vendor `model` hint.'),
       bundleName: z.string().optional().describe('Named context bundle to merge into this query before sending.'),
       prompt: z.string().describe('Prompt to send to ChatGPT.'),
       promptPrefix: z.string().optional().describe('Optional reusable instruction block prepended before packed context and prompt.'),
@@ -60,6 +61,7 @@ registerTool(
     key,
     projectUrl,
     modeIntent,
+    modelIntent,
     bundleName,
     prompt,
     promptPrefix,
@@ -90,6 +92,7 @@ registerTool(
         key: effectiveKey,
         projectUrl,
         modeIntent,
+        modelIntent,
         bundleName,
         prompt,
         promptPrefix,
@@ -797,16 +800,17 @@ registerTool(
       name: z.string().optional(),
       projectUrl: z.string().optional().describe('ChatGPT Project URL. Routes conversations on this tab into the project.'),
       modeIntent: z.string().optional().describe('ChatGPT mode intent to associate with this tab. Supported intents: extended-pro, thinking, instant.'),
+      modelIntent: z.string().optional().describe('ChatGPT UI model-version intent to associate with this tab. Supported intents: gpt-5.5-pro, gpt-5.4-pro.'),
       show: z.boolean().optional().describe('Show the tab window immediately.')
     }
   },
-  async ({ model, key, name, projectUrl, modeIntent, show }) => {
+  async ({ model, key, name, projectUrl, modeIntent, modelIntent, show }) => {
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/tabs/create',
-      body: { model, key, name, projectUrl, modeIntent, show: typeof show === 'boolean' ? show : undefined }
+      body: { model, key, name, projectUrl, modeIntent, modelIntent, show: typeof show === 'boolean' ? show : undefined }
     });
     return { content: [{ type: 'text', text: data.tabId || '' }], structuredContent: data };
   }

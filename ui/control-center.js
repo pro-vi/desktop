@@ -35,6 +35,10 @@ function fmtPhase(phase) {
   if (key === 'resolving_tab') return 'Starting';
   if (key === 'preparing_context') return 'Packing context';
   if (key === 'waiting_for_ready') return 'Checking page';
+  if (key === 'activating_model_intent') return 'Selecting model';
+  if (key === 'model_intent_confirmed') return 'Model selected';
+  if (key === 'activating_mode_intent') return 'Selecting mode';
+  if (key === 'mode_intent_confirmed') return 'Mode selected';
   if (key === 'uploading_files') return 'Uploading files';
   if (key === 'typing_prompt') return 'Typing prompt';
   if (key === 'sending_prompt') return 'Sending prompt';
@@ -62,6 +66,16 @@ function fmtRunStatus(status) {
   if (key === 'queued') return 'Queued';
   if (key === 'archived') return 'Archived';
   return 'Run';
+}
+
+function fmtIntent(intent) {
+  const key = String(intent || '').trim().toLowerCase();
+  if (key === 'extended-pro') return 'Extended Pro';
+  if (key === 'thinking') return 'Thinking';
+  if (key === 'instant') return 'Instant';
+  if (key === 'gpt-5.5-pro') return 'GPT-5.5 Pro';
+  if (key === 'gpt-5.4-pro') return 'GPT-5.4 Pro';
+  return String(intent || '').trim();
 }
 
 function badgeClassForRunStatus(status) {
@@ -156,6 +170,9 @@ function defaultSettings() {
     allowAuthPopups: true,
     defaultProjectUrl: null,
     defaultChatModeIntent: 'extended-pro',
+    defaultChatModelIntent: null,
+    defaultGpt55ProProjectUrl: null,
+    defaultGpt54ProProjectUrl: null,
     defaultImageProjectUrl: null,
     defaultImageModeIntent: 'thinking',
     defaultImageKey: 'image-default',
@@ -283,11 +300,15 @@ async function refresh() {
       if (active) {
         addBadge(active.stopRequested ? 'Stopping' : 'Running', active.stopRequested ? 'warn' : 'ok');
         if (active.source) addBadge(fmtSource(active.source), 'info');
+        if (active.modelIntent) addBadge(fmtIntent(active.modelIntent), 'info');
+        if (active.modeIntent) addBadge(fmtIntent(active.modeIntent), 'info');
         addBadge(fmtPhase(active.phase), active.blocked ? 'warn' : 'dim');
         if (active.blocked) addBadge(active.blockedTitle || 'Needs attention', 'warn');
         if (active.startedAt) addBadge(`Started ${fmtDuration(Date.now() - active.startedAt)} ago`, 'dim');
       } else {
         addBadge('Idle', 'dim');
+        if (t.modelIntent) addBadge(fmtIntent(t.modelIntent), 'dim');
+        if (t.modeIntent) addBadge(fmtIntent(t.modeIntent), 'dim');
         if (outcome?.status) addBadge(fmtOutcomeStatus(outcome.status), outcome.status === 'success' ? 'ok' : outcome.status === 'stopped' ? 'info' : 'warn');
         if (outcome?.source) addBadge(fmtSource(outcome.source), 'dim');
       }
@@ -428,6 +449,8 @@ async function refresh() {
       };
       addBadge(fmtRunStatus(run.status), badgeClassForRunStatus(run.status));
       if (run.source) addBadge(fmtSource(run.source), 'info');
+      if (run.modelIntent) addBadge(fmtIntent(run.modelIntent), 'info');
+      if (run.modeIntent) addBadge(fmtIntent(run.modeIntent), 'info');
       if (run.phase && !run.finishedAt) addBadge(fmtPhase(run.phase), run.blocked ? 'warn' : 'dim');
       if (run.retryOf) addBadge('Retry', 'info');
       if (run.archivedAt) addBadge('Archived', 'dim');
@@ -586,6 +609,9 @@ async function refresh() {
     setChecked('setAllowAuthPopups', settings.allowAuthPopups !== false);
     el('setDefaultProjectUrl').value = settings.defaultProjectUrl || '';
     el('setDefaultChatModeIntent').value = settings.defaultChatModeIntent || 'extended-pro';
+    el('setDefaultChatModelIntent').value = settings.defaultChatModelIntent || '';
+    el('setDefaultGpt55ProProjectUrl').value = settings.defaultGpt55ProProjectUrl || '';
+    el('setDefaultGpt54ProProjectUrl').value = settings.defaultGpt54ProProjectUrl || '';
     el('setDefaultImageProjectUrl').value = settings.defaultImageProjectUrl || '';
     el('setDefaultImageModeIntent').value = settings.defaultImageModeIntent || 'thinking';
     el('setDefaultImageKey').value = settings.defaultImageKey || 'image-default';
@@ -728,6 +754,9 @@ async function main() {
           allowAuthPopups: !!el('setAllowAuthPopups').checked,
           defaultProjectUrl: String(el('setDefaultProjectUrl').value || '').trim() || null,
           defaultChatModeIntent: String(el('setDefaultChatModeIntent').value || 'extended-pro').trim() || 'extended-pro',
+          defaultChatModelIntent: String(el('setDefaultChatModelIntent').value || '').trim() || null,
+          defaultGpt55ProProjectUrl: String(el('setDefaultGpt55ProProjectUrl').value || '').trim() || null,
+          defaultGpt54ProProjectUrl: String(el('setDefaultGpt54ProProjectUrl').value || '').trim() || null,
           defaultImageProjectUrl: String(el('setDefaultImageProjectUrl').value || '').trim() || null,
           defaultImageModeIntent: String(el('setDefaultImageModeIntent').value || 'thinking').trim() || 'thinking',
           defaultImageKey: String(el('setDefaultImageKey').value || '').trim() || 'image-default',

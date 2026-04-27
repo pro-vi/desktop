@@ -1,4 +1,5 @@
 export const CHATGPT_MODE_INTENTS = ['extended-pro', 'thinking', 'instant'];
+export const CHATGPT_MODEL_INTENTS = ['gpt-5.5-pro', 'gpt-5.4-pro'];
 export const DEFAULT_CHAT_MODE_INTENT = 'extended-pro';
 export const DEFAULT_IMAGE_MODE_INTENT = 'thinking';
 export const DEFAULT_IMAGE_KEY = 'image-default';
@@ -16,17 +17,33 @@ export function normalizeChatGptModeIntent(value, { fallback = DEFAULT_CHAT_MODE
   return fallback == null ? null : normalizeChatGptModeIntent(fallback, { fallback: null });
 }
 
+export function normalizeChatGptModelIntent(value, { fallback = null } = {}) {
+  const raw = String(value || '').trim().toLowerCase();
+  const normalized = raw.replace(/[^a-z0-9]+/g, '');
+  if (['gpt55pro', 'gpt55', '55pro', '55', 'gpt5dot5pro', 'gpt5dot5'].includes(normalized)) return 'gpt-5.5-pro';
+  if (['gpt54pro', 'gpt54', '54pro', '54', 'gpt5dot4pro', 'gpt5dot4', 'legacypro', 'legacy'].includes(normalized)) return 'gpt-5.4-pro';
+  return fallback == null ? null : normalizeChatGptModelIntent(fallback, { fallback: null });
+}
+
+function configuredProjectUrlForModelIntent(modelIntent, settings = {}) {
+  const normalized = normalizeChatGptModelIntent(modelIntent, { fallback: null });
+  if (normalized === 'gpt-5.5-pro') return trimOrNull(settings.defaultGpt55ProProjectUrl);
+  if (normalized === 'gpt-5.4-pro') return trimOrNull(settings.defaultGpt54ProProjectUrl);
+  return null;
+}
+
 export function normalizePersistedChatGptKeyMeta(input) {
   if (typeof input === 'string') {
-    return { projectUrl: trimOrNull(input), conversationUrl: null, modeIntent: null };
+    return { projectUrl: trimOrNull(input), conversationUrl: null, modeIntent: null, modelIntent: null };
   }
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return { projectUrl: null, conversationUrl: null, modeIntent: null };
+    return { projectUrl: null, conversationUrl: null, modeIntent: null, modelIntent: null };
   }
   return {
     projectUrl: trimOrNull(input.projectUrl),
     conversationUrl: trimOrNull(input.conversationUrl),
-    modeIntent: normalizeChatGptModeIntent(input.modeIntent, { fallback: null })
+    modeIntent: normalizeChatGptModeIntent(input.modeIntent, { fallback: null }),
+    modelIntent: normalizeChatGptModelIntent(input.modelIntent, { fallback: null })
   };
 }
 
@@ -35,20 +52,47 @@ export function resolveChatGptChatProfile({
   tabId = null,
   projectUrl = null,
   modeIntent = null,
+  modelIntent = null,
   settings = {},
   savedMeta = null
 } = {}) {
   const normalizedSavedMeta = normalizePersistedChatGptKeyMeta(savedMeta);
+  const normalizedModelIntent = normalizeChatGptModelIntent(modelIntent, {
+    fallback: normalizedSavedMeta.modelIntent || settings.defaultChatModelIntent || null
+  });
+  const configuredModelProjectUrl = configuredProjectUrlForModelIntent(normalizedModelIntent, settings);
+  const explicitProjectUrl = trimOrNull(projectUrl);
+  const defaultProjectUrl = trimOrNull(settings.defaultProjectUrl);
+  let resolvedProjectUrl = null;
+  let projectUrlSource = null;
+  if (explicitProjectUrl) {
+    resolvedProjectUrl = explicitProjectUrl;
+    projectUrlSource = 'request';
+  } else if (normalizedSavedMeta.projectUrl) {
+    resolvedProjectUrl = normalizedSavedMeta.projectUrl;
+    projectUrlSource = 'saved-key';
+  } else if (defaultProjectUrl) {
+    resolvedProjectUrl = defaultProjectUrl;
+    projectUrlSource = 'default';
+  } else if (configuredModelProjectUrl) {
+    resolvedProjectUrl = configuredModelProjectUrl;
+    projectUrlSource = 'model-intent';
+  }
   return {
     profile: 'chat',
     imageGeneration: false,
     requestedKey: trimOrNull(key),
     requestedTabId: trimOrNull(tabId),
-    projectUrl: trimOrNull(projectUrl) || normalizedSavedMeta.projectUrl || trimOrNull(settings.defaultProjectUrl),
+    projectUrl: resolvedProjectUrl,
     conversationUrl: normalizedSavedMeta.conversationUrl,
     modeIntent: normalizeChatGptModeIntent(modeIntent, {
       fallback: normalizedSavedMeta.modeIntent || settings.defaultChatModeIntent || DEFAULT_CHAT_MODE_INTENT
     }),
+    modelIntent: normalizedModelIntent,
+    modelIntentConfirmation:
+      normalizedModelIntent && configuredModelProjectUrl && projectUrlSource === 'model-intent'
+        ? 'project-url'
+        : 'ui',
     persistKeyLocation: true
   };
 }
@@ -58,6 +102,7 @@ export function resolveChatGptImageProfile({
   tabId = null,
   projectUrl = null,
   modeIntent = null,
+  modelIntent = null,
   settings = {}
 } = {}) {
   const requestedTabId = trimOrNull(tabId);
@@ -72,6 +117,8 @@ export function resolveChatGptImageProfile({
     modeIntent: normalizeChatGptModeIntent(modeIntent, {
       fallback: settings.defaultImageModeIntent || DEFAULT_IMAGE_MODE_INTENT
     }),
+    modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
+    modelIntentConfirmation: 'ui',
     persistKeyLocation: false
   };
 }
@@ -82,10 +129,11 @@ export function resolveChatGptQueryProfile({
   tabId = null,
   projectUrl = null,
   modeIntent = null,
+  modelIntent = null,
   settings = {},
   savedMeta = null
 } = {}) {
   return imageGeneration
-    ? resolveChatGptImageProfile({ key, tabId, projectUrl, modeIntent, settings })
-    : resolveChatGptChatProfile({ key, tabId, projectUrl, modeIntent, settings, savedMeta });
+    ? resolveChatGptImageProfile({ key, tabId, projectUrl, modeIntent, modelIntent, settings })
+    : resolveChatGptChatProfile({ key, tabId, projectUrl, modeIntent, modelIntent, settings, savedMeta });
 }
