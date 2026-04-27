@@ -888,6 +888,7 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
   const realNow = Date.now;
   let fakeNow = 2_000_000;
   const progress = [];
+  const pointerEvents = [];
   Date.now = () => {
     fakeNow += 1_000;
     return fakeNow;
@@ -902,7 +903,7 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
       async evaluate(js) {
         if (js.includes('const hasTurnstile')) return readyState();
         if (js.includes('const fileData =')) return { ok: true, count: 1 };
-        if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
+        if (js.includes('upload_menu_item_visible')) return { action: 'upload_menu_item_ready', reason: 'upload_menu_item_visible', label: 'add files' };
         if (js.includes('const dialogBtn = Array.from')) {
           return {
             dismissed: false,
@@ -921,8 +922,12 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
       },
       async sendKey() {},
       async insertText() {},
-      async moveMouse() {},
-      async mouseDown() {},
+      async moveMouse(x, y) {
+        pointerEvents.push(`move:${x},${y}`);
+      },
+      async mouseDown(x, y) {
+        pointerEvents.push(`down:${x},${y}`);
+      },
       async mouseUp() {},
       async setFileInputFiles() {}
     };
@@ -948,8 +953,74 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
       }),
       /attachment_upload_stalled/
     );
+    assert.equal(progress.some((patch) => patch?.attachmentDebug?.stage === 'open_picker' && patch?.attachmentDebug?.source === 'upload_menu_item_ready'), true);
     assert.equal(progress.some((patch) => patch?.attachmentDebug?.stage === 'inject_files'), true);
     assert.equal(progress.some((patch) => patch?.attachmentDebug?.stage === 'wait_upload' && patch?.attachmentDebug?.pendingText === 'Upload 0%'), true);
+    assert.equal(pointerEvents.some((event) => event.startsWith('down:')), false);
+  } finally {
+    Date.now = realNow;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('chatgpt-controller: query does not click direct Add files controls that can open native picker', async () => {
+  const realNow = Date.now;
+  let fakeNow = 5_000_000;
+  Date.now = () => {
+    fakeNow += 5_000;
+    return fakeNow;
+  };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-attach-direct-add-'));
+  const attachment = path.join(dir, 'PROGRESS.md');
+  await fs.writeFile(attachment, '# progress\n', 'utf8');
+  let clicked = false;
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('const fileData =')) return { ok: false, error: 'no_file_input' };
+        if (js.includes('upload_menu_item_visible')) {
+          return {
+            action: 'none',
+            reason: 'upload_file_input_not_available',
+            label: 'add files',
+            menuOpen: false
+          };
+        }
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/existing';
+      },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {
+        clicked = true;
+      },
+      async mouseUp() {},
+      async setFileInputFiles() {
+        throw new Error('missing_file_input');
+      }
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    await assert.rejects(
+      controller.query({ prompt: 'agentify', attachments: [attachment], timeoutMs: 20_000 }),
+      /missing_file_input/
+    );
+    assert.equal(clicked, false);
   } finally {
     Date.now = realNow;
     await fs.rm(dir, { recursive: true, force: true });
@@ -965,7 +1036,7 @@ test('chatgpt-controller: query fails when attachment dialog blocks upload', asy
     async evaluate(js) {
       if (js.includes('const hasTurnstile')) return readyState();
       if (js.includes('const fileData =')) return { ok: true, count: 1 };
-      if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
+      if (js.includes('upload_menu_item_visible')) return { action: 'upload_menu_item_ready', reason: 'upload_menu_item_visible', label: 'add files' };
       if (js.includes("const closeBtn = document.querySelector")) return true;
         if (js.includes('const dialogBtn = Array.from')) {
           return {
@@ -1025,7 +1096,7 @@ test('chatgpt-controller: query does not treat generic attachment chrome as a su
       async evaluate(js) {
         if (js.includes('const hasTurnstile')) return readyState();
         if (js.includes('const fileData =')) return { ok: true, count: 1 };
-        if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
+        if (js.includes('upload_menu_item_visible')) return { action: 'upload_menu_item_ready', reason: 'upload_menu_item_visible', label: 'add files' };
         if (js.includes('const dialogBtn = Array.from')) {
           return {
             dismissed: false,
@@ -1089,7 +1160,7 @@ test('chatgpt-controller: query proceeds when uploaded chip is present without v
       async navigate() {},
       async evaluate(js) {
         if (js.includes('const hasTurnstile')) return readyState();
-        if (js.includes('clicked_upload_menu_item')) return { action: 'click_item', reason: 'clicked_upload_menu_item', label: 'add files' };
+        if (js.includes('upload_menu_item_visible')) return { action: 'upload_menu_item_ready', reason: 'upload_menu_item_visible', label: 'add files' };
         if (js.includes('const fileData =')) return { ok: true, count: 1 };
         if (js.includes('const dialogBtn = Array.from')) {
           return {

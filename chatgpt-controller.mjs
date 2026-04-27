@@ -364,6 +364,20 @@ export class ChatGPTController {
           prompt?.closest('[data-testid*="composer" i], [data-testid*="prompt" i], [data-testid*="chat-input" i], [aria-label*="message" i], [aria-label*="prompt" i]') ||
           prompt?.closest('main') ||
           document.body;
+        if (intent === 'upload_files') {
+          const localInputs = Array.from((composerRoot || document).querySelectorAll('input[type="file"]'));
+          const globalInputs = Array.from(document.querySelectorAll('input[type="file"]'));
+          const inputs = localInputs.length ? localInputs : globalInputs;
+          if (inputs.length) {
+            return {
+              action: 'file_input_ready',
+              reason: 'file_input_available',
+              inputSource: localInputs.length ? 'composer' : 'global',
+              inputCount: inputs.length,
+              menuOpen: false
+            };
+          }
+        }
         const menuRoots = uniq([
           ...queryAll(${menuSel}),
           ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]'))
@@ -402,6 +416,14 @@ export class ChatGPTController {
             menuOpen: menuRoots.length > 0
           };
         }
+        if (rankedItem && intent === 'upload_files' && menuRoots.length > 0) {
+          return {
+            action: 'upload_menu_item_ready',
+            reason: 'upload_menu_item_visible',
+            label: rankedItem.label || null,
+            menuOpen: true
+          };
+        }
         if (rankedItem && (menuRoots.length > 0 || intent === 'deep_research')) {
           const r = rankedItem.node.getBoundingClientRect();
           return {
@@ -430,7 +452,7 @@ export class ChatGPTController {
               else if (n.id === 'composer-plus-btn') score = 135;
               else if (String(n.getAttribute('data-testid') || '').trim().toLowerCase() === 'composer-plus-btn') score = 135;
               else if (/add files and more|files and more/.test(label)) score = 130;
-              else if (/add files|add photos/.test(label) && !/deep research|create image/.test(label)) score = 110;
+              else if (intent !== 'upload_files' && /add files|add photos/.test(label) && !/deep research|create image/.test(label)) score = 110;
             }
             return { node: n, label, score };
           })
@@ -453,13 +475,11 @@ export class ChatGPTController {
             .filter((item) => visible(item.node) && item.score >= 0)
             .sort((a, b) => b.score - a.score)[0] || null;
           if (legacyAttach) {
-            const r = legacyAttach.node.getBoundingClientRect();
             return {
-              action: 'pointer_legacy_button',
-              reason: 'clicked_attach_trigger',
+              action: 'none',
+              reason: 'upload_file_input_not_available',
               label: legacyAttach.label || null,
-              menuOpen: false,
-              rect: { x: r.x, y: r.y, w: r.width, h: r.height }
+              menuOpen: false
             };
           }
           return { action: 'none', reason: 'upload_controls_not_found', menuOpen: false };
