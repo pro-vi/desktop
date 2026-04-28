@@ -1,6 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
+import {
+  CHATGPT_ANY_MODEL_PATTERN,
+  CHATGPT_MODEL_INTENT_META,
+  CHATGPT_MODEL_PICKER_PRIMITIVES_JS,
+  modelIntentLabelLooksUsable,
+  shouldTrackPendingModelTrigger
+} from './chatgpt-ui-primitives.mjs';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -48,18 +55,6 @@ const CHATGPT_MODE_INTENT_META = {
   }
 };
 const CHATGPT_ANY_MODE_PATTERN = Object.values(CHATGPT_MODE_INTENT_META).map((item) => item.pattern).join('|');
-const CHATGPT_MODEL_INTENT_META = {
-  'gpt-5.5-pro': {
-    label: 'GPT-5.5 Pro',
-    pattern: '\\bgpt\\s*[- ]?5\\.5\\b|\\b5\\.5\\s*(?:pro)?\\b'
-  },
-  'gpt-5.4-pro': {
-    label: 'GPT-5.4 Pro',
-    pattern: '\\bgpt\\s*[- ]?5\\.4\\b|\\b5\\.4\\s*(?:pro)?\\b|\\blegacy\\s+pro\\b'
-  }
-};
-const CHATGPT_ANY_MODEL_PATTERN = Object.values(CHATGPT_MODEL_INTENT_META).map((item) => item.pattern).join('|');
-
 function extractConversationUrl(value) {
   const text = String(value || '').trim();
   if (!text) return null;
@@ -146,16 +141,6 @@ function modeIntentLabelLooksUsable(label, targetIntent) {
   if (target === 'extended-pro') return /\bextended\s*pro\b/.test(text) || /^pro(?:\b|[\s,.:;()_-])/.test(text);
   if (target === 'thinking') return /\bthinking\b|\breasoning\b/.test(text);
   if (target === 'instant') return /\binstant\b|\bfast\b/.test(text);
-  return false;
-}
-
-function modelIntentLabelLooksUsable(label, targetIntent) {
-  const text = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
-  const target = normalizeChatGptModelIntent(targetIntent, { fallback: null });
-  if (!text || !target || text.length > 180) return false;
-  if (/\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text)) return false;
-  if (target === 'gpt-5.5-pro') return /\bgpt\s*[- ]?5\.5\b|\b5\.5\s*(?:pro)?\b/.test(text);
-  if (target === 'gpt-5.4-pro') return /\bgpt\s*[- ]?5\.4\b|\b5\.4\s*(?:pro)?\b|\blegacy\s+pro\b/.test(text);
   return false;
 }
 
@@ -598,6 +583,10 @@ export class ChatGPTController {
 
     await this.#focusPrompt({ clickPrompt: false });
     await this.#emitProgress({ phase: 'activating_model_intent', modelIntent: normalizedIntent });
+    // Project option menus can remain open from previous scans; close them so
+    // the composer model/mode picker can receive the next click.
+    await this.page?.sendKey?.('Escape').catch(() => {});
+    await sleep(100);
 
     const buttonSel = JSON.stringify(this.selectors.chatModeButton || '');
     const menuSel = JSON.stringify(this.selectors.chatModeMenu || this.selectors.composerMenu || '');
@@ -607,9 +596,6 @@ export class ChatGPTController {
     const targetIntentSource = JSON.stringify(normalizedIntent);
     const targetPatternSource = JSON.stringify(meta.pattern);
     const anyModelPatternSource = JSON.stringify(CHATGPT_ANY_MODEL_PATTERN);
-    const modelEntriesSource = JSON.stringify(
-      Object.entries(CHATGPT_MODEL_INTENT_META).map(([intent, item]) => ({ intent, pattern: item.pattern }))
-    );
     const start = Date.now();
     let last = null;
     let lastClickAt = 0;
@@ -623,10 +609,10 @@ export class ChatGPTController {
         const targetIntent = ${targetIntentSource};
         const targetRe = new RegExp(${targetPatternSource}, 'i');
         const anyModelRe = new RegExp(${anyModelPatternSource}, 'i');
-        const modelEntries = ${modelEntriesSource}.map((item) => ({ ...item, re: new RegExp(item.pattern, 'i') }));
         const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
         const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
         ${HOST_DOM_COLLECTION_HELPERS_JS}
+        ${CHATGPT_MODEL_PICKER_PRIMITIVES_JS}
         const labelOf = (n) =>
           [
             n?.getAttribute?.('aria-label') || '',
@@ -634,16 +620,7 @@ export class ChatGPTController {
             n?.getAttribute?.('data-testid') || '',
             n?.textContent || ''
           ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const intentForLabel = (label) => {
-          const text = String(label || '').trim().toLowerCase();
-          if (!text) return null;
-          if (text.length > 180) return null;
-          if (/\\bfeedback\\b|click to remove|remove attached|remove file|\\battachment\\b|\\buploaded\\b/.test(text)) return null;
-          for (const item of modelEntries) {
-            if (item.re.test(text)) return item.intent;
-          }
-          return null;
-        };
+        const intentForLabel = (label) => modelPickerPrimitives.modelIntentForLabel(label);
         const isActive = (n) => {
           const ariaPressed = String(n?.getAttribute?.('aria-pressed') || '').trim().toLowerCase();
           const ariaChecked = String(n?.getAttribute?.('aria-checked') || '').trim().toLowerCase();
@@ -736,25 +713,19 @@ export class ChatGPTController {
           const pcy = promptRect.y + promptRect.h / 2;
           return Math.abs(cx - pcx) <= 640 && Math.abs(cy - pcy) <= 280;
         };
-        const isHighConfidenceModelControl = (node, label) => {
-          const dataTestId = String(node?.getAttribute?.('data-testid') || '').toLowerCase();
-          const aria = String(node?.getAttribute?.('aria-label') || '').toLowerCase();
-          const title = String(node?.getAttribute?.('title') || '').toLowerCase();
-          const text = [label, dataTestId, aria, title].join(' ');
-          const isButtonLike = node?.matches?.('button, [role="button"], [role="tab"], [aria-haspopup], summary');
-          return (
-            /model-switcher|model selector|model-selector|model_picker|model-picker|model switch|switch model|choose model|current model/.test(text) ||
-            (isButtonLike && /\\bgpt\\s*[- ]?5\\.[45]\\b/.test(text))
-          );
-        };
-        const isProjectOptionsControl = (node, label) => {
-          const dataTestId = String(node?.getAttribute?.('data-testid') || '').toLowerCase();
-          const aria = String(node?.getAttribute?.('aria-label') || '').toLowerCase();
-          const title = String(node?.getAttribute?.('title') || '').toLowerCase();
-          const text = [label, dataTestId, aria, title].join(' ');
-          const isButtonLike = node?.matches?.('button, [role="button"], [aria-haspopup], summary');
-          return !!isButtonLike && /\\bopen\\s+project\\s+options\\b|\\bproject\\s+options\\b/.test(text);
-        };
+        const modelControlDescriptor = (node, label) => ({
+          label,
+          dataTestId: String(node?.getAttribute?.('data-testid') || '').toLowerCase(),
+          aria: String(node?.getAttribute?.('aria-label') || '').toLowerCase(),
+          title: String(node?.getAttribute?.('title') || '').toLowerCase(),
+          isButtonLike: !!node?.matches?.('button, [role="button"], [role="tab"], [aria-haspopup], summary')
+        });
+        const isHighConfidenceModelControl = (node, label) =>
+          modelPickerPrimitives.isHighConfidenceModelControlDescriptor(modelControlDescriptor(node, label));
+        const isProjectOptionsControl = (node, label) =>
+          modelPickerPrimitives.isProjectOptionsControlDescriptor(modelControlDescriptor(node, label));
+        const isProjectModelModeControl = (node, label) =>
+          modelPickerPrimitives.isProjectModelModeControlDescriptor(modelControlDescriptor(node, label));
         const inModelControlRegion = (node, label, rect = null) => {
           const r = rect || rectOf(node);
           return (
@@ -814,29 +785,27 @@ export class ChatGPTController {
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const highConfidence = isHighConfidenceModelControl(node, label);
             const projectOptions = isProjectOptionsControl(node, label);
+            const projectModelMode = isProjectModelModeControl(node, label);
             const modelRegion = inModelControlRegion(node, label, rect);
-            let score = -1;
-            if (intent === targetIntent && highConfidence) {
-              score = 220;
-            } else if (highConfidence) {
-              score = 180;
-            } else if (intent === targetIntent && modelRegion) {
-              score = 170;
-            } else if (anyModelRe.test(label) && modelRegion) {
-              score = targetRe.test(label) ? 165 : 120;
-            } else if (/\\bmodel\\b|\\bgpt\\b|\\b5\\.[45]\\b/.test(label) && modelRegion) {
-              score = 115;
-            } else if (projectOptions && !menuRoots.length) {
-              score = 90;
-            }
-            if (score >= 0 && String(node?.getAttribute?.('data-testid') || '').trim()) score += 10;
-            if (score >= 0 && composerRoot && composerRoot.contains(node)) score += 25;
-            if (score >= 0 && area > 40_000) score -= 80;
-            else if (score >= 0 && area > 18_000) score -= 35;
-            if (score >= 0 && rect.w > 320) score -= 30;
-            if (score >= 0 && rect.h > 90) score -= 25;
-            if (score >= 0 && !modelRegion && !highConfidence && !projectOptions) score = -1;
-            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modelRegion, highConfidence, projectOptions };
+            const score = modelPickerPrimitives.scoreModelTriggerCandidate({
+              label,
+              intent,
+              targetIntent,
+              highConfidence,
+              projectOptions,
+              projectModelMode,
+              modelRegion,
+              anyModelMatches: anyModelRe.test(label),
+              targetMatches: targetRe.test(label),
+              modelKeyword: /\\bmodel\\b|\\bgpt\\b|\\b5\\.[45]\\b/.test(label),
+              menuOpen: menuRoots.length > 0,
+              hasDataTestId: !!String(node?.getAttribute?.('data-testid') || '').trim(),
+              inComposer: !!(composerRoot && composerRoot.contains(node)),
+              area,
+              width: rect.w,
+              height: rect.h
+            });
+            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modelRegion, highConfidence, projectOptions, projectModelMode };
           })
           .filter((item) => !blockedTriggerSignatures.has(item.signature))
           .filter((item) => item.score >= 0)
@@ -860,16 +829,17 @@ export class ChatGPTController {
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
-            let score = -1;
-            if (intent === targetIntent) score = 260;
-            if (score >= 0 && optionInsideMenu) score += 20;
-            if (score >= 0 && String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true') score += 10;
-            if (score >= 0 && isActive(node)) score -= 5;
-            if (score >= 0 && area > 100_000) score -= 120;
-            else if (score >= 0 && area > 30_000) score -= 30;
-            if (score >= 0 && rect.h > 140) score -= 80;
-            if (score >= 0 && rect.w > 720) score -= 60;
-            if (score >= 0 && label.length > 180) score -= 120;
+            const score = modelPickerPrimitives.scoreModelOptionCandidate({
+              label,
+              intent,
+              targetIntent,
+              optionInsideMenu,
+              ariaChecked: String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true',
+              active: isActive(node),
+              area,
+              width: rect.w,
+              height: rect.h
+            });
             return { node, label, intent, score, rect, optionInsideMenu };
           })
           .filter((item) => item.score >= 0 && item.optionInsideMenu)
@@ -951,7 +921,7 @@ export class ChatGPTController {
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
         const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
         await this.#clickAt(cx, cy);
-        if (snap.action === 'pointer_trigger' && snap.signature) pendingTriggerSignature = snap.signature;
+        if (shouldTrackPendingModelTrigger(snap)) pendingTriggerSignature = snap.signature;
         lastClickAt = Date.now();
         await sleep(450);
         continue;

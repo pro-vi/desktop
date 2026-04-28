@@ -589,6 +589,139 @@ test('chatgpt-controller: query applies the requested model intent before sendin
   );
 });
 
+test('chatgpt-controller: model intent can open the project Extended Pro picker', async () => {
+  const progress = [];
+  const events = [];
+  let modelChecks = 0;
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('model_controls_not_found') && js.includes('clicked_model_trigger') && js.includes('clicked_model_option')) {
+        assert.match(js, /isProjectModelModeControl/);
+        assert.match(js, /extended.*pro/);
+        modelChecks += 1;
+        if (modelChecks === 1) {
+          return {
+            active: false,
+            action: 'pointer_trigger',
+            reason: 'clicked_model_trigger',
+            targetIntent: 'gpt-5.4-pro',
+            activeIntent: null,
+            label: 'Extended Pro',
+            rect: { x: 780, y: 880, w: 160, h: 34 },
+            signature: '780:880:160:34:Extended Pro',
+            menuOpen: false
+          };
+        }
+        if (modelChecks === 2) {
+          return {
+            active: false,
+            action: 'pointer_option',
+            reason: 'clicked_model_option',
+            targetIntent: 'gpt-5.4-pro',
+            activeIntent: null,
+            label: 'GPT-5.4 Pro legacy',
+            rect: { x: 790, y: 930, w: 220, h: 36 },
+            menuOpen: true
+          };
+        }
+        return {
+          active: true,
+          action: 'none',
+          reason: 'model_latched_after_click',
+          targetIntent: 'gpt-5.4-pro',
+          activeIntent: 'gpt-5.4-pro',
+          label: 'GPT-5.4 Pro'
+        };
+      }
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_already_active',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          label: 'Extended Pro'
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) {
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 0, lastText: '', pageText: '' };
+      }
+      if (js.includes('promptLen')) {
+        return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      }
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Final answer',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'Final answer'
+        };
+      }
+      if (js.includes('const codes = Array.from')) {
+        return { codeBlocks: [] };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/g/g-p-test/c/project-model-thread';
+    },
+    async sendKey(key) {
+      events.push(`key:${key}`);
+    },
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown(x, y) {
+      events.push(x > 700 ? 'mouseDown:model' : 'mouseDown:send');
+    },
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      chatModeButton: '[data-testid="model-switcher-dropdown-button"], [data-testid="mode-trigger"]',
+      chatModeMenu: '[role="menu"]',
+      chatModeOption: '[role="menuitem"]',
+      chatModeActive: '[aria-pressed="true"]'
+    }
+  });
+
+  const result = await controller.query({
+    prompt: 'agentify',
+    timeoutMs: 20_000,
+    modeIntent: 'extended-pro',
+    modelIntent: 'gpt-5.4-pro',
+    onProgress: async (patch) => progress.push(patch)
+  });
+
+  assert.equal(result.text, 'Final answer');
+  assert.equal(modelChecks >= 3, true);
+  assert.equal(events.includes('key:Escape'), true);
+  assert.equal(events.filter((item) => item === 'mouseDown:model').length >= 2, true);
+  const provenancePatch = progress.find((patch) => patch?.phase === 'model_intent_confirmed');
+  assert.equal(provenancePatch?.modelIntent, 'gpt-5.4-pro');
+  assert.equal(provenancePatch?.modelIntentProvenance?.confirmed, true);
+});
+
 test('chatgpt-controller: query does not click mode controls when the requested intent is already active', async () => {
   let modeChecks = 0;
   const pointerEvents = [];
