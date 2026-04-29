@@ -170,9 +170,6 @@ function defaultSettings() {
     allowAuthPopups: true,
     defaultProjectUrl: null,
     defaultChatModeIntent: 'extended-pro',
-    defaultChatModelIntent: null,
-    defaultGpt55ProProjectUrl: null,
-    defaultGpt54ProProjectUrl: null,
     defaultImageProjectUrl: null,
     defaultImageModeIntent: 'thinking',
     defaultImageKey: 'image-default',
@@ -609,9 +606,6 @@ async function refresh() {
     setChecked('setAllowAuthPopups', settings.allowAuthPopups !== false);
     el('setDefaultProjectUrl').value = settings.defaultProjectUrl || '';
     el('setDefaultChatModeIntent').value = settings.defaultChatModeIntent || 'extended-pro';
-    el('setDefaultChatModelIntent').value = settings.defaultChatModelIntent || '';
-    el('setDefaultGpt55ProProjectUrl').value = settings.defaultGpt55ProProjectUrl || '';
-    el('setDefaultGpt54ProProjectUrl').value = settings.defaultGpt54ProProjectUrl || '';
     el('setDefaultImageProjectUrl').value = settings.defaultImageProjectUrl || '';
     el('setDefaultImageModeIntent').value = settings.defaultImageModeIntent || 'thinking';
     el('setDefaultImageKey').value = settings.defaultImageKey || 'image-default';
@@ -754,9 +748,6 @@ async function main() {
           allowAuthPopups: !!el('setAllowAuthPopups').checked,
           defaultProjectUrl: String(el('setDefaultProjectUrl').value || '').trim() || null,
           defaultChatModeIntent: String(el('setDefaultChatModeIntent').value || 'extended-pro').trim() || 'extended-pro',
-          defaultChatModelIntent: String(el('setDefaultChatModelIntent').value || '').trim() || null,
-          defaultGpt55ProProjectUrl: String(el('setDefaultGpt55ProProjectUrl').value || '').trim() || null,
-          defaultGpt54ProProjectUrl: String(el('setDefaultGpt54ProProjectUrl').value || '').trim() || null,
           defaultImageProjectUrl: String(el('setDefaultImageProjectUrl').value || '').trim() || null,
           defaultImageModeIntent: String(el('setDefaultImageModeIntent').value || 'thinking').trim() || 'thinking',
           defaultImageKey: String(el('setDefaultImageKey').value || '').trim() || 'image-default',

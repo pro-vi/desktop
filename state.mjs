@@ -8,7 +8,6 @@ import {
   DEFAULT_CHAT_MODE_INTENT,
   DEFAULT_IMAGE_KEY,
   DEFAULT_IMAGE_MODE_INTENT,
-  normalizeChatGptModelIntent,
   normalizeChatGptModeIntent,
   normalizePersistedChatGptKeyMeta
 } from './chatgpt-mode-intent.mjs';
@@ -48,9 +47,6 @@ export function defaultSettings() {
     allowAuthPopups: true,
     defaultProjectUrl: null,
     defaultChatModeIntent: DEFAULT_CHAT_MODE_INTENT,
-    defaultChatModelIntent: null,
-    defaultGpt55ProProjectUrl: null,
-    defaultGpt54ProProjectUrl: null,
     defaultImageProjectUrl: null,
     defaultImageModeIntent: DEFAULT_IMAGE_MODE_INTENT,
     defaultImageKey: DEFAULT_IMAGE_KEY,
@@ -93,11 +89,6 @@ export function normalizeSettings(input) {
     allowAuthPopups: typeof s.allowAuthPopups === 'boolean' ? s.allowAuthPopups : d.allowAuthPopups,
     defaultProjectUrl: typeof s.defaultProjectUrl === 'string' && s.defaultProjectUrl.trim() ? s.defaultProjectUrl.trim() : null,
     defaultChatModeIntent: normalizeChatGptModeIntent(s.defaultChatModeIntent, { fallback: d.defaultChatModeIntent }),
-    defaultChatModelIntent: normalizeChatGptModelIntent(s.defaultChatModelIntent, { fallback: null }),
-    defaultGpt55ProProjectUrl:
-      typeof s.defaultGpt55ProProjectUrl === 'string' && s.defaultGpt55ProProjectUrl.trim() ? s.defaultGpt55ProProjectUrl.trim() : null,
-    defaultGpt54ProProjectUrl:
-      typeof s.defaultGpt54ProProjectUrl === 'string' && s.defaultGpt54ProProjectUrl.trim() ? s.defaultGpt54ProProjectUrl.trim() : null,
     defaultImageProjectUrl:
       typeof s.defaultImageProjectUrl === 'string' && s.defaultImageProjectUrl.trim() ? s.defaultImageProjectUrl.trim() : null,
     defaultImageModeIntent: normalizeChatGptModeIntent(s.defaultImageModeIntent, { fallback: d.defaultImageModeIntent }),
@@ -164,7 +155,7 @@ export async function writeSettings(settings, stateDir = defaultStateDir()) {
   return normalized;
 }
 
-// --- Key metadata persistence (key → { projectUrl, conversationUrl, modeIntent, modelIntent }) ---
+// --- Key metadata persistence (key -> { projectUrl, conversationUrl, modeIntent }) ---
 
 function projectsPath(stateDir = defaultStateDir()) {
   return path.join(stateDir, 'projects.json');

@@ -70,6 +70,7 @@ function mapErrorToHttp(error) {
   if (msg === 'invalid_json') return { code: 400, body: { error: 'invalid_json' } };
   if (msg === 'invalid_vendor') return { code: 400, body: { error: 'invalid_vendor', data: error?.data || null } };
   if (msg === 'invalid_artifact_mode') return { code: 400, body: { error: 'invalid_artifact_mode', data: error?.data || null } };
+  if (msg === 'model_intent_unsupported') return { code: 400, body: { error: 'model_intent_unsupported', data: error?.data || null } };
   if (msg === 'relative_path_not_allowed') return { code: 400, body: { error: 'relative_path_not_allowed', data: error?.data || null } };
   if (msg === 'missing_url') return { code: 400, body: { error: 'missing_url' } };
   if (msg === 'missing_prompt') return { code: 400, body: { error: 'missing_prompt' } };
@@ -202,19 +203,54 @@ function trimOrNull(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-function chatGptTabMetaPatch({ projectUrl, modeIntent, modelIntent } = {}) {
+function assertNoModelIntent(body) {
+  const raw = trimOrNull(body?.modelIntent);
+  if (!raw) return;
+  const err = new Error('model_intent_unsupported');
+  err.data = {
+    modelIntent: raw,
+    normalizedModelIntent: normalizeChatGptModelIntent(raw, { fallback: null }),
+    reason: 'modelIntent is per-query only; tab/project defaults must use modeIntent.'
+  };
+  throw err;
+}
+
+function normalizeQueryModelIntent(body, { isChatGpt = true } = {}) {
+  const raw = trimOrNull(body?.modelIntent);
+  if (!raw) return null;
+  if (!isChatGpt) {
+    const err = new Error('model_intent_unsupported');
+    err.data = {
+      modelIntent: raw,
+      normalizedModelIntent: normalizeChatGptModelIntent(raw, { fallback: null }),
+      reason: 'modelIntent is supported only for ChatGPT query requests.'
+    };
+    throw err;
+  }
+  const normalized = normalizeChatGptModelIntent(raw, { fallback: null });
+  if (normalized && !body?.imageGeneration) return normalized;
+  const err = new Error('model_intent_unsupported');
+  err.data = {
+    modelIntent: raw,
+    normalizedModelIntent: normalized,
+    reason: body?.imageGeneration
+      ? 'Image-generation requests use modeIntent only; modelIntent is text-query only.'
+      : 'Unsupported ChatGPT modelIntent. Supported values are gpt-5.5-pro and gpt-5.4-pro.'
+  };
+  throw err;
+}
+
+function chatGptTabMetaPatch({ projectUrl, modeIntent } = {}) {
   const patch = {};
   if (projectUrl) patch.projectUrl = projectUrl;
   if (modeIntent) patch.modeIntent = modeIntent;
-  if (modelIntent) patch.modelIntent = modelIntent;
   return patch;
 }
 
-function chatGptPersistedMetaPatch({ projectUrl, modeIntent, modelIntent } = {}) {
+function chatGptPersistedMetaPatch({ projectUrl, modeIntent } = {}) {
   const patch = {};
   if (projectUrl) patch.projectUrl = projectUrl;
   if (modeIntent) patch.modeIntent = modeIntent;
-  if (modelIntent) patch.modelIntent = modelIntent;
   return patch;
 }
 
@@ -222,30 +258,6 @@ function listedTabMatchesModeIntent(tab, modeIntent) {
   const expected = normalizeChatGptModeIntent(modeIntent, { fallback: null });
   if (!expected) return true;
   return normalizeChatGptModeIntent(tab?.modeIntent, { fallback: null }) === expected;
-}
-
-function listedTabMatchesModelIntent(tab, modelIntent) {
-  const expected = normalizeChatGptModelIntent(modelIntent, { fallback: null });
-  if (!expected) return true;
-  return normalizeChatGptModelIntent(tab?.modelIntent, { fallback: null }) === expected;
-}
-
-function modelIntentProjectUrlProvenance({ modelIntent, projectUrl, stage = 'before_navigation' } = {}) {
-  const requestedIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
-  if (!requestedIntent || !projectUrl) return null;
-  return {
-    requestedIntent,
-    targetIntent: requestedIntent,
-    activeIntent: requestedIntent,
-    confirmed: true,
-    reason: 'model_project_routed',
-    label: String(projectUrl || '').trim() || null,
-    clicked: false,
-    attempts: [],
-    stage,
-    confirmationMethod: 'project-url',
-    confirmedAt: new Date().toISOString()
-  };
 }
 
 function listedTabMatchesVendor(tab, vendor) {
@@ -712,7 +724,7 @@ export function startHttpApi({
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
-  // Persistent key → { projectUrl, conversationUrl, modeIntent, modelIntent } map.
+  // Persistent key -> { projectUrl, conversationUrl, modeIntent } map.
   let keyMetaByKey = {};
   let keyMetaWriteQueue = Promise.resolve();
   const projectsReady = readProjects(stateDir).then((p) => { keyMetaByKey = p; }).catch(() => {});
@@ -723,8 +735,7 @@ export function startHttpApi({
     if (
       existing.projectUrl === updated.projectUrl &&
       existing.conversationUrl === updated.conversationUrl &&
-      existing.modeIntent === updated.modeIntent &&
-      existing.modelIntent === updated.modelIntent
+      existing.modeIntent === updated.modeIntent
     ) {
       return Promise.resolve(updated);
     }
@@ -1017,11 +1028,23 @@ export function startHttpApi({
       const activeIntent = detail?.state?.activeIntent ? String(detail.state.activeIntent) : null;
       const label = detail?.state?.label ? trimPreview(detail.state.label, 60) : null;
       const stateMenuOpen = typeof detail?.state?.menuOpen === 'boolean' ? detail.state.menuOpen : null;
-      const stateMenuText = detail?.state?.menuText ? trimPreview(detail.state.menuText, 80) : null;
+      const stateMenuText = detail?.state?.menuText ? trimPreview(detail.state.menuText, 180) : null;
+      const optionHints = Array.isArray(detail?.state?.optionHints) && detail.state.optionHints.length
+        ? `options=${trimPreview(detail.state.optionHints.join(' | '), 160)}`
+        : null;
+      const configureHints = Array.isArray(detail?.state?.configureHints) && detail.state.configureHints.length
+        ? `configure=${trimPreview(detail.state.configureHints.join(' | '), 160)}`
+        : null;
+      const versionDropdownHints = Array.isArray(detail?.state?.versionDropdownHints) && detail.state.versionDropdownHints.length
+        ? `version=${trimPreview(detail.state.versionDropdownHints.join(' | '), 180)}`
+        : null;
+      const attempts = Array.isArray(detail?.attempts) && detail.attempts.length
+        ? `attempts=${trimPreview(detail.attempts.map((item) => `${item.action}:${item.label || ''}`).join(' | '), 500)}`
+        : null;
       const composerHints = Array.isArray(detail?.state?.composerHints) && detail.state.composerHints.length
         ? trimPreview(detail.state.composerHints.join(' | '), 100)
         : null;
-      const debugSuffix = [targetIntent ? `target=${targetIntent}` : null, activeIntent ? `active=${activeIntent}` : null, label, stateMenuOpen === null ? null : `menuOpen=${stateMenuOpen}`, stateMenuText, composerHints]
+      const debugSuffix = [targetIntent ? `target=${targetIntent}` : null, activeIntent ? `active=${activeIntent}` : null, label, stateMenuOpen === null ? null : `menuOpen=${stateMenuOpen}`, stateMenuText, optionHints, configureHints, versionDropdownHints, attempts, composerHints]
         .filter(Boolean)
         .join('; ');
       return {
@@ -1204,13 +1227,11 @@ export function startHttpApi({
       ? rows.find((item) => {
         if (!listedTabMatchesVendor(item, vendor)) return false;
         if (!listedTabMatchesModeIntent(item, run?.modeIntent || null)) return false;
-        if (!listedTabMatchesModelIntent(item, run?.modelIntent || null)) return false;
         if (!run?.projectUrl) return true;
         return String(item?.projectUrl || '').trim() === String(run.projectUrl || '').trim();
       }) || rows.find((item) =>
         listedTabMatchesVendor(item, vendor) &&
-        listedTabMatchesModeIntent(item, run?.modeIntent || null) &&
-        listedTabMatchesModelIntent(item, run?.modelIntent || null)
+        listedTabMatchesModeIntent(item, run?.modeIntent || null)
       ) || null
       : null;
     if (vendorTab) {
@@ -1562,7 +1583,7 @@ export function startHttpApi({
       projectUrl: run.projectUrl || savedMeta?.projectUrl || null,
       conversationUrl: run.conversationUrl || (imageGeneration ? null : savedMeta?.conversationUrl || null),
       modeIntent: run.modeIntent || run.logicalRequest?.modeIntent || savedMeta?.modeIntent || null,
-      modelIntent: run.modelIntent || run.logicalRequest?.modelIntent || savedMeta?.modelIntent || null
+      modelIntent: run.modelIntent || run.logicalRequest?.modelIntent || null
     };
     const tabId = await resolveRunTab({ run: resolvedRun, show: false });
     const patch = chatGptTabMetaPatch({ projectUrl: resolvedRun.projectUrl || null, modeIntent: resolvedRun.modeIntent || null, modelIntent: resolvedRun.modelIntent || null });
@@ -1590,10 +1611,7 @@ export function startHttpApi({
     const originalProjectUrl = original.projectUrl || savedMeta?.projectUrl || null;
     const originalConversationUrl = original.conversationUrl || (imageGeneration ? null : savedMeta?.conversationUrl || null);
     const originalModeIntent = original.modeIntent || original.logicalRequest?.modeIntent || savedMeta?.modeIntent || null;
-    const originalModelIntent = original.modelIntent || original.logicalRequest?.modelIntent || savedMeta?.modelIntent || null;
-    const originalModelIntentProjectRouted =
-      original.modelIntentProvenance?.confirmationMethod === 'project-url' ||
-      original.logicalRequest?.modelIntentProvenance?.confirmationMethod === 'project-url';
+    const originalModelIntent = original.modelIntent || original.logicalRequest?.modelIntent || null;
     const replay = original.materializedReplay || null;
     if (!replay?.prompt) throw new Error('run_not_retryable');
     const nextKind = String(original.kind || replay.kind || 'query').trim() || 'query';
@@ -1667,15 +1685,6 @@ export function startHttpApi({
         modeIntent: originalModeIntent,
         modelIntent: originalModelIntent,
         conversationUrl: originalConversationUrl,
-        ...(originalModelIntentProjectRouted
-          ? {
-            modelIntentProvenance: modelIntentProjectUrlProvenance({
-              modelIntent: originalModelIntent,
-              projectUrl: originalProjectUrl,
-              stage: 'before_navigation'
-            })
-          }
-          : {}),
         promptPreview: op.promptPreview,
         startedAt: op.startedAt,
         retryOf: original.id,
@@ -1713,15 +1722,6 @@ export function startHttpApi({
         modeIntent: originalModeIntent,
         modelIntent: originalModelIntent,
         conversationUrl: originalConversationUrl,
-        ...(originalModelIntentProjectRouted
-          ? {
-            modelIntentProvenance: modelIntentProjectUrlProvenance({
-              modelIntent: originalModelIntent,
-              projectUrl: originalProjectUrl,
-              stage: 'before_navigation'
-            })
-          }
-          : {}),
         persistKeyLocation: persistKeyLocationForRun,
         ...(nextKind === 'research'
           ? { researchMeta: defaultResearchMeta({ tabId, outputDir }) }
@@ -1748,16 +1748,6 @@ export function startHttpApi({
           });
         }
         const result = await runExclusive(controller, async () => {
-          const routedModelIntentProvenance = originalModelIntentProjectRouted
-            ? modelIntentProjectUrlProvenance({ modelIntent: originalModelIntent, projectUrl: originalProjectUrl, stage: 'before_navigation' })
-            : null;
-          if (routedModelIntentProvenance) {
-            patchActiveQuery(tabId, {
-              phase: 'model_intent_confirmed',
-              modelIntent: routedModelIntentProvenance.requestedIntent,
-              modelIntentProvenance: routedModelIntentProvenance
-            });
-          }
           await ensureRunLocation({
             controller,
             tabId,
@@ -1772,7 +1762,7 @@ export function startHttpApi({
             onProgress: (patch) => patchActiveQuery(tabId, patch),
             imageGeneration,
             modeIntent: originalModeIntent,
-            modelIntent: routedModelIntentProvenance ? null : originalModelIntent
+            modelIntent: originalModelIntent
           });
         });
         const conversationUrl = typeof controller.getUrl === 'function'
@@ -1889,6 +1879,7 @@ export function startHttpApi({
       if (url.pathname === '/tabs/create' && req.method === 'POST') {
         await projectsReady;
         const body = await parseBody(req);
+        assertNoModelIntent(body);
         const key = (body.key ? String(body.key).trim() : '') || null;
         const name = (body.name ? String(body.name).trim() : '') || null;
         const show = typeof body.show === 'boolean' ? body.show : envShowTabsDefault() || governor.showTabsByDefault;
@@ -1901,14 +1892,12 @@ export function startHttpApi({
             key,
             projectUrl: trimOrNull(body.projectUrl),
             modeIntent: trimOrNull(body.modeIntent),
-            modelIntent: trimOrNull(body.modelIntent),
             settings,
             savedMeta
           })
           : null;
         const projectUrl = chatProfile?.projectUrl || trimOrNull(body.projectUrl) || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
         const modeIntent = chatProfile?.modeIntent || null;
-        const modelIntent = chatProfile?.modelIntent || null;
         const tabId = key
           ? await tabs.ensureTab({
             key,
@@ -1918,19 +1907,17 @@ export function startHttpApi({
             vendorId: vendor?.id,
             vendorName: vendor?.name,
             projectUrl,
-            modeIntent,
-            modelIntent
+            modeIntent
           })
-          : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl, modeIntent, modelIntent });
-        const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent, modelIntent });
+          : await tabs.createTab({ name, show, url: vendor?.url, vendorId: vendor?.id, vendorName: vendor?.name, projectUrl, modeIntent });
+        const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
         if (Object.keys(tabPatch).length) {
           tabs.updateTabMeta?.(tabId, tabPatch);
         }
         if (key && isChatGpt) {
           const persistedPatch = chatGptPersistedMetaPatch({
             projectUrl,
-            modeIntent,
-            modelIntent
+            modeIntent
           });
           if (Object.keys(persistedPatch).length) await persistKeyMeta(key, persistedPatch);
         }
@@ -2254,6 +2241,7 @@ export function startHttpApi({
             : null;
         const effectiveVendorId = normalizeVendorToken(advisoryTabMeta?.vendorId || vendor?.id || '');
         const isChatGpt = effectiveVendorId === 'chatgpt';
+        const requestedModelIntent = normalizeQueryModelIntent({ ...body, imageGeneration }, { isChatGpt });
         const initialSavedMeta = getPersistedKeyMeta(tabKey);
         const chatProfile = isChatGpt
           ? resolveChatGptQueryProfile({
@@ -2262,7 +2250,7 @@ export function startHttpApi({
             tabId: body?.tabId ? String(body.tabId).trim() : null,
             projectUrl: trimOrNull(body.projectUrl),
             modeIntent: trimOrNull(body.modeIntent),
-            modelIntent: trimOrNull(body.modelIntent),
+            modelIntent: requestedModelIntent,
             settings,
             savedMeta: initialSavedMeta
           })
@@ -2276,8 +2264,7 @@ export function startHttpApi({
           ? chatProfile.conversationUrl
           : (imageGeneration ? null : savedMeta?.conversationUrl || null);
         const modeIntent = chatProfile?.modeIntent || null;
-        const modelIntent = chatProfile?.modelIntent || null;
-        const modelIntentConfirmation = chatProfile?.modelIntentConfirmation || 'ui';
+        const modelIntent = chatProfile?.modelIntent || requestedModelIntent || null;
         const persistKeyLocationForRun = chatProfile ? chatProfile.persistKeyLocation : !imageGeneration;
         const op = {
           id: crypto.randomUUID(),
@@ -2300,13 +2287,12 @@ export function startHttpApi({
           const resolutionBody = requestedKey && !tabKey ? { ...body, key: requestedKey } : body;
           tabId = await resolveTab({ tabs, defaultTabId, body: resolutionBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
-          const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent, modelIntent });
+          const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
           if (Object.keys(tabPatch).length) tabs.updateTabMeta?.(tabId, tabPatch);
           const queryPersistPatch = requestedKey && persistKeyLocationForRun
             ? chatGptPersistedMetaPatch({
               projectUrl: trimOrNull(body.projectUrl),
-              modeIntent: trimOrNull(body.modeIntent) ? modeIntent : null,
-              modelIntent: trimOrNull(body.modelIntent) ? modelIntent : null
+              modeIntent: trimOrNull(body.modeIntent) ? modeIntent : null
             })
             : {};
           if (requestedKey && Object.keys(queryPersistPatch).length) await persistKeyMeta(requestedKey, queryPersistPatch);
@@ -2322,15 +2308,6 @@ export function startHttpApi({
             modeIntent: modeIntent || null,
             modelIntent: modelIntent || null,
             conversationUrl: savedConversationUrl || null,
-            ...(modelIntentConfirmation === 'project-url'
-              ? {
-                modelIntentProvenance: modelIntentProjectUrlProvenance({
-                  modelIntent,
-                  projectUrl,
-                  stage: 'before_navigation'
-                })
-              }
-              : {}),
             persistKeyLocation: persistKeyLocationForRun
           };
           // Set active query before the durable disk write so /status reflects
@@ -2350,15 +2327,6 @@ export function startHttpApi({
             modeIntent: modeIntent || null,
             modelIntent: modelIntent || null,
             conversationUrl: savedConversationUrl || null,
-            ...(modelIntentConfirmation === 'project-url'
-              ? {
-                modelIntentProvenance: modelIntentProjectUrlProvenance({
-                  modelIntent,
-                  projectUrl,
-                  stage: 'before_navigation'
-                })
-              }
-              : {}),
             promptPreview: op.promptPreview,
             startedAt: op.startedAt,
             logicalRequest: logicalQueryRequest({
@@ -2421,16 +2389,6 @@ export function startHttpApi({
             });
             const runQuery = async () => {
               const result = await runExclusive(controller, async () => {
-                const routedModelIntentProvenance = modelIntentConfirmation === 'project-url'
-                  ? modelIntentProjectUrlProvenance({ modelIntent, projectUrl: effectiveProjectUrl || projectUrl, stage: 'before_navigation' })
-                  : null;
-                if (routedModelIntentProvenance) {
-                  patchActiveQuery(tabId, {
-                    phase: 'model_intent_confirmed',
-                    modelIntent: routedModelIntentProvenance.requestedIntent,
-                    modelIntentProvenance: routedModelIntentProvenance
-                  });
-                }
                 if ((savedConversationUrl || effectiveProjectUrl) && typeof controller.getUrl === 'function') {
                   const currentUrl = await controller.getUrl().catch(() => '');
                   // Resume saved conversation if available and tab is on base URL (post-restart)
@@ -2454,7 +2412,7 @@ export function startHttpApi({
                   onProgress: (patch) => patchActiveQuery(tabId, patch),
                   imageGeneration,
                   modeIntent,
-                  modelIntent: routedModelIntentProvenance ? null : modelIntent
+                  modelIntent
                 });
               });
               // Capture conversation URL after successful query

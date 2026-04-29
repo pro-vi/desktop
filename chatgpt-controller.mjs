@@ -2,10 +2,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 import {
+  CHATGPT_ANY_MODE_PATTERN,
   CHATGPT_ANY_MODEL_PATTERN,
+  CHATGPT_MODE_INTENT_META,
+  CHATGPT_MODE_PICKER_PRIMITIVES_JS,
   CHATGPT_MODEL_INTENT_META,
   CHATGPT_MODEL_PICKER_PRIMITIVES_JS,
+  modeIntentLabelLooksUsable,
   modelIntentLabelLooksUsable,
+  shouldTrackPendingModeTrigger,
   shouldTrackPendingModelTrigger
 } from './chatgpt-ui-primitives.mjs';
 
@@ -40,21 +45,6 @@ function looksLikeResearchShellText(value) {
 
 const IMAGE_PLACEHOLDER_RE = /(^|(?:\\n)|\n)\s*(creating|generating)\s+images?(?:\s*(?:\\n|\n|$))/i;
 const IMAGE_THINKING_LINE_RE = /(^|(?:\\n)|\n)\s*thinking(?:\s*(?:\\n|\n|$))/i;
-const CHATGPT_MODE_INTENT_META = {
-  'extended-pro': {
-    label: 'Extended Pro',
-    pattern: '\\bextended\\s*pro\\b|\\bpro\\b'
-  },
-  thinking: {
-    label: 'Thinking',
-    pattern: '\\bthinking\\b|\\breasoning\\b'
-  },
-  instant: {
-    label: 'Instant',
-    pattern: '\\binstant\\b|\\bfast\\b'
-  }
-};
-const CHATGPT_ANY_MODE_PATTERN = Object.values(CHATGPT_MODE_INTENT_META).map((item) => item.pattern).join('|');
 function extractConversationUrl(value) {
   const text = String(value || '').trim();
   if (!text) return null;
@@ -131,17 +121,6 @@ function buildModelIntentProvenance({ activation, modelIntent, stage = 'before_p
     stage,
     confirmedAt: new Date().toISOString()
   };
-}
-
-function modeIntentLabelLooksUsable(label, targetIntent) {
-  const text = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
-  const target = normalizeChatGptModeIntent(targetIntent, { fallback: null });
-  if (!text || !target || text.length > 180) return false;
-  if (/\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text)) return false;
-  if (target === 'extended-pro') return /\bextended\s*pro\b/.test(text) || /^pro(?:\b|[\s,.:;()_-])/.test(text);
-  if (target === 'thinking') return /\bthinking\b|\breasoning\b/.test(text);
-  if (target === 'instant') return /\binstant\b|\bfast\b/.test(text);
-  return false;
 }
 
 function modeIntentActivationLooksTrusted(snap = {}) {
@@ -601,6 +580,9 @@ export class ChatGPTController {
     let lastClickAt = 0;
     const blockedTriggerSignatures = new Set();
     let pendingTriggerSignature = null;
+    let configureClickCount = 0;
+    let legacyModelsClickCount = 0;
+    let modelVersionDropdownClickCount = 0;
     const attempts = [];
 
     while (Date.now() - start < timeoutMs) {
@@ -611,6 +593,9 @@ export class ChatGPTController {
         const anyModelRe = new RegExp(${anyModelPatternSource}, 'i');
         const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
         const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
+        const configureClickCount = ${Math.max(0, configureClickCount)};
+        const legacyModelsClickCount = ${Math.max(0, legacyModelsClickCount)};
+        const modelVersionDropdownClickCount = ${Math.max(0, modelVersionDropdownClickCount)};
         ${HOST_DOM_COLLECTION_HELPERS_JS}
         ${CHATGPT_MODEL_PICKER_PRIMITIVES_JS}
         const labelOf = (n) =>
@@ -724,8 +709,6 @@ export class ChatGPTController {
           modelPickerPrimitives.isHighConfidenceModelControlDescriptor(modelControlDescriptor(node, label));
         const isProjectOptionsControl = (node, label) =>
           modelPickerPrimitives.isProjectOptionsControlDescriptor(modelControlDescriptor(node, label));
-        const isProjectModelModeControl = (node, label) =>
-          modelPickerPrimitives.isProjectModelModeControlDescriptor(modelControlDescriptor(node, label));
         const inModelControlRegion = (node, label, rect = null) => {
           const r = rect || rectOf(node);
           return (
@@ -763,8 +746,8 @@ export class ChatGPTController {
         }
         const optionPool = uniq([
           ...queryAll(${optionSel}),
-          ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state], label, li, div, span'))),
-          ...Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state]'))
+          ...menuRoots.flatMap((root) => Array.from(root.querySelectorAll('*'))),
+          ...Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-checked], [data-state]'))
         ]).filter((n) => visible(n) && !menuRoots.includes(n));
         const menuText = menuRoots
           .map((root) => String(root?.innerText || '').replace(/\\s+/g, ' ').trim())
@@ -775,7 +758,7 @@ export class ChatGPTController {
           .map((n) => labelOf(n))
           .filter(Boolean)
           .filter((label, index, arr) => arr.indexOf(label) === index)
-          .slice(0, 12);
+          .slice(0, 30);
 
         const triggerCandidates = triggerPool
           .map((node) => {
@@ -785,7 +768,6 @@ export class ChatGPTController {
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const highConfidence = isHighConfidenceModelControl(node, label);
             const projectOptions = isProjectOptionsControl(node, label);
-            const projectModelMode = isProjectModelModeControl(node, label);
             const modelRegion = inModelControlRegion(node, label, rect);
             const score = modelPickerPrimitives.scoreModelTriggerCandidate({
               label,
@@ -793,7 +775,6 @@ export class ChatGPTController {
               targetIntent,
               highConfidence,
               projectOptions,
-              projectModelMode,
               modelRegion,
               anyModelMatches: anyModelRe.test(label),
               targetMatches: targetRe.test(label),
@@ -805,7 +786,7 @@ export class ChatGPTController {
               width: rect.w,
               height: rect.h
             });
-            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modelRegion, highConfidence, projectOptions, projectModelMode };
+            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modelRegion, highConfidence, projectOptions };
           })
           .filter((item) => !blockedTriggerSignatures.has(item.signature))
           .filter((item) => item.score >= 0)
@@ -829,22 +810,34 @@ export class ChatGPTController {
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
+            const ariaChecked = String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true';
+            const active = isActive(node);
             const score = modelPickerPrimitives.scoreModelOptionCandidate({
               label,
               intent,
               targetIntent,
               optionInsideMenu,
-              ariaChecked: String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true',
-              active: isActive(node),
+              ariaChecked,
+              active,
               area,
               width: rect.w,
               height: rect.h
             });
-            return { node, label, intent, score, rect, optionInsideMenu };
+            return { node, label, intent, score, rect, optionInsideMenu, active, ariaChecked };
           })
           .filter((item) => item.score >= 0 && item.optionInsideMenu)
           .sort((a, b) => b.score - a.score);
         const targetOption = optionCandidates[0] || null;
+        if (targetOption && (targetOption.active || targetOption.ariaChecked)) {
+          return {
+            active: true,
+            action: 'none',
+            reason: clickedRecently ? 'model_option_latched_after_click' : 'model_option_already_active',
+            targetIntent,
+            activeIntent: targetOption.intent,
+            label: targetOption.label || null
+          };
+        }
         if (targetOption && menuRoots.length) {
           return {
             active: false,
@@ -857,6 +850,183 @@ export class ChatGPTController {
             menuOpen: true,
             menuText,
             optionHints
+          };
+        }
+
+        const modeOnlyPickerOpen = menuRoots.length && modelPickerPrimitives.isModeOnlyModelPickerState({ menuText, optionHints });
+        if (clickedRecently && (configureClickCount > 0 || legacyModelsClickCount > 0 || modelVersionDropdownClickCount > 0)) {
+          return {
+            active: false,
+            action: 'none',
+            reason: 'waiting_after_model_picker_branch',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            menuOpen: menuRoots.length > 0,
+            menuText,
+            optionHints
+          };
+        }
+        const configureItems = optionPool
+          .map((node) => {
+            const label = labelOf(node);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
+            const isButtonLike = !!node?.matches?.('button, a, [role="button"], [role="link"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-haspopup], [aria-expanded], summary, label');
+            const highConfidenceConfigure = /model-configure-modal/.test(label) || /^configure(?:\\.{3}|…)?$/.test(label);
+            const score = modelPickerPrimitives.scoreModelConfigureCandidate({
+              label,
+              optionInsideMenu,
+              isButtonLike,
+              highConfidenceConfigure,
+              area,
+              width: rect.w,
+              height: rect.h
+            });
+            return { node, label, score, rect, optionInsideMenu, highConfidenceConfigure };
+          });
+        const configureCandidates = configureItems
+          .filter((item) => item.score >= 0 && (item.optionInsideMenu || item.highConfidenceConfigure))
+          .sort((a, b) => b.score - a.score);
+        const configureOption = configureCandidates[0] || null;
+        if (modeOnlyPickerOpen && configureClickCount < 3 && configureOption) {
+          return {
+            active: false,
+            action: 'pointer_configure',
+            reason: 'clicked_model_configure',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: configureOption.label || null,
+            rect: configureOption.rect,
+            menuOpen: true,
+            menuText,
+            optionHints
+          };
+        }
+
+        const legacyCandidates = optionPool
+          .map((node) => {
+            const label = labelOf(node);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
+            const isButtonLike = !!node?.matches?.('button, a, [role="button"], [role="link"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="radio"], [aria-haspopup], [aria-expanded], summary, label');
+            const ariaExpanded = String(node?.getAttribute?.('aria-expanded') || '').trim().toLowerCase();
+            const score = modelPickerPrimitives.scoreModelLegacyModelsCandidate({
+              label,
+              optionInsideMenu,
+              isButtonLike,
+              ariaExpanded,
+              active: isActive(node),
+              area,
+              width: rect.w,
+              height: rect.h
+            });
+            return { node, label, score, rect, optionInsideMenu };
+          })
+          .filter((item) => item.score >= 0 && item.optionInsideMenu)
+          .sort((a, b) => b.score - a.score);
+        const legacyOption = legacyCandidates[0] || null;
+        if (menuRoots.length && legacyModelsClickCount < 3 && legacyOption) {
+          return {
+            active: false,
+            action: 'pointer_legacy_models',
+            reason: 'clicked_legacy_models',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: legacyOption.label || null,
+            rect: legacyOption.rect,
+            menuOpen: true,
+            menuText,
+            optionHints
+          };
+        }
+        const modelGenerationPickerOpen = menuRoots.length && modelPickerPrimitives.isModelGenerationPickerState({ menuText, optionHints });
+        const versionDropdownItems = optionPool
+          .map((node) => {
+            const label = labelOf(node);
+            const rect = rectOf(node);
+            const area = Math.max(0, rect.w) * Math.max(0, rect.h);
+            const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
+            const isButtonLike = !!node?.matches?.('button, a, [role="button"], [role="link"], [role="combobox"], [aria-haspopup], [aria-expanded], [tabindex="0"], summary, label');
+            const ariaExpanded = String(node?.getAttribute?.('aria-expanded') || '').trim().toLowerCase();
+            const active = isActive(node);
+            const score = modelPickerPrimitives.scoreModelVersionDropdownCandidate({
+              label,
+              optionInsideMenu,
+              isButtonLike,
+              ariaExpanded,
+              active,
+              area,
+              width: rect.w,
+              height: rect.h
+            });
+            return { node, label, score, rect, optionInsideMenu, isButtonLike, ariaExpanded, active };
+          });
+        const versionDropdownCandidates = versionDropdownItems
+          .filter((item) => item.score >= 0 && item.optionInsideMenu)
+          .sort((a, b) => b.score - a.score);
+        const versionDropdown = versionDropdownCandidates[0] || null;
+        if (modelGenerationPickerOpen && modelVersionDropdownClickCount < 3 && versionDropdown) {
+          return {
+            active: false,
+            action: 'pointer_model_version_dropdown',
+            reason: 'clicked_model_version_dropdown',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            label: versionDropdown.label || null,
+            rect: versionDropdown.rect,
+            menuOpen: true,
+            menuText,
+            optionHints
+          };
+        }
+        if ((configureClickCount > 0 || legacyModelsClickCount > 0 || modelVersionDropdownClickCount > 0) && modelGenerationPickerOpen) {
+          const versionDropdownHints = versionDropdownItems
+            .filter((item) => /latest|model|5\.[245]|o3/.test(item.label))
+            .map((item) => [
+              item.score,
+              item.optionInsideMenu ? 'in' : 'out',
+              item.isButtonLike ? 'btn' : 'plain',
+              item.active ? 'active' : 'idle',
+              item.ariaExpanded || 'closed',
+              String(Math.round(item.rect?.w || 0)) + 'x' + String(Math.round(item.rect?.h || 0)),
+              item.label
+            ].join(':'))
+            .slice(0, 8);
+          return {
+            active: false,
+            action: 'unavailable',
+            reason: 'target_model_not_listed',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            menuOpen: true,
+            menuText,
+            optionHints,
+            versionDropdownHints
+          };
+        }
+        if (modeOnlyPickerOpen) {
+          const configureHints = configureItems
+            .filter((item) => /configure/.test(item.label))
+            .map((item) => [
+              item.score,
+              item.optionInsideMenu ? 'in' : 'out',
+              item.highConfidenceConfigure ? 'hi' : 'lo',
+              String(Math.round(item.rect?.w || 0)) + 'x' + String(Math.round(item.rect?.h || 0)),
+              item.label
+            ].join(':'))
+            .slice(0, 8);
+          return {
+            active: false,
+            action: 'unavailable',
+            reason: 'model_generation_picker_unavailable',
+            targetIntent,
+            activeIntent: activeTrigger?.intent || null,
+            menuOpen: true,
+            menuText,
+            optionHints,
+            configureHints
           };
         }
 
@@ -906,7 +1076,15 @@ export class ChatGPTController {
       }
       if (snap?.active) {
         const activation = { ...snap, clicked: attempts.length > 0, attempts: attempts.map((item) => ({ ...item })) };
-        if (modelIntentActivationLooksTrusted(activation)) return activation;
+        if (modelIntentActivationLooksTrusted(activation)) {
+          // The Configure/Intelligence surface can remain open after model selection.
+          // Close any nested picker/modal before prompt staging begins.
+          await this.page?.sendKey?.('Escape').catch(() => {});
+          await sleep(120);
+          await this.page?.sendKey?.('Escape').catch(() => {});
+          await sleep(120);
+          return activation;
+        }
         last = {
           ...activation,
           active: false,
@@ -916,11 +1094,28 @@ export class ChatGPTController {
         await sleep(250);
         continue;
       }
-      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+      if (snap?.action === 'unavailable') {
+        last = snap;
+        break;
+      }
+      if (
+        (
+          snap?.action === 'pointer_trigger' ||
+          snap?.action === 'pointer_option' ||
+          snap?.action === 'pointer_configure' ||
+          snap?.action === 'pointer_legacy_models' ||
+          snap?.action === 'pointer_model_version_dropdown'
+        ) &&
+        snap?.rect?.w > 0 &&
+        snap?.rect?.h > 0
+      ) {
         attempts.push(modelIntentClickAttempt(snap));
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
         const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
         await this.#clickAt(cx, cy);
+        if (snap.action === 'pointer_configure') configureClickCount += 1;
+        if (snap.action === 'pointer_legacy_models') legacyModelsClickCount += 1;
+        if (snap.action === 'pointer_model_version_dropdown') modelVersionDropdownClickCount += 1;
         if (shouldTrackPendingModelTrigger(snap)) pendingTriggerSignature = snap.signature;
         lastClickAt = Date.now();
         await sleep(450);
@@ -969,13 +1164,11 @@ export class ChatGPTController {
       const snap = await this.#eval(`(() => {
         const targetIntent = ${targetIntentSource};
         const targetRe = new RegExp(${targetPatternSource}, 'i');
-        const extRe = new RegExp(${JSON.stringify(CHATGPT_MODE_INTENT_META['extended-pro'].pattern)}, 'i');
-        const thinkingRe = new RegExp(${JSON.stringify(CHATGPT_MODE_INTENT_META.thinking.pattern)}, 'i');
-        const instantRe = new RegExp(${JSON.stringify(CHATGPT_MODE_INTENT_META.instant.pattern)}, 'i');
         const anyModeRe = new RegExp(${anyModePatternSource}, 'i');
         const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
         const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
         ${HOST_DOM_COLLECTION_HELPERS_JS}
+        ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
         const labelOf = (n) =>
           [
             n?.getAttribute?.('aria-label') || '',
@@ -983,16 +1176,7 @@ export class ChatGPTController {
             n?.getAttribute?.('data-testid') || '',
             n?.textContent || ''
           ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const intentForLabel = (label) => {
-          const text = String(label || '').trim().toLowerCase();
-          if (!text) return null;
-          if (text.length > 180) return null;
-          if (/\\bfeedback\\b|click to remove|remove attached|remove file|\\battachment\\b|\\buploaded\\b/.test(text)) return null;
-          if (thinkingRe.test(text)) return 'thinking';
-          if (instantRe.test(text)) return 'instant';
-          if (/\\bextended\\s*pro\\b/.test(text) || /^pro(?:\\b|[\\s,.:;()_-])/.test(text)) return 'extended-pro';
-          return null;
-        };
+        const intentForLabel = (label) => modePickerPrimitives.modeIntentForLabel(label);
         const isActive = (n) => {
           const ariaPressed = String(n?.getAttribute?.('aria-pressed') || '').trim().toLowerCase();
           const ariaChecked = String(n?.getAttribute?.('aria-checked') || '').trim().toLowerCase();
@@ -1085,13 +1269,14 @@ export class ChatGPTController {
           const pcy = promptRect.y + promptRect.h / 2;
           return Math.abs(cx - pcx) <= 640 && Math.abs(cy - pcy) <= 280;
         };
-        const isHighConfidenceModeControl = (node, label) => {
-          const dataTestId = String(node?.getAttribute?.('data-testid') || '').toLowerCase();
-          const aria = String(node?.getAttribute?.('aria-label') || '').toLowerCase();
-          const title = String(node?.getAttribute?.('title') || '').toLowerCase();
-          const text = [label, dataTestId, aria, title].join(' ');
-          return /model-switcher|model selector|model-selector|model_picker|model-picker|mode selector|mode-selector/.test(text);
-        };
+        const modeControlDescriptor = (node, label) => ({
+          label,
+          dataTestId: String(node?.getAttribute?.('data-testid') || '').toLowerCase(),
+          aria: String(node?.getAttribute?.('aria-label') || '').toLowerCase(),
+          title: String(node?.getAttribute?.('title') || '').toLowerCase()
+        });
+        const isHighConfidenceModeControl = (node, label) =>
+          modePickerPrimitives.isHighConfidenceModeControlDescriptor(modeControlDescriptor(node, label));
         const inModeControlRegion = (node, label, rect = null) => {
           const r = rect || rectOf(node);
           return (
@@ -1143,32 +1328,32 @@ export class ChatGPTController {
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const highConfidence = isHighConfidenceModeControl(node, label);
             const modeRegion = inModeControlRegion(node, label, rect);
-            const boostsFromComposer = !intent || intent === targetIntent;
-            let score = -1;
-            if (intent) {
-              score = intent === targetIntent ? 180 : isActive(node) ? 70 : 40;
-            } else if (/model selector|model-switcher-dropdown-button/.test(label)) {
-              score = 170;
-            } else if (highConfidence && anyModeRe.test(label)) {
-              score = targetRe.test(label) ? 175 : 145;
-            } else if (/\\bmode\\b|\\bmodel\\b|\\breason\\b|\\bthink\\b/.test(label)) {
-              score = 120;
-            }
-            if (score >= 0 && String(node?.getAttribute?.('data-testid') || '').trim()) score += 10;
-            if (score >= 0 && boostsFromComposer && composerRoot && composerRoot.contains(node)) score += 90;
-            if (score >= 0 && boostsFromComposer && promptRect) {
+            let promptProximityBoost = 0;
+            if (promptRect) {
               const cx = rect.x + rect.w / 2;
               const cy = rect.y + rect.h / 2;
               const dx = Math.abs(cx - (promptRect.x + promptRect.w / 2));
               const dy = Math.abs(cy - (promptRect.y + promptRect.h / 2));
-              score += Math.max(0, 180 - dx / 8 - dy / 5);
+              promptProximityBoost = Math.max(0, 180 - dx / 8 - dy / 5);
             }
-            if (score >= 0 && area > 25_000) score -= 80;
-            else if (score >= 0 && area > 12_000) score -= 35;
-            if (score >= 0 && rect.w > 240) score -= 30;
-            if (score >= 0 && rect.h > 72) score -= 20;
-            if (score >= 0 && rect.y < 80) score -= 40;
-            if (score >= 0 && !modeRegion && !highConfidence) score = -1;
+            const score = modePickerPrimitives.scoreModeTriggerCandidate({
+              label,
+              intent,
+              targetIntent,
+              active: isActive(node),
+              highConfidence,
+              modeRegion,
+              anyModeMatches: anyModeRe.test(label),
+              targetMatches: targetRe.test(label),
+              modeKeyword: /\\bmode\\b|\\bmodel\\b|\\breason\\b|\\bthink\\b/.test(label),
+              hasDataTestId: !!String(node?.getAttribute?.('data-testid') || '').trim(),
+              inComposer: !!(composerRoot && composerRoot.contains(node)),
+              promptProximityBoost,
+              area,
+              width: rect.w,
+              height: rect.h,
+              y: rect.y
+            });
             return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modeRegion, highConfidence };
           })
           .filter((item) => !blockedTriggerSignatures.has(item.signature))
@@ -1206,16 +1391,17 @@ export class ChatGPTController {
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
-            let score = -1;
-            if (intent === targetIntent) score = 240;
-            if (score >= 0 && optionInsideMenu) score += 20;
-            if (score >= 0 && String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true') score += 10;
-            if (score >= 0 && isActive(node)) score -= 5;
-            if (score >= 0 && area > 80_000) score -= 120;
-            else if (score >= 0 && area > 20_000) score -= 30;
-            if (score >= 0 && rect.h > 120) score -= 80;
-            if (score >= 0 && rect.w > 600) score -= 60;
-            if (score >= 0 && label.length > 180) score -= 120;
+            const score = modePickerPrimitives.scoreModeOptionCandidate({
+              label,
+              intent,
+              targetIntent,
+              optionInsideMenu,
+              ariaChecked: String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true',
+              active: isActive(node),
+              area,
+              width: rect.w,
+              height: rect.h
+            });
             return { node, label, intent, score, rect, optionInsideMenu };
           })
           .filter((item) => item.score >= 0 && item.optionInsideMenu)
@@ -1297,7 +1483,7 @@ export class ChatGPTController {
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
         const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));
         await this.#clickAt(cx, cy);
-        if (snap.action === 'pointer_trigger' && snap.signature) pendingTriggerSignature = snap.signature;
+        if (shouldTrackPendingModeTrigger(snap)) pendingTriggerSignature = snap.signature;
         lastClickAt = Date.now();
         await sleep(450);
         continue;

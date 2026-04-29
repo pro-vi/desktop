@@ -184,25 +184,6 @@
               <div class="fieldHelp">Declarative default for normal ChatGPT queries. This records which ChatGPT lane the tab should use; it does not overload the vendor `model` hint.</div>
             </label>
             <label class="field">
-              <div class="label">Default ChatGPT model intent</div>
-              <select id="setDefaultChatModelIntent">
-                <option value="">No default</option>
-                <option value="gpt-5.5-pro">GPT-5.5 Pro</option>
-                <option value="gpt-5.4-pro">GPT-5.4 Pro (legacy)</option>
-              </select>
-              <div class="fieldHelp">Optional ChatGPT UI model picker target. Leave blank unless you intentionally want normal ChatGPT keys pinned to a specific Pro generation.</div>
-            </label>
-            <label class="field">
-              <div class="label">GPT-5.5 Pro project URL</div>
-              <input id="setDefaultGpt55ProProjectUrl" type="text" placeholder="https://chatgpt.com/g/g-p-.../project" autocomplete="off" />
-              <div class="fieldHelp">Optional fallback project already configured for GPT-5.5 Pro. Normal keys still prefer the default Agentify project.</div>
-            </label>
-            <label class="field">
-              <div class="label">GPT-5.4 Pro project URL</div>
-              <input id="setDefaultGpt54ProProjectUrl" type="text" placeholder="https://chatgpt.com/g/g-p-.../project" autocomplete="off" />
-              <div class="fieldHelp">Optional fallback project already configured for legacy GPT-5.4 Pro. Used only when no explicit, saved, or default project route exists.</div>
-            </label>
-            <label class="field">
               <div class="label">Default image project URL</div>
               <input id="setDefaultImageProjectUrl" type="text" placeholder="https://chatgpt.com/g/g-p-.../project" autocomplete="off" />
               <div class="fieldHelp">Used by image-generation calls. Keep this project on Instant or Thinking, not Pro.</div>

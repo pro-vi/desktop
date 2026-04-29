@@ -25,25 +25,17 @@ export function normalizeChatGptModelIntent(value, { fallback = null } = {}) {
   return fallback == null ? null : normalizeChatGptModelIntent(fallback, { fallback: null });
 }
 
-function configuredProjectUrlForModelIntent(modelIntent, settings = {}) {
-  const normalized = normalizeChatGptModelIntent(modelIntent, { fallback: null });
-  if (normalized === 'gpt-5.5-pro') return trimOrNull(settings.defaultGpt55ProProjectUrl);
-  if (normalized === 'gpt-5.4-pro') return trimOrNull(settings.defaultGpt54ProProjectUrl);
-  return null;
-}
-
 export function normalizePersistedChatGptKeyMeta(input) {
   if (typeof input === 'string') {
-    return { projectUrl: trimOrNull(input), conversationUrl: null, modeIntent: null, modelIntent: null };
+    return { projectUrl: trimOrNull(input), conversationUrl: null, modeIntent: null };
   }
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return { projectUrl: null, conversationUrl: null, modeIntent: null, modelIntent: null };
+    return { projectUrl: null, conversationUrl: null, modeIntent: null };
   }
   return {
     projectUrl: trimOrNull(input.projectUrl),
     conversationUrl: trimOrNull(input.conversationUrl),
-    modeIntent: normalizeChatGptModeIntent(input.modeIntent, { fallback: null }),
-    modelIntent: normalizeChatGptModelIntent(input.modelIntent, { fallback: null })
+    modeIntent: normalizeChatGptModeIntent(input.modeIntent, { fallback: null })
   };
 }
 
@@ -57,26 +49,16 @@ export function resolveChatGptChatProfile({
   savedMeta = null
 } = {}) {
   const normalizedSavedMeta = normalizePersistedChatGptKeyMeta(savedMeta);
-  const normalizedModelIntent = normalizeChatGptModelIntent(modelIntent, {
-    fallback: normalizedSavedMeta.modelIntent || settings.defaultChatModelIntent || null
-  });
-  const configuredModelProjectUrl = configuredProjectUrlForModelIntent(normalizedModelIntent, settings);
+  const normalizedModelIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
   const explicitProjectUrl = trimOrNull(projectUrl);
   const defaultProjectUrl = trimOrNull(settings.defaultProjectUrl);
   let resolvedProjectUrl = null;
-  let projectUrlSource = null;
   if (explicitProjectUrl) {
     resolvedProjectUrl = explicitProjectUrl;
-    projectUrlSource = 'request';
   } else if (normalizedSavedMeta.projectUrl) {
     resolvedProjectUrl = normalizedSavedMeta.projectUrl;
-    projectUrlSource = 'saved-key';
   } else if (defaultProjectUrl) {
     resolvedProjectUrl = defaultProjectUrl;
-    projectUrlSource = 'default';
-  } else if (configuredModelProjectUrl) {
-    resolvedProjectUrl = configuredModelProjectUrl;
-    projectUrlSource = 'model-intent';
   }
   return {
     profile: 'chat',
@@ -89,10 +71,7 @@ export function resolveChatGptChatProfile({
       fallback: normalizedSavedMeta.modeIntent || settings.defaultChatModeIntent || DEFAULT_CHAT_MODE_INTENT
     }),
     modelIntent: normalizedModelIntent,
-    modelIntentConfirmation:
-      normalizedModelIntent && configuredModelProjectUrl && projectUrlSource === 'model-intent'
-        ? 'project-url'
-        : 'ui',
+    modelIntentConfirmation: 'ui',
     persistKeyLocation: true
   };
 }

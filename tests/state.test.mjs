@@ -38,9 +38,6 @@ test('state: normalizeSettings defaults allowAuthPopups to true', () => {
   assert.equal(s.chromeProfileName, 'Default');
   assert.equal(s.defaultProjectUrl, null);
   assert.equal(s.defaultChatModeIntent, DEFAULT_CHAT_MODE_INTENT);
-  assert.equal(s.defaultChatModelIntent, null);
-  assert.equal(s.defaultGpt55ProProjectUrl, null);
-  assert.equal(s.defaultGpt54ProProjectUrl, null);
   assert.equal(s.defaultImageProjectUrl, null);
   assert.equal(s.defaultImageModeIntent, DEFAULT_IMAGE_MODE_INTENT);
   assert.equal(s.defaultImageKey, 'image-default');
@@ -63,16 +60,10 @@ test('state: writeSettings persists allowAuthPopups', async () => {
 test('state: writeSettings persists default image project URL', async () => {
   const dir = await tempDir();
   const saved = await writeSettings({
-    defaultGpt55ProProjectUrl: ' https://chatgpt.com/g/g-p-55/project ',
-    defaultGpt54ProProjectUrl: ' https://chatgpt.com/g/g-p-54/project ',
     defaultImageProjectUrl: ' https://chatgpt.com/g/g-p-image/project '
   }, dir);
-  assert.equal(saved.defaultGpt55ProProjectUrl, 'https://chatgpt.com/g/g-p-55/project');
-  assert.equal(saved.defaultGpt54ProProjectUrl, 'https://chatgpt.com/g/g-p-54/project');
   assert.equal(saved.defaultImageProjectUrl, 'https://chatgpt.com/g/g-p-image/project');
   const re = await readSettings(dir);
-  assert.equal(re.defaultGpt55ProProjectUrl, 'https://chatgpt.com/g/g-p-55/project');
-  assert.equal(re.defaultGpt54ProProjectUrl, 'https://chatgpt.com/g/g-p-54/project');
   assert.equal(re.defaultImageProjectUrl, 'https://chatgpt.com/g/g-p-image/project');
 });
 
@@ -80,11 +71,11 @@ test('state: writeSettings normalizes ChatGPT mode intents', async () => {
   const dir = await tempDir();
   const saved = await writeSettings({ defaultChatModeIntent: ' Pro ', defaultChatModelIntent: ' legacy pro ', defaultImageModeIntent: ' reasoning ' }, dir);
   assert.equal(saved.defaultChatModeIntent, 'extended-pro');
-  assert.equal(saved.defaultChatModelIntent, 'gpt-5.4-pro');
+  assert.equal(Object.prototype.hasOwnProperty.call(saved, 'defaultChatModelIntent'), false);
   assert.equal(saved.defaultImageModeIntent, 'thinking');
   const re = await readSettings(dir);
   assert.equal(re.defaultChatModeIntent, 'extended-pro');
-  assert.equal(re.defaultChatModelIntent, 'gpt-5.4-pro');
+  assert.equal(Object.prototype.hasOwnProperty.call(re, 'defaultChatModelIntent'), false);
   assert.equal(re.defaultImageModeIntent, 'thinking');
 });
 

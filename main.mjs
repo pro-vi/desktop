@@ -353,9 +353,6 @@ async function main() {
     if (has('allowAuthPopups')) next.allowAuthPopups = args.allowAuthPopups;
     if (has('defaultProjectUrl')) next.defaultProjectUrl = args.defaultProjectUrl;
     if (has('defaultChatModeIntent')) next.defaultChatModeIntent = args.defaultChatModeIntent;
-    if (has('defaultChatModelIntent')) next.defaultChatModelIntent = args.defaultChatModelIntent;
-    if (has('defaultGpt55ProProjectUrl')) next.defaultGpt55ProProjectUrl = args.defaultGpt55ProProjectUrl;
-    if (has('defaultGpt54ProProjectUrl')) next.defaultGpt54ProProjectUrl = args.defaultGpt54ProProjectUrl;
     if (has('defaultImageProjectUrl')) next.defaultImageProjectUrl = args.defaultImageProjectUrl;
     if (has('defaultImageModeIntent')) next.defaultImageModeIntent = args.defaultImageModeIntent;
     if (has('defaultImageKey')) next.defaultImageKey = args.defaultImageKey;

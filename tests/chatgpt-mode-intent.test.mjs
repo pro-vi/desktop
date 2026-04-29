@@ -38,13 +38,12 @@ test('chatgpt-mode-intent: normalizes persisted key metadata', () => {
     {
       projectUrl: 'https://chatgpt.com/g/g-p-test/project',
       conversationUrl: 'https://chatgpt.com/g/g-p-test/c/thread',
-      modeIntent: 'extended-pro',
-      modelIntent: 'gpt-5.4-pro'
+      modeIntent: 'extended-pro'
     }
   );
 });
 
-test('chatgpt-mode-intent: chat profile prefers saved key metadata, then defaults', () => {
+test('chatgpt-mode-intent: chat profile prefers saved key metadata and does not inherit model pins', () => {
   const profile = resolveChatGptChatProfile({
     key: 'main',
     settings: { defaultProjectUrl: 'https://chatgpt.com/g/g-p-default/project', defaultChatModeIntent: 'thinking' },
@@ -64,33 +63,29 @@ test('chatgpt-mode-intent: chat profile prefers saved key metadata, then default
     projectUrl: 'https://chatgpt.com/g/g-p-saved/project',
     conversationUrl: 'https://chatgpt.com/g/g-p-saved/c/thread',
     modeIntent: 'extended-pro',
-    modelIntent: 'gpt-5.4-pro',
+    modelIntent: null,
     modelIntentConfirmation: 'ui',
     persistKeyLocation: true
   });
 });
 
-test('chatgpt-mode-intent: chat profile can route model intent through configured projects', () => {
+test('chatgpt-mode-intent: model intent alone does not route text chats to a project', () => {
   const profile = resolveChatGptChatProfile({
     key: 'main',
-    modelIntent: 'gpt-5.4-pro',
-    settings: {
-      defaultGpt54ProProjectUrl: 'https://chatgpt.com/g/g-p-54/project'
-    }
+    modelIntent: 'gpt-5.4-pro'
   });
 
-  assert.equal(profile.projectUrl, 'https://chatgpt.com/g/g-p-54/project');
+  assert.equal(profile.projectUrl, null);
   assert.equal(profile.modelIntent, 'gpt-5.4-pro');
-  assert.equal(profile.modelIntentConfirmation, 'project-url');
+  assert.equal(profile.modelIntentConfirmation, 'ui');
 });
 
-test('chatgpt-mode-intent: default project keeps model lanes inside the Agentify project', () => {
+test('chatgpt-mode-intent: default project is the text route for all model lanes', () => {
   const profile = resolveChatGptChatProfile({
     key: 'main',
     modelIntent: 'gpt-5.4-pro',
     settings: {
-      defaultProjectUrl: 'https://chatgpt.com/g/g-p-agentify/project',
-      defaultGpt54ProProjectUrl: 'https://chatgpt.com/g/g-p-54/project'
+      defaultProjectUrl: 'https://chatgpt.com/g/g-p-agentify/project'
     }
   });
 
