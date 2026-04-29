@@ -31,6 +31,20 @@ function normalizeTime(value) {
   return Number.isFinite(num) && num > 0 ? num : null;
 }
 
+const TERMINAL_PHASE_BY_STATUS = Object.freeze({
+  success: 'completed',
+  error: 'failed',
+  stopped: 'stopped',
+  timeout: 'timed_out'
+});
+
+function normalizePhaseForStatus({ status, phase, finishedAt }) {
+  const normalizedStatus = normalizeString(status);
+  const normalizedPhase = normalizeString(phase);
+  if (normalizedStatus === 'blocked') return finishedAt ? 'blocked' : normalizedPhase;
+  return TERMINAL_PHASE_BY_STATUS[normalizedStatus] || normalizedPhase;
+}
+
 function normalizeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? safeClone(value) : null;
 }
@@ -41,12 +55,14 @@ function normalizeRun(input = {}) {
   const updatedAt = normalizeTime(input.updatedAt) || startedAt;
   const finishedAt = normalizeTime(input.finishedAt);
   const archivedAt = normalizeTime(input.archivedAt);
+  const status = normalizeString(input.status) || 'queued';
+  const phase = normalizePhaseForStatus({ status, phase: input.phase, finishedAt });
   return {
     id: normalizeString(input.id),
     kind: normalizeString(input.kind) || 'query',
     source: normalizeString(input.source) || 'http',
-    status: normalizeString(input.status) || 'queued',
-    phase: normalizeString(input.phase),
+    status,
+    phase,
     label: normalizeString(input.label),
     detail: normalizeString(input.detail),
     tabId: normalizeString(input.tabId),

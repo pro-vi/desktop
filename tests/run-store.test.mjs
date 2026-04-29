@@ -87,6 +87,32 @@ test('run-store: finalize is exact-once for terminal state', async () => {
   assert.equal(second.finishedAt, first.finishedAt);
 });
 
+test('run-store: terminal success cannot retain an in-flight phase', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-terminal-phase-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({
+    id: 'run-terminal-phase',
+    kind: 'query',
+    source: 'mcp',
+    status: 'running',
+    phase: 'waiting_for_response',
+    startedAt: Date.now()
+  });
+
+  const finalized = await store.finalize('run-terminal-phase', {
+    status: 'success',
+    detail: 'done'
+  });
+
+  assert.equal(finalized.status, 'success');
+  assert.equal(finalized.phase, 'completed');
+
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', 'run-terminal-phase.json'), 'utf8'));
+  assert.equal(persisted.status, 'success');
+  assert.equal(persisted.phase, 'completed');
+});
+
 test('run-store: queued writes keep finalized runs terminal on disk', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-queue-'));
   let writeCount = 0;

@@ -372,9 +372,21 @@ test('http-api: query forwards explicit model intent without persisting it as ke
   let controllerCalled = false;
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async ({ modelIntent }) => {
+    query: async ({ modelIntent, onProgress }) => {
       controllerCalled = true;
       assert.equal(modelIntent, 'gpt-5.4-pro');
+      await onProgress?.({
+        phase: 'model_intent_confirmed',
+        modelIntent: 'gpt-5.4-pro',
+        modelIntentProvenance: {
+          requestedIntent: 'gpt-5.4-pro',
+          targetIntent: 'gpt-5.4-pro',
+          activeIntent: 'gpt-5.4-pro',
+          confirmed: true,
+          reason: 'model_selected',
+          stage: 'before_prompt'
+        }
+      });
       return { text: 'project answer', codeBlocks: [], meta: {} };
     },
     getUrl: async () => 'https://chatgpt.com/g/g-p-agentify/c/model-intent-run',
@@ -422,10 +434,68 @@ test('http-api: query forwards explicit model intent without persisting it as ke
   const persisted = JSON.parse(await fs.readFile(runPath, 'utf8'));
   assert.equal(persisted.modelIntent, 'gpt-5.4-pro');
   assert.equal(persisted.logicalRequest?.modelIntent, 'gpt-5.4-pro');
+  assert.equal(persisted.modelIntentProvenance?.confirmed, true);
   assert.equal(persisted.conversationUrl, 'https://chatgpt.com/g/g-p-agentify/c/model-intent-run');
   const projectsPath = path.join(stateDir, 'projects.json');
   const projectText = await fs.readFile(projectsPath, 'utf8').catch(() => '{}');
   assert.equal(JSON.parse(projectText).default?.modelIntent, undefined);
+});
+
+test('http-api: explicit model intent fails if controller returns without confirmation provenance', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-model-unconfirmed-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async ({ modelIntent }) => {
+      assert.equal(modelIntent, 'gpt-5.4-pro');
+      return { text: 'unconfirmed model answer', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/g/g-p-agentify/c/unconfirmed-model',
+    navigate: async () => {},
+    ensureReady: async () => ({ ok: true })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    updateTabMeta: () => {},
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false,
+      defaultProjectUrl: 'https://chatgpt.com/g/g-p-agentify/project'
+    }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'must confirm model', source: 'mcp', modelIntent: 'gpt-5.4-pro' }
+  });
+  assert.equal(response.res.status, 409);
+  assert.equal(response.data.error, 'model_intent_activation_failed');
+
+  const runs = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: { includeArchived: true } });
+  assert.equal(runs.res.status, 200);
+  assert.equal(runs.data.runs[0]?.status, 'error');
+  assert.equal(runs.data.runs[0]?.phase, 'failed');
+  assert.equal(runs.data.runs[0]?.modelIntent, 'gpt-5.4-pro');
 });
 
 test('http-api: runs list/get/archive expose durable query history', async (t) => {

@@ -110,6 +110,7 @@ function mapErrorToHttp(error) {
   if (msg === 'research_requires_chatgpt') return { code: 409, body: { error: 'research_requires_chatgpt', data: error?.data || null } };
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
+  if (msg === 'model_intent_activation_failed') return { code: 409, body: { error: 'model_intent_activation_failed', data: error?.data || null } };
   return null;
 }
 
@@ -1142,6 +1143,27 @@ export function startHttpApi({
     timeoutMs: Number(timeoutMs) || null
   });
 
+  const assertConfirmedModelIntent = ({ modelIntent, activeQuery }) => {
+    const targetIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
+    if (!targetIntent) return;
+    const provenance = activeQuery?.modelIntentProvenance || null;
+    const provenanceIntent = normalizeChatGptModelIntent(
+      provenance?.requestedIntent || provenance?.targetIntent || provenance?.activeIntent,
+      { fallback: null }
+    );
+    if (provenance?.confirmed === true && provenanceIntent === targetIntent) return;
+    const err = new Error('model_intent_activation_failed');
+    err.data = {
+      reason: 'model_intent_unconfirmed_after_query',
+      targetIntent,
+      state: {
+        phase: activeQuery?.phase || null,
+        modelIntentProvenance: provenance
+      }
+    };
+    throw err;
+  };
+
   const durableRunPatchFromActive = async (item) => {
     if (!item?.id) return;
     try {
@@ -1765,6 +1787,7 @@ export function startHttpApi({
             modelIntent: originalModelIntent
           });
         });
+        assertConfirmedModelIntent({ modelIntent: originalModelIntent, activeQuery: activeQueries.get(tabId) });
         const conversationUrl = typeof controller.getUrl === 'function'
           ? await controller.getUrl().catch(() => originalConversationUrl || null)
           : originalConversationUrl || null;
@@ -2415,6 +2438,7 @@ export function startHttpApi({
                   modelIntent
                 });
               });
+              assertConfirmedModelIntent({ modelIntent, activeQuery: activeQueries.get(tabId) });
               // Capture conversation URL after successful query
               const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
               if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
