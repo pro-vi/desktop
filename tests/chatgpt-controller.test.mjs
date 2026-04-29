@@ -133,6 +133,73 @@ test('chatgpt-controller: send avoids requestSubmit when no explicit send submit
   assert.equal(events.includes('key:Enter'), true);
 });
 
+test('chatgpt-controller: send ignores pre-existing global stop controls when the composer can send', async () => {
+  const events = [];
+  let waitForSendChecks = 0;
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('preExistingStopVisible')) {
+        return {
+          ok: true,
+          rect: { x: 320, y: 320, w: 30, h: 30 },
+          host: 'chatgpt.com',
+          promptLen: 8,
+          stopCount: 1,
+          preExistingStopVisible: true,
+          button: { label: 'send prompt', testId: 'send-button' },
+          candidateCount: 1
+        };
+      }
+      if (js.includes('already_generating')) return { ok: false, error: 'already_generating' };
+      if (js.includes('promptLen')) {
+        waitForSendChecks += 1;
+        return waitForSendChecks >= 2
+          ? { stopVisible: true, stopCount: 1, sendDisabled: true, promptLen: 0 }
+          : { stopVisible: true, stopCount: 1, sendDisabled: false, promptLen: 8 };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/';
+    },
+    async sendKey(key) {
+      events.push(`key:${key}`);
+    },
+    async insertText(text) {
+      events.push(`text:${text}`);
+    },
+    async moveMouse() {
+      events.push('moveMouse');
+    },
+    async mouseDown() {
+      events.push('mouseDown');
+    },
+    async mouseUp() {
+      events.push('mouseUp');
+    },
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.send({ text: 'agentify', timeoutMs: 5_000 });
+  assert.deepEqual(result, { ok: true });
+  assert.equal(events.includes('mouseDown'), true);
+  assert.equal(waitForSendChecks, 2);
+});
+
 test('chatgpt-controller: query does not accept unchanged fallback page text from an existing conversation', async () => {
   let waitForAssistantChecks = 0;
   const realNow = Date.now;
@@ -1550,6 +1617,99 @@ test('chatgpt-controller: image-generation queries keep waiting while fallback t
     const result = await controller.query({ prompt: 'make image', timeoutMs: 20_000, imageGeneration: true });
     assert.equal(result.text, 'Final image ready');
     assert.equal(waitForAssistantChecks >= 4, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: image-generation queries do not treat loader canvases as final images', async () => {
+  let waitForAssistantChecks = 0;
+  const realNow = Date.now;
+  let fakeNow = 5_000_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes("already_generating")) {
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        }
+        if (js.includes('return { count: nodes.length')) {
+          return { count: 0, lastText: '', pageText: '' };
+        }
+        if (js.includes('promptLen')) {
+          return { stopVisible: false, stopCount: 0, sendDisabled: true, promptLen: 0 };
+        }
+        if (js.includes('fallbackMainText')) {
+          waitForAssistantChecks += 1;
+          if (waitForAssistantChecks <= 5) {
+            return {
+              stop: false,
+              sendEnabled: true,
+              sendFound: true,
+              txt: 'Generating a more detailed image — hang tight.\\n\\nThinking',
+              count: 1,
+              usedFallback: false,
+              hasError: false,
+              hasContinue: false,
+              hasRegenerate: false,
+              isThinking: false,
+              imageCandidateCount: 1,
+              pageText: 'Generating a more detailed image — hang tight.\\n\\nThinking',
+              currentUrl: 'https://chatgpt.com/g/g-p-test/c/image-thread'
+            };
+          }
+          return {
+            stop: false,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Stopped thinking\\nEdit',
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            imageCandidateCount: 1,
+            pageText: 'Stopped thinking\\nEdit',
+            currentUrl: 'https://chatgpt.com/g/g-p-test/c/image-thread'
+          };
+        }
+        if (js.includes('const codes = Array.from')) {
+          return { codeBlocks: [] };
+        }
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/image-thread';
+      },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    const result = await controller.query({ prompt: 'make image', timeoutMs: 20_000, imageGeneration: true });
+    assert.equal(result.text, 'Stopped thinking\\nEdit');
+    assert.equal(waitForAssistantChecks >= 6, true);
   } finally {
     Date.now = realNow;
   }

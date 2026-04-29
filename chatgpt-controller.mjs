@@ -43,7 +43,7 @@ function looksLikeResearchShellText(value) {
   );
 }
 
-const IMAGE_PLACEHOLDER_RE = /(^|(?:\\n)|\n)\s*(creating|generating)\s+images?(?:\s*(?:\\n|\n|$))/i;
+const IMAGE_PLACEHOLDER_RE = /(^|(?:\\n)|\n)\s*(?:(?:creating|generating)\s+images?|(?:creating|generating)\b[^\n]{0,120}\bimages?)\b/i;
 const IMAGE_THINKING_LINE_RE = /(^|(?:\\n)|\n)\s*thinking(?:\s*(?:\\n|\n|$))/i;
 function extractConversationUrl(value) {
   const text = String(value || '').trim();
@@ -1850,11 +1850,12 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
-  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, initialPromptLen = 0 } = {}) {
+  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, initialPromptLen = 0, initialStopCount = 0 } = {}) {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea);
     const start = Date.now();
+    const baselineStopCount = Math.max(0, Number(initialStopCount) || 0);
     while (Date.now() - start < timeoutMs) {
       this.#throwIfStopRequested();
       const snap = await this.#eval(`(() => {
@@ -1864,7 +1865,8 @@ export class ChatGPTController {
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         };
-        const stopVisible = Array.from(document.querySelectorAll(${stopSel})).some(visible);
+        const stopCount = Array.from(document.querySelectorAll(${stopSel})).filter(visible).length;
+        const stopVisible = stopCount > 0;
         const send = Array.from(document.querySelectorAll(${sendSel})).find(visible);
         const sendDisabled = !!send && !!send.disabled;
 
@@ -1919,11 +1921,14 @@ export class ChatGPTController {
         } else if (prompt && (prompt.isContentEditable || prompt.getAttribute('contenteditable') === 'true' || prompt.getAttribute('role') === 'textbox')) {
           promptLen = String(prompt.innerText || prompt.textContent || '').trim().length;
         }
-        return { stopVisible, sendDisabled, promptLen };
+        return { stopVisible, stopCount, sendDisabled, promptLen };
       })()`);
 
       const promptChanged = Number.isFinite(initialPromptLen) && initialPromptLen > 0 && snap?.promptLen >= 0 && snap.promptLen < initialPromptLen;
-      if (snap?.stopVisible || snap?.sendDisabled || promptChanged) return true;
+      const stopAppeared = Number.isFinite(snap?.stopCount)
+        ? snap.stopCount > baselineStopCount
+        : (!!snap?.stopVisible && baselineStopCount === 0);
+      if (stopAppeared || snap?.sendDisabled || promptChanged) return true;
       await sleep(pollMs);
     }
     return false;
@@ -1935,12 +1940,6 @@ export class ChatGPTController {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     let lastSendDebug = null;
     const res = await this.#eval(`(() => {
-      const stop = Array.from(document.querySelectorAll(${stopSel})).find((n) => {
-        const r = n.getBoundingClientRect();
-        const style = window.getComputedStyle(n);
-        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      });
-      if (stop) return { ok:false, error:'already_generating' };
       const host = location.hostname || '';
       const visible = (n) => {
         const r = n.getBoundingClientRect();
@@ -2027,6 +2026,8 @@ export class ChatGPTController {
         }
         return best;
       };
+      const stopNodes = Array.from(document.querySelectorAll(${stopSel})).filter(visible);
+      const stopCount = stopNodes.length;
       const prompt = pickPrompt();
       const promptLen = prompt
         ? prompt.matches('textarea, input')
@@ -2086,7 +2087,8 @@ export class ChatGPTController {
           btn = n;
         }
       }
-      if (!btn) return { ok:true, fallbackEnter:true, requestSubmit: !!submitter, host, promptLen };
+      if (!btn && stopCount > 0 && !submitter) return { ok:false, error:'already_generating', host, promptLen, stopCount };
+      if (!btn) return { ok:true, fallbackEnter:true, requestSubmit: !!submitter, host, promptLen, stopCount, preExistingStopVisible: stopCount > 0 };
       const r = btn.getBoundingClientRect();
       return {
         ok:true,
@@ -2094,6 +2096,8 @@ export class ChatGPTController {
         requestSubmit: !!submitter,
         host,
         promptLen,
+        stopCount,
+        preExistingStopVisible: stopCount > 0,
         button: describeControl(btn),
         submitter: describeControl(submitter),
         composerHasForm: !!form,
@@ -2118,6 +2122,8 @@ export class ChatGPTController {
       requestSubmit: !!res?.requestSubmit,
       candidateCount: Number.isFinite(res?.candidateCount) ? res.candidateCount : null,
       composerHasForm: !!res?.composerHasForm,
+      preExistingStopVisible: !!res?.preExistingStopVisible,
+      initialStopCount: Number.isFinite(res?.stopCount) ? res.stopCount : 0,
       button: res?.button || null,
       submitter: res?.submitter || null
     };
@@ -2192,7 +2198,12 @@ export class ChatGPTController {
         submitted: !!submitted
       };
       await this.#emitProgress({ sendDebug: lastSendDebug });
-      sent = await this.#waitForSendSignal({ timeoutMs: 1800, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+      sent = await this.#waitForSendSignal({
+        timeoutMs: 1800,
+        pollMs: 120,
+        initialPromptLen: res?.promptLen || 0,
+        initialStopCount: res?.stopCount || 0
+      });
       lastSendDebug = {
         ...lastSendDebug,
         stage: 'request_submit_result',
@@ -2214,7 +2225,12 @@ export class ChatGPTController {
         };
         await this.#emitProgress({ sendDebug: lastSendDebug });
         await this.#clickAt(cx, cy);
-        sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+        sent = await this.#waitForSendSignal({
+          timeoutMs: 2200,
+          pollMs: 120,
+          initialPromptLen: res?.promptLen || 0,
+          initialStopCount: res?.stopCount || 0
+        });
         lastSendDebug = {
           ...lastSendDebug,
           stage: 'click_result',
@@ -2303,7 +2319,12 @@ export class ChatGPTController {
         submitted: !!submitAttempt
       };
       await this.#emitProgress({ sendDebug: lastSendDebug });
-      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+      sent = await this.#waitForSendSignal({
+        timeoutMs: 1400,
+        pollMs: 120,
+        initialPromptLen: res?.promptLen || 0,
+        initialStopCount: res?.stopCount || 0
+      });
       lastSendDebug = {
         ...lastSendDebug,
         stage: 'secondary_submit_result',
@@ -2395,7 +2416,12 @@ export class ChatGPTController {
         await this.#emitProgress({ sendDebug: lastSendDebug });
         await sleep(jitter(25, 90));
         await this.#sendKey(key, { modifiers });
-        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120, initialPromptLen: res?.promptLen || 0 });
+        sent = await this.#waitForSendSignal({
+          timeoutMs: 1500,
+          pollMs: 120,
+          initialPromptLen: res?.promptLen || 0,
+          initialStopCount: res?.stopCount || 0
+        });
         lastSendDebug = {
           ...lastSendDebug,
           stage: 'keypress_result',
@@ -2846,6 +2872,7 @@ export class ChatGPTController {
       const imagePlaceholder = IMAGE_PLACEHOLDER_RE.test(txt);
       const hasThinkingLine = IMAGE_THINKING_LINE_RE.test(txt);
       const thinking = !!snap?.isThinking || imagePlaceholder || (imageGeneration && !hasImageOutput && hasThinkingLine);
+      const finalImageOutput = hasImageOutput && !(imageGeneration && thinking);
       const conversationUrl = extractConversationUrl(snap?.currentUrl || '');
       if (conversationUrl && conversationUrl !== emittedConversationUrl) {
         emittedConversationUrl = conversationUrl;
@@ -2902,8 +2929,8 @@ export class ChatGPTController {
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
       const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !thinking);
       const fallbackReady = fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
-      const contentReady = readyByNodes || fallbackReady || hasImageOutput || snap?.hasError;
-      const responseReady = snap?.hasError || (imageGeneration ? (hasImageOutput || (txt.length > 0 && !thinking)) : txt.length > 0);
+      const contentReady = readyByNodes || fallbackReady || finalImageOutput || snap?.hasError;
+      const responseReady = snap?.hasError || (imageGeneration ? (finalImageOutput || (txt.length > 0 && !thinking)) : txt.length > 0);
       const done = newResponseSeen && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
         (!generating && !thinking && fallbackStableLongEnough && contentReady));
