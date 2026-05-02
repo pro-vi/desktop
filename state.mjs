@@ -37,6 +37,7 @@ export function defaultSettings() {
     chromeProfileName: 'Default',
 
     // Governor defaults (intentionally conservative).
+    maxTabs: 24,
     maxInflightQueries: 2,
     maxQueriesPerMinute: 12,
     minTabGapMs: 1200,
@@ -81,6 +82,7 @@ export function normalizeSettings(input) {
       : d.chromeProfileMode,
     chromeProfileName:
       typeof s.chromeProfileName === 'string' && s.chromeProfileName.trim() ? s.chromeProfileName.trim() : d.chromeProfileName,
+    maxTabs: clampInt(s.maxTabs, { min: 1, max: 50, fallback: d.maxTabs }),
     maxInflightQueries: clampInt(s.maxInflightQueries, { min: 1, max: 12, fallback: d.maxInflightQueries }),
     maxQueriesPerMinute: clampInt(s.maxQueriesPerMinute, { min: 1, max: 600, fallback: d.maxQueriesPerMinute }),
     minTabGapMs: clampMs(s.minTabGapMs, { min: 0, max: 60_000, fallback: d.minTabGapMs }),

@@ -37,7 +37,7 @@ export class TabManager {
   constructor({ browserBackend, createController, maxTabs = 12, onNeedsAttention, onChanged }) {
     this.browserBackend = browserBackend;
     this.createController = createController;
-    this.maxTabs = Math.max(1, Number(maxTabs) || 12);
+    this.maxTabs = Math.max(1, Math.floor(Number(maxTabs) || 12));
     this.onNeedsAttention = onNeedsAttention;
     this.onChanged = typeof onChanged === 'function' ? onChanged : null;
 
@@ -46,6 +46,12 @@ export class TabManager {
     this.forcedFocusTabs = new Set();
     this.mutex = new Mutex();
     this.quitting = false;
+  }
+
+  setMaxTabs(maxTabs) {
+    this.maxTabs = Math.max(1, Math.floor(Number(maxTabs) || this.maxTabs || 12));
+    this.onChanged?.();
+    return this.maxTabs;
   }
 
   setQuitting(v = true) {

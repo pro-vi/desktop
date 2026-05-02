@@ -27,7 +27,7 @@ function configPath(stateDir) {
 export function defaultConfig() {
   return {
     showTabsByDefault: false,
-    maxTabs: 12,
+    maxTabs: 24,
     maxParallelQueries: 6,
     minQueryGapMs: 250,
     minQueryGapMsGlobal: 100,
@@ -63,4 +63,3 @@ export async function writeConfig(nextConfig, stateDir) {
   await atomicWriteFile(configPath(stateDir), `${JSON.stringify(cleaned, null, 2)}\n`, { mode: 0o600 });
   return cleaned;
 }
-

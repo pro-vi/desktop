@@ -48,6 +48,14 @@ function buildChromeUserAgent() {
   return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
 }
 
+function resolveMaxTabs(settings) {
+  const fromEnv = Number(process.env.AGENTIFY_DESKTOP_MAX_TABS || '');
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  const fromSettings = Number(settings?.maxTabs);
+  if (Number.isFinite(fromSettings) && fromSettings > 0) return Math.floor(fromSettings);
+  return defaultSettings().maxTabs;
+}
+
 async function loadSelectors(stateDir) {
   const defaults = JSON.parse(await fs.readFile(path.join(__dirname, 'selectors.json'), 'utf8'));
   const overridePath = path.join(stateDir, 'selectors.override.json');
@@ -217,7 +225,7 @@ async function main() {
 
   const tabs = new TabManager({
     browserBackend,
-    maxTabs: Number(process.env.AGENTIFY_DESKTOP_MAX_TABS || 12),
+    maxTabs: resolveMaxTabs(settings),
     onNeedsAttention,
     onChanged: emitTabsChanged,
     createController: async ({ tabId, page }) => {
@@ -320,6 +328,7 @@ async function main() {
       ok: true,
       vendors,
       tabs: tabs.listTabs(),
+      maxTabs: tabs.maxTabs,
       defaultTabId,
       stateDir,
       browserBackend: browserBackendKind,
@@ -336,11 +345,13 @@ async function main() {
   ipcMain.handle('agentify:setSettings', async (_evt, args) => {
     if (args?.reset) {
       settings = await writeSettings(defaultSettings(), stateDir);
+      tabs.setMaxTabs(resolveMaxTabs(settings));
       return settings;
     }
     const next = { ...settings };
     const has = (k) => Object.prototype.hasOwnProperty.call(args || {}, k);
     if (has('maxInflightQueries')) next.maxInflightQueries = args.maxInflightQueries;
+    if (has('maxTabs')) next.maxTabs = args.maxTabs;
     if (has('maxQueriesPerMinute')) next.maxQueriesPerMinute = args.maxQueriesPerMinute;
     if (has('minTabGapMs')) next.minTabGapMs = args.minTabGapMs;
     if (has('minGlobalGapMs')) next.minGlobalGapMs = args.minGlobalGapMs;
@@ -358,6 +369,7 @@ async function main() {
     if (has('defaultImageKey')) next.defaultImageKey = args.defaultImageKey;
     if (args?.acknowledge) next.acknowledgedAt = new Date().toISOString();
     settings = await writeSettings(next, stateDir);
+    tabs.setMaxTabs(resolveMaxTabs(settings));
     return settings;
   });
 

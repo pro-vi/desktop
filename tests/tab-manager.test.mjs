@@ -3,6 +3,34 @@ import assert from 'node:assert/strict';
 
 import { TabManager } from '../tab-manager.mjs';
 
+function stubBrowserBackend() {
+  return {
+    async createSession() {
+      return {
+        page: {},
+        presenter: {},
+        isClosed: () => false,
+        close: async () => {}
+      };
+    }
+  };
+}
+
+test('tab-manager: setMaxTabs raises the live creation cap', async () => {
+  const manager = new TabManager({
+    browserBackend: stubBrowserBackend(),
+    maxTabs: 1,
+    createController: async () => ({})
+  });
+
+  await manager.createTab({ key: 'one' });
+  await assert.rejects(async () => await manager.createTab({ key: 'two' }), /max_tabs_reached/);
+
+  assert.equal(manager.setMaxTabs(2), 2);
+  await manager.createTab({ key: 'two' });
+  assert.equal(manager.listTabs().length, 2);
+});
+
 test('tab-manager: ensureTab rejects vendor mismatch using URL fallback when stored vendorId is missing', async () => {
   const sessions = new Map();
   const browserBackend = {

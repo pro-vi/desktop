@@ -148,6 +148,7 @@ function defaultState() {
     vendors: [...fallbackVendors],
     tabs: [],
     defaultTabId: null,
+    maxTabs: 24,
     stateDir: '',
     browserBackend: 'electron',
     browser: null,
@@ -162,6 +163,7 @@ function defaultSettings() {
     chromeExecutablePath: null,
     chromeProfileMode: 'isolated',
     chromeProfileName: 'Default',
+    maxTabs: 24,
     maxInflightQueries: 2,
     maxQueriesPerMinute: 12,
     minTabGapMs: 0,
@@ -592,12 +594,13 @@ async function refresh() {
     const runsSummary = ` • Runs: ${runs.length}`;
     const liveSummary = hasLiveUpdates ? 'Live updates on' : 'Polling every 3s';
     const refreshedSummary = lastRefreshAt ? ` • Refreshed ${new Date(lastRefreshAt).toLocaleTimeString()}` : '';
-    statusText(`Backend: ${browserSummary} • Tabs: ${tabs.length}${runningSummary}${runsSummary} • ${liveSummary}${refreshedSummary} • State: ${lastState.stateDir || ''}`);
+    statusText(`Backend: ${browserSummary} • Tabs: ${tabs.length}/${lastState.maxTabs || settings.maxTabs || 24}${runningSummary}${runsSummary} • ${liveSummary}${refreshedSummary} • State: ${lastState.stateDir || ''}`);
 
   // Settings UI.
     el('setBrowserBackend').value = settings.browserBackend || 'electron';
     el('setChromeProfileMode').value = settings.chromeProfileMode || 'isolated';
     el('setChromeProfileName').value = settings.chromeProfileName || 'Default';
+    setNum('setMaxTabs', settings.maxTabs);
     setNum('setMaxInflight', settings.maxInflightQueries);
     setNum('setQpm', settings.maxQueriesPerMinute);
     setNum('setTabGap', settings.minTabGapMs);
@@ -740,6 +743,7 @@ async function main() {
           browserBackend: String(el('setBrowserBackend').value || 'electron').trim() || 'electron',
           chromeProfileMode: String(el('setChromeProfileMode').value || 'isolated').trim() || 'isolated',
           chromeProfileName: String(el('setChromeProfileName').value || 'Default').trim() || 'Default',
+          maxTabs: num('setMaxTabs', 24),
           maxInflightQueries: num('setMaxInflight', 2),
           maxQueriesPerMinute: num('setQpm', 12),
           minTabGapMs: num('setTabGap', 0),
