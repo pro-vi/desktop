@@ -48,7 +48,10 @@ export function normalizeUiText(value) {
 
 export function isBlockedUiLabel(label) {
   const text = normalizeUiText(label);
-  return /\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text);
+  return (
+    /\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text) ||
+    /project-modal-trigger|open project icon|open conversation options|selected icon|icon color|\blight mode\b|\bdark mode\b/.test(text)
+  );
 }
 
 export function normalizeModeIntentToken(value) {
@@ -165,6 +168,7 @@ export function isProjectModelModeControlDescriptor(descriptor = {}) {
 
 export function scoreModeTriggerCandidate(candidate = {}) {
   const label = normalizeUiText(candidate.label);
+  if (!label || isBlockedUiLabel(label)) return -1;
   const intent = candidate.intent || modeIntentForLabel(label);
   const targetIntent = normalizeModeIntentToken(candidate.targetIntent);
   const area = Math.max(0, Number(candidate.area) || 0);
@@ -221,6 +225,21 @@ export function scoreModeOptionCandidate(candidate = {}) {
   if (score >= 0 && width > 600) score -= 60;
   if (score >= 0 && label.length > 180) score -= 120;
   return score;
+}
+
+export function modeTriggerConfirmsActive(candidate = {}) {
+  const label = normalizeUiText(candidate.label);
+  const intent = candidate.intent || modeIntentForLabel(label);
+  const targetIntent = normalizeModeIntentToken(candidate.targetIntent);
+  if (!intent || intent !== targetIntent) return false;
+  if (candidate.active) return true;
+  if (candidate.menuOpen) return false;
+  if (!candidate.modeRegion) return false;
+  return (
+    !!candidate.highConfidence ||
+    !!candidate.inComposer ||
+    Math.max(0, Number(candidate.promptProximityBoost) || 0) >= 80
+  );
 }
 
 export function scoreModelTriggerCandidate(candidate = {}) {
@@ -385,12 +404,14 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${isHighConfidenceModeControlDescriptor.toString()}
     ${scoreModeTriggerCandidate.toString()}
     ${scoreModeOptionCandidate.toString()}
+    ${modeTriggerConfirmsActive.toString()}
     return {
       modeIntentForLabel,
       modePickerControlText: modelPickerControlText,
       isHighConfidenceModeControlDescriptor,
       scoreModeTriggerCandidate,
-      scoreModeOptionCandidate
+      scoreModeOptionCandidate,
+      modeTriggerConfirmsActive
     };
   })();
 `;

@@ -637,7 +637,7 @@ export class ChatGPTController {
           ].join(':');
         const menuRoots = uniq([
           ...queryAll(${menuSel}),
-          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [role="dialog"], [role="alertdialog"]'))
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-select-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [data-slot="popover-content"], [data-slot="dropdown-menu-content"], [popover], [role="dialog"], [role="alertdialog"]'))
         ]).filter(visible);
         const insideMenu = (node) => menuRoots.some((root) => root === node || root.contains(node));
         const promptCandidates = uniq([
@@ -724,8 +724,8 @@ export class ChatGPTController {
         ]).filter(visible);
         const triggerPool = uniq([
           ...queryAll(${buttonSel}),
-          ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]')),
-          ...Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]'))
+          ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], [aria-haspopup], [aria-expanded], [data-testid*="model" i], [data-testid*="mode" i], summary, [tabindex="0"]')),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], [aria-haspopup], [aria-expanded], [data-testid*="model" i], [data-testid*="mode" i], summary, [tabindex="0"]'))
         ]).filter((n) => visible(n) && !insideMenu(n));
         const activeModel = uniq([...explicitActiveNodes, ...triggerPool])
           .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)), rect: rectOf(n), active: isActive(n) }))
@@ -1208,7 +1208,7 @@ export class ChatGPTController {
           ].join(':');
         const menuRoots = uniq([
           ...queryAll(${menuSel}),
-          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [role="dialog"], [role="alertdialog"]'))
+          ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-select-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [data-slot="popover-content"], [data-slot="dropdown-menu-content"], [popover], [role="dialog"], [role="alertdialog"]'))
         ]).filter(visible);
         const insideMenu = (node) => menuRoots.some((root) => root === node || root.contains(node));
         const promptCandidates = uniq([
@@ -1301,8 +1301,8 @@ export class ChatGPTController {
         }
         const triggerPool = uniq([
           ...queryAll(${buttonSel}),
-          ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]')),
-          ...Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], summary, [tabindex="0"]'))
+          ...Array.from((composerRoot || document).querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], [aria-haspopup], [aria-expanded], [data-testid*="model" i], [data-testid*="mode" i], summary, [tabindex="0"]')),
+          ...Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"], [aria-haspopup], [aria-expanded], [data-testid*="model" i], [data-testid*="mode" i], summary, [tabindex="0"]'))
         ]).filter((n) => visible(n) && !insideMenu(n));
         const optionPool = uniq([
           ...queryAll(${optionSel}),
@@ -1354,23 +1354,36 @@ export class ChatGPTController {
               height: rect.h,
               y: rect.y
             });
-            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modeRegion, highConfidence };
+            return { node, label, intent, score, active: isActive(node), rect, signature: signatureOf(rect, label), modeRegion, highConfidence, promptProximityBoost };
           })
           .filter((item) => !blockedTriggerSignatures.has(item.signature))
           .filter((item) => item.score >= 0)
           .sort((a, b) => b.score - a.score);
-        const activeTrigger = triggerCandidates.find((item) => item.active && item.intent) || null;
-        if (activeTrigger?.intent === targetIntent) {
+        const ariaActiveTrigger = triggerCandidates.find((item) => item.active && item.intent) || null;
+        const confirmedTargetTrigger = triggerCandidates.find((item) =>
+          modePickerPrimitives.modeTriggerConfirmsActive({
+            label: item.label,
+            intent: item.intent,
+            targetIntent,
+            active: item.active,
+            highConfidence: item.highConfidence,
+            modeRegion: item.modeRegion,
+            inComposer: !!(composerRoot && composerRoot.contains(item.node)),
+            promptProximityBoost: item.promptProximityBoost,
+            menuOpen: menuRoots.length > 0
+          })
+        ) || null;
+        if (confirmedTargetTrigger) {
           return {
             active: true,
             action: 'none',
-            reason: 'mode_already_active',
+            reason: confirmedTargetTrigger.active ? 'mode_already_active' : 'mode_visible_trigger_active',
             targetIntent,
-            activeIntent: activeTrigger.intent,
-            label: activeTrigger.label || null
+            activeIntent: confirmedTargetTrigger.intent,
+            label: confirmedTargetTrigger.label || null
           };
         }
-        if (clickedRecently) {
+        if (clickedRecently && !menuRoots.length) {
           const targetTrigger = triggerCandidates.find((item) => item.intent === targetIntent) || null;
           if (targetTrigger) {
             return {
@@ -1413,7 +1426,7 @@ export class ChatGPTController {
             action: 'pointer_option',
             reason: 'clicked_mode_option',
             targetIntent,
-            activeIntent: activeTrigger?.intent || null,
+            activeIntent: ariaActiveTrigger?.intent || null,
             label: targetOption.label || null,
             rect: targetOption.rect,
             menuOpen: true,
@@ -1429,7 +1442,7 @@ export class ChatGPTController {
             action: 'pointer_trigger',
             reason: 'clicked_mode_trigger',
             targetIntent,
-            activeIntent: activeTrigger?.intent || null,
+            activeIntent: ariaActiveTrigger?.intent || null,
             label: trigger.label || null,
             rect: trigger.rect,
             signature: trigger.signature,
@@ -1449,7 +1462,7 @@ export class ChatGPTController {
           action: 'none',
           reason: 'mode_controls_not_found',
           targetIntent,
-          activeIntent: activeTrigger?.intent || null,
+          activeIntent: ariaActiveTrigger?.intent || null,
           menuOpen: menuRoots.length > 0,
           menuText,
           optionHints,
@@ -1523,8 +1536,8 @@ export class ChatGPTController {
         .some(b => /verify you are human|human verification|i am human/i.test((b.textContent || '').trim()));
 
       const looks403 = /\\b403\\b|access denied|forbidden|unusual traffic|verify/i.test(bodyText) && !/prompt/i.test(bodyText);
-      const loginLike = !!document.querySelector('input[type=\"password\"], input[name=\"password\"], input[autocomplete=\"current-password\"]')
-        || /log in|sign in|continue with/i.test(bodyText);
+      const hasAuthInput = !!document.querySelector('input[type=\"password\"], input[name=\"password\"], input[autocomplete=\"current-password\"]');
+      const hasLoginText = /log in|sign in|continue with/i.test(bodyText);
 
       const rawPromptVisible = (() => {
         const pickPrompt = (nodes) => {
@@ -1598,7 +1611,8 @@ export class ChatGPTController {
           return /send|submit|run|go|ask|reply/.test(label) || n.matches('[data-testid=\"send-button\"], [aria-label=\"Send prompt\"], [aria-label=\"Send\"]');
         });
       })();
-      const promptVisible = rawPromptVisible && (!loginLike || sendVisible);
+      const loginLike = hasAuthInput || (!rawPromptVisible && hasLoginText);
+      const promptVisible = rawPromptVisible && (!hasAuthInput || sendVisible);
 
       const blocked = hasTurnstile || hasArkose || hasVerifyButton || looks403 || (loginLike && !promptVisible);
       const kind = (hasTurnstile || hasArkose || hasVerifyButton) ? 'captcha' : (loginLike ? 'login' : (looks403 ? 'blocked' : null));
@@ -1928,7 +1942,8 @@ export class ChatGPTController {
       const stopAppeared = Number.isFinite(snap?.stopCount)
         ? snap.stopCount > baselineStopCount
         : (!!snap?.stopVisible && baselineStopCount === 0);
-      if (stopAppeared || snap?.sendDisabled || promptChanged) return true;
+      const disabledWithoutPromptRead = !!snap?.sendDisabled && !(snap?.promptLen >= 0);
+      if (stopAppeared || promptChanged || disabledWithoutPromptRead) return true;
       await sleep(pollMs);
     }
     return false;
@@ -2802,6 +2817,7 @@ export class ChatGPTController {
     let continueClicks = 0;
     let generationObserved = false;
     let emittedConversationUrl = null;
+    let lastWaitDebugAt = 0;
 
     while (Date.now() - start < effectiveTimeoutMs) {
       this.#throwIfStopRequested();
@@ -2877,6 +2893,25 @@ export class ChatGPTController {
       if (conversationUrl && conversationUrl !== emittedConversationUrl) {
         emittedConversationUrl = conversationUrl;
         await this.#emitProgress({ conversationUrl });
+      }
+      if (Date.now() - lastWaitDebugAt >= 10_000) {
+        lastWaitDebugAt = Date.now();
+        await this.#emitProgress({
+          responseDebug: {
+            elapsedMs: Date.now() - start,
+            count: snap?.count || 0,
+            usedFallback: !!snap?.usedFallback,
+            stop: !!snap?.stop,
+            sendFound: !!snap?.sendFound,
+            sendEnabled: !!snap?.sendEnabled,
+            thinking,
+            hasContinue: !!snap?.hasContinue,
+            hasError: !!snap?.hasError,
+            currentUrl: snap?.currentUrl || null,
+            textPreview: clipText(txt, 180) || null,
+            pageTextChanged: pageText !== preSendPageText
+          }
+        });
       }
       const assistantAdvanced = (snap?.count || 0) > preSendCount || ((snap?.count || 0) > 0 && txt !== preSendText);
       const pageChanged = pageText !== preSendPageText;
@@ -2991,22 +3026,24 @@ export class ChatGPTController {
         });
       }
       await this.#attachFiles(attachments);
-      await this.#typePrompt(prompt);
       // Snapshot existing assistant messages before sending, so #waitForAssistantStable
-      // can distinguish pre-existing responses from the new one.
+      // can distinguish pre-existing responses from the new one. Capture this before
+      // typing: on some ChatGPT pages fallback text includes the composer, so prompt
+      // staging/clearing can otherwise masquerade as assistant progress.
       const assistantSel = JSON.stringify(this.selectors.assistantMessage);
-      const preSend = await this.#eval(`(() => {
+      const prePrompt = await this.#eval(`(() => {
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
         const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
       })()`);
+      await this.#typePrompt(prompt);
       await this.#clickSend();
       return await this.#waitForAssistantStable({
         timeoutMs,
-        preSendCount: preSend?.count || 0,
-        preSendText: preSend?.lastText || '',
-        preSendPageText: preSend?.pageText || '',
+        preSendCount: prePrompt?.count || 0,
+        preSendText: prePrompt?.lastText || '',
+        preSendPageText: prePrompt?.pageText || '',
         imageGeneration
       });
     } finally {

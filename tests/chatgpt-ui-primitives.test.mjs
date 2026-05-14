@@ -10,6 +10,7 @@ import {
   isModeOnlyModelPickerState,
   isProjectModelModeControlDescriptor,
   isProjectOptionsControlDescriptor,
+  modeTriggerConfirmsActive,
   modeIntentForLabel,
   modeIntentLabelLooksUsable,
   modelIntentForLabel,
@@ -427,6 +428,44 @@ test('chatgpt-ui-primitives: scores mode triggers with composer and prompt boost
   assert.equal(genericHeader > activeNonTarget, true);
 });
 
+test('chatgpt-ui-primitives: visible composer mode chip can confirm active mode', () => {
+  assert.equal(
+    modeTriggerConfirmsActive({
+      label: 'Extended Pro',
+      intent: 'extended-pro',
+      targetIntent: 'extended-pro',
+      modeRegion: true,
+      inComposer: true,
+      promptProximityBoost: 160,
+      menuOpen: false
+    }),
+    true
+  );
+  assert.equal(
+    modeTriggerConfirmsActive({
+      label: 'Extended Pro',
+      intent: 'extended-pro',
+      targetIntent: 'extended-pro',
+      modeRegion: true,
+      inComposer: true,
+      promptProximityBoost: 160,
+      menuOpen: true
+    }),
+    false
+  );
+  assert.equal(
+    modeTriggerConfirmsActive({
+      label: 'Extended Pro, click to remove',
+      targetIntent: 'extended-pro',
+      modeRegion: true,
+      inComposer: true,
+      promptProximityBoost: 160,
+      menuOpen: false
+    }),
+    false
+  );
+});
+
 test('chatgpt-ui-primitives: rejects off-region mode triggers and scores mode options', () => {
   assert.equal(
     scoreModeTriggerCandidate({
@@ -435,6 +474,30 @@ test('chatgpt-ui-primitives: rejects off-region mode triggers and scores mode op
       targetIntent: 'thinking',
       modeRegion: false,
       highConfidence: false,
+      area: 4_000,
+      width: 140,
+      height: 32,
+      y: 880
+    }),
+    -1
+  );
+  assert.equal(
+    scoreModeTriggerCandidate({
+      label: 'Open project icon and color menu. Selected icon: folder. Selected icon color: default color, black in light mode, white in dark mode. project-modal-trigger',
+      targetIntent: 'instant',
+      modeRegion: true,
+      area: 4_000,
+      width: 140,
+      height: 32,
+      y: 880
+    }),
+    -1
+  );
+  assert.equal(
+    scoreModeTriggerCandidate({
+      label: 'Open conversation options for nonce mode-switch test',
+      targetIntent: 'extended-pro',
+      modeRegion: true,
       area: 4_000,
       width: 140,
       height: 32,
@@ -474,5 +537,6 @@ test('chatgpt-ui-primitives: exposes mode browser evaluator source and pending t
   assert.equal(shouldTrackPendingModeTrigger({ action: 'pointer_option', signature: 'x' }), false);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modePickerPrimitives/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /scoreModeTriggerCandidate/);
+  assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modeTriggerConfirmsActive/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /isHighConfidenceModeControlDescriptor/);
 });

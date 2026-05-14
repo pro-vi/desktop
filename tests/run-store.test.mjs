@@ -113,6 +113,33 @@ test('run-store: terminal success cannot retain an in-flight phase', async () =>
   assert.equal(persisted.phase, 'completed');
 });
 
+test('run-store: stale in-flight runs can be finalized after restart', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-stale-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({
+    id: 'run-stale',
+    kind: 'query',
+    source: 'mcp',
+    status: 'running',
+    phase: 'waiting_for_response',
+    startedAt: Date.now()
+  });
+
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  const finalized = await reloaded.finalizeStaleRunning({
+    status: 'stopped',
+    detail: 'Interrupted by restart.'
+  });
+
+  assert.equal(finalized.length, 1);
+  assert.equal(finalized[0].status, 'stopped');
+  assert.equal(finalized[0].phase, 'stopped');
+  assert.equal(finalized[0].detail, 'Interrupted by restart.');
+  assert.equal(typeof finalized[0].finishedAt, 'number');
+});
+
 test('run-store: queued writes keep finalized runs terminal on disk', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-queue-'));
   let writeCount = 0;

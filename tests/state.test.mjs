@@ -36,7 +36,7 @@ test('state: normalizeSettings defaults allowAuthPopups to true', () => {
   assert.equal(s.chromeDebugPort, 9222);
   assert.equal(s.chromeProfileMode, 'isolated');
   assert.equal(s.chromeProfileName, 'Default');
-  assert.equal(s.maxTabs, 24);
+  assert.equal(s.maxTabs, 50);
   assert.equal(s.defaultProjectUrl, null);
   assert.equal(s.defaultChatModeIntent, DEFAULT_CHAT_MODE_INTENT);
   assert.equal(s.defaultImageProjectUrl, null);
@@ -60,10 +60,10 @@ test('state: writeSettings persists allowAuthPopups', async () => {
 
 test('state: writeSettings persists and clamps maxTabs', async () => {
   const dir = await tempDir();
-  const saved = await writeSettings({ maxTabs: 80 }, dir);
-  assert.equal(saved.maxTabs, 50);
+  const saved = await writeSettings({ maxTabs: 120 }, dir);
+  assert.equal(saved.maxTabs, 100);
   const re = await readSettings(dir);
-  assert.equal(re.maxTabs, 50);
+  assert.equal(re.maxTabs, 100);
 });
 
 test('state: writeSettings persists default image project URL', async () => {

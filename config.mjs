@@ -27,7 +27,7 @@ function configPath(stateDir) {
 export function defaultConfig() {
   return {
     showTabsByDefault: false,
-    maxTabs: 24,
+    maxTabs: 50,
     maxParallelQueries: 6,
     minQueryGapMs: 250,
     minQueryGapMsGlobal: 100,
@@ -40,7 +40,7 @@ export function sanitizeConfig(raw = {}) {
   const obj = raw && typeof raw === 'object' ? raw : {};
   return {
     showTabsByDefault: asBool(obj.showTabsByDefault, d.showTabsByDefault),
-    maxTabs: clampNumber(obj.maxTabs, { min: 1, max: 50, fallback: d.maxTabs }),
+    maxTabs: clampNumber(obj.maxTabs, { min: 1, max: 100, fallback: d.maxTabs }),
     maxParallelQueries: clampNumber(obj.maxParallelQueries, { min: 1, max: 50, fallback: d.maxParallelQueries }),
     minQueryGapMs: clampNumber(obj.minQueryGapMs, { min: 0, max: 30_000, fallback: d.minQueryGapMs }),
     minQueryGapMsGlobal: clampNumber(obj.minQueryGapMsGlobal, { min: 0, max: 30_000, fallback: d.minQueryGapMsGlobal }),

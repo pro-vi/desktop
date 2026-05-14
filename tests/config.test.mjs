@@ -24,6 +24,11 @@ test('config: sanitizeConfig clamps and defaults', () => {
   assert.equal(cleaned.queryGapMaxWaitMs, 120000);
 });
 
+test('config: maxTabs allows larger persistent tab pools', () => {
+  const cleaned = sanitizeConfig({ maxTabs: 120 });
+  assert.equal(cleaned.maxTabs, 100);
+});
+
 test('config: readConfig returns defaults when missing/invalid', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-desktop-config-'));
   const cfg = await readConfig(dir);
@@ -40,4 +45,3 @@ test('config: writeConfig persists sanitized values', async () => {
   const re = await readConfig(dir);
   assert.deepEqual(re, saved);
 });
-

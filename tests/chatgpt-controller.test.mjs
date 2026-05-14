@@ -39,7 +39,7 @@ test('chatgpt-controller: send falls back to requestSubmit on the active compose
         events.push('requestSubmit');
         return true;
       }
-      if (js.includes('already_generating')) return { ok: true, requestSubmit: true, host: 'chatgpt.com' };
+      if (js.includes('already_generating')) return { ok: true, requestSubmit: true, host: 'chatgpt.com', promptLen: 7 };
       if (js.includes('promptLen')) {
         waitForSendChecks += 1;
         return waitForSendChecks >= 2
@@ -247,6 +247,86 @@ test('chatgpt-controller: query does not accept unchanged fallback page text fro
       },
       async sendKey() {},
       async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    await assert.rejects(
+      controller.query({ prompt: 'agentify', timeoutMs: 20_000 }),
+      /timeout_waiting_for_response/
+    );
+    assert.equal(waitForAssistantChecks >= 1, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: query does not accept composer clearing as assistant progress', async () => {
+  let waitForAssistantChecks = 0;
+  let typed = false;
+  const realNow = Date.now;
+  let fakeNow = 1_500_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes("already_generating")) {
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        }
+        if (js.includes('return { count: nodes.length')) {
+          return {
+            count: 1,
+            lastText: typed ? 'Existing assistant reply agentify' : 'Existing assistant reply',
+            pageText: typed ? 'Existing assistant reply agentify' : 'Existing assistant reply'
+          };
+        }
+        if (js.includes('promptLen')) {
+          return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+        }
+        if (js.includes('fallbackMainText')) {
+          waitForAssistantChecks += 1;
+          return {
+            stop: false,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Existing assistant reply',
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            pageText: 'Existing assistant reply'
+          };
+        }
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/existing';
+      },
+      async sendKey() {},
+      async insertText() {
+        typed = true;
+      },
       async moveMouse() {},
       async mouseDown() {},
       async mouseUp() {},

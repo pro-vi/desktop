@@ -237,11 +237,31 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
       .map((item) => toSummary(item));
   }
 
+  async function finalizeStaleRunning({ status = 'stopped', detail = 'Interrupted by desktop restart.' } = {}) {
+    const stale = Array.from(records.values()).filter((item) =>
+      !item.finishedAt && ['queued', 'running', 'blocked'].includes(String(item.status || '').trim().toLowerCase())
+    );
+    const finalized = [];
+    for (const item of stale) {
+      finalized.push(await finalize(item.id, {
+        status,
+        detail,
+        blocked: false,
+        blockedKind: null,
+        blockedTitle: null,
+        stopRequested: item.stopRequested || status === 'stopped',
+        stopRequestedAt: item.stopRequestedAt || Date.now()
+      }));
+    }
+    return finalized;
+  }
+
   return {
     load,
     create,
     patch,
     finalize,
+    finalizeStaleRunning,
     archive,
     get,
     list

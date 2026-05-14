@@ -765,7 +765,11 @@ export function startHttpApi({
       onRunsChanged?.(runsSnapshot());
     } catch {}
   };
-  const runsReady = runStore.load().then(() => {
+  const runsReady = runStore.load().then(async () => {
+    await runStore.finalizeStaleRunning?.({
+      status: 'stopped',
+      detail: 'Interrupted by Agentify Desktop restart.'
+    });
     emitRunsChanged();
   });
 
