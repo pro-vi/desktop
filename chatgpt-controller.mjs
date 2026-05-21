@@ -2454,6 +2454,7 @@ export class ChatGPTController {
       err.data = { host: res?.host || null, sendDebug: lastSendDebug || null };
       throw err;
     }
+    return lastSendDebug;
   }
 
   async #attachFiles(files) {
@@ -2793,6 +2794,7 @@ export class ChatGPTController {
     preSendCount = 0,
     preSendText = '',
     preSendPageText = '',
+    preSendStopCount = 0,
     minimumTimeoutMs = 0,
     minimumStableMs = 0,
     extraThinkingPattern = '',
@@ -2818,16 +2820,22 @@ export class ChatGPTController {
     let generationObserved = false;
     let emittedConversationUrl = null;
     let lastWaitDebugAt = 0;
+    const baselineStopCount = Math.max(0, Number(preSendStopCount) || 0);
 
     while (Date.now() - start < effectiveTimeoutMs) {
       this.#throwIfStopRequested();
       const snap = await this.#eval(`(() => {
         const extraThinkingRe = ${extraThinkingSource} ? new RegExp(${extraThinkingSource}, 'i') : null;
-        const stop = !!document.querySelector(${stopSel});
-        const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
+        const visible = (n) => {
+          if (!n) return false;
           const r = n.getBoundingClientRect();
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const stopCount = Array.from(document.querySelectorAll(${stopSel})).filter(visible).length;
+        const stop = stopCount > 0;
+        const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
+          return visible(n);
         });
         const sendEnabled = send ? !send.disabled : false;
         const sendFound = !!send;
@@ -2867,6 +2875,7 @@ export class ChatGPTController {
         const isThinking = thinkingBanner || isImagePlaceholder || (${imageGenerationSource} && imageCandidateCount === 0 && hasThinkingLine);
         return {
           stop,
+          stopCount,
           sendEnabled,
           sendFound,
           txt,
@@ -2884,6 +2893,10 @@ export class ChatGPTController {
 
       const txt = String(snap?.txt || '');
       const pageText = String(snap?.pageText || '');
+      const stopCount = Number.isFinite(Number(snap?.stopCount))
+        ? Math.max(0, Number(snap.stopCount))
+        : (snap?.stop ? 1 : 0);
+      const activeStop = stopCount > baselineStopCount || (!!snap?.stop && baselineStopCount === 0);
       const hasImageOutput = Number(snap?.imageCandidateCount || 0) > 0;
       const imagePlaceholder = IMAGE_PLACEHOLDER_RE.test(txt);
       const hasThinkingLine = IMAGE_THINKING_LINE_RE.test(txt);
@@ -2901,7 +2914,10 @@ export class ChatGPTController {
             elapsedMs: Date.now() - start,
             count: snap?.count || 0,
             usedFallback: !!snap?.usedFallback,
-            stop: !!snap?.stop,
+            stop: activeStop,
+            rawStop: !!snap?.stop,
+            stopCount,
+            baselineStopCount,
             sendFound: !!snap?.sendFound,
             sendEnabled: !!snap?.sendEnabled,
             thinking,
@@ -2923,10 +2939,10 @@ export class ChatGPTController {
       // Detect whether we've seen a NEW response (not pre-existing page content).
       // A new response is indicated by: more assistant nodes than before send,
       // or different text than the pre-send last message, or a stop button appearing.
-      if (snap?.stop || thinking) generationObserved = true;
+      if (activeStop || thinking) generationObserved = true;
 
       if (!newResponseSeen) {
-        if (assistantAdvanced || snap?.stop || thinking || (preSendCount === 0 && pageChanged)) {
+        if (assistantAdvanced || activeStop || thinking || (preSendCount === 0 && pageChanged)) {
           newResponseSeen = true;
           lastChange = Date.now(); // Reset stability timer for the new response
         }
@@ -2937,7 +2953,7 @@ export class ChatGPTController {
       // A missing send button alone is NOT treated as generating — the selector may
       // simply not match the current UI. Only block completion when there's active
       // evidence of generation (stop button or thinking state).
-      const generating = (!!snap?.stop && !snap?.sendEnabled) || thinking || (!!snap?.stop && !snap?.sendFound);
+      const generating = (activeStop && !snap?.sendEnabled) || thinking || (activeStop && !snap?.sendFound);
       if (generating) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
@@ -2949,7 +2965,7 @@ export class ChatGPTController {
       const stable = Date.now() - lastChange >= dynamicStableMs;
       const stopGoneLongEnough = stopGoneAt != null && Date.now() - stopGoneAt >= 800;
 
-      if (!snap?.stop && snap?.hasContinue && continueClicks < 3) {
+      if (!activeStop && snap?.hasContinue && continueClicks < 3) {
         continueClicks += 1;
         await this.#eval(`(() => {
           const btn = Array.from(document.querySelectorAll('button, a')).find(b => /continue generating/i.test((b.textContent||'').trim()));
@@ -2962,7 +2978,7 @@ export class ChatGPTController {
       const readyByNodes = (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
-      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !snap?.stop && !thinking);
+      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !activeStop && !thinking);
       const fallbackReady = fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
       const contentReady = readyByNodes || fallbackReady || finalImageOutput || snap?.hasError;
       const responseReady = snap?.hasError || (imageGeneration ? (finalImageOutput || (txt.length > 0 && !thinking)) : txt.length > 0);
@@ -3038,12 +3054,13 @@ export class ChatGPTController {
         return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
       })()`);
       await this.#typePrompt(prompt);
-      await this.#clickSend();
+      const sendDebug = await this.#clickSend();
       return await this.#waitForAssistantStable({
         timeoutMs,
         preSendCount: prePrompt?.count || 0,
         preSendText: prePrompt?.lastText || '',
         preSendPageText: prePrompt?.pageText || '',
+        preSendStopCount: sendDebug?.initialStopCount || 0,
         imageGeneration
       });
     } finally {
@@ -3557,12 +3574,13 @@ export class ChatGPTController {
           const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
           return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
         })()`);
-        await this.#clickSend();
+        const sendDebug = await this.#clickSend();
         const result = await this.#waitForAssistantStable({
           timeoutMs: effectiveTimeoutMs,
           preSendCount: preSend?.count || 0,
           preSendText: preSend?.lastText || '',
           preSendPageText: preSend?.pageText || '',
+          preSendStopCount: sendDebug?.initialStopCount || 0,
           minimumTimeoutMs: 60 * 60_000,
           minimumStableMs: 60_000,
           extraThinkingPattern: '\\bresearching\\b|\\bsearching(?: the web)?\\b|\\breading sources?\\b|\\bclarifying\\b|\\bgathering\\b'
