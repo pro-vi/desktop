@@ -4279,17 +4279,249 @@ test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) =
   const port = server.address().port;
 
   const q1 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q1', prompt: 'hi' } });
-  // Give the server a moment to enter the handler and increment inflight.
+  // Give the server a moment to enter the provider-slot lease.
   for (let i = 0; i < 50 && started === 0; i++) await new Promise((r) => setTimeout(r, 5));
 
   const q2 = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'hi2' } });
   assert.equal(q2.res.status, 429);
   assert.equal(q2.data.error, 'rate_limited');
-  assert.equal(q2.data.reason, 'max_inflight');
+  assert.equal(q2.data.reason, 'provider_slot');
+  assert.equal(q2.data.legacyReason, 'max_inflight');
+  assert.equal(q2.data.providerSlots.activeLeases.length, 1);
+
+  const q3p = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'hi3' } });
+  await new Promise((r) => setTimeout(r, 20));
+  const startedBeforeRelease = started;
 
   release();
-  const q1r = await q1;
+  const [q1r, q3] = await Promise.all([q1, q3p]);
   assert.equal(q1r.res.status, 200);
+  assert.equal(startedBeforeRelease, 1);
+  assert.equal(q3.res.status, 429);
+  assert.equal(q3.data.reason, 'provider_slot');
+  assert.equal(q3.data.legacyReason, 'max_inflight');
+});
+
+test('http-api: fire-and-forget query queues for provider slot and can be stopped before send', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-provider-queue-'));
+  let q1Started = false;
+  let releaseQ1;
+  let q2Started = false;
+  let stopCalls = 0;
+
+  const controllers = new Map();
+  const getController = (id) => {
+    if (!controllers.has(id)) {
+      controllers.set(id, {
+        runExclusive: async (fn) => await fn(),
+        requestStop: async () => {
+          stopCalls += 1;
+          return { ok: true, requested: true, clicked: true };
+        },
+        query: async () => {
+          if (id === 't1') {
+            q1Started = true;
+            await new Promise((resolve) => {
+              releaseQ1 = resolve;
+            });
+            return { text: 'q1 done' };
+          }
+          if (id === 't2') {
+            q2Started = true;
+            return { text: 'q2 done' };
+          }
+          return { text: 'ok' };
+        }
+      });
+    }
+    return controllers.get(id);
+  };
+
+  const tabs = {
+    listTabs: () => [{ id: 't1', key: 'q1', vendorId: 'chatgpt' }, { id: 't2', key: 'q2', vendorId: 'chatgpt' }],
+    ensureTab: async ({ key }) => key === 'q2' ? 't2' : 't1',
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: (id) => getController(id)
+  };
+
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true }),
+    getSettings: async () => ({ maxInflightQueries: 1, maxQueriesPerMinute: 999, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const q1 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q1', prompt: 'hold slot' } });
+  await waitFor(() => q1Started);
+
+  const q2 = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'queue me', fireAndForget: true } });
+  assert.equal(q2.res.status, 202);
+
+  await waitFor(async () => {
+    const st = await req({ port, token: 'secret', method: 'GET', pth: '/status' });
+    return st.data.runtime?.providerSlots?.queued?.find((item) => item.runId === q2.data.runId);
+  });
+
+  const stopped = await req({ port, token: 'secret', method: 'POST', pth: '/query/stop', body: { runId: q2.data.runId } });
+  assert.equal(stopped.res.status, 200);
+  assert.equal(stopped.data.requested, true);
+  assert.equal(stopped.data.clicked, false);
+  assert.equal(stopCalls, 0);
+
+  const stoppedRun = await waitFor(async () => {
+    const raw = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${q2.data.runId}.json`), 'utf8'));
+    return raw.finishedAt ? raw : null;
+  });
+  assert.equal(stoppedRun.status, 'stopped');
+  assert.equal(stoppedRun.providerSlot.status, 'cancelled');
+
+  releaseQ1();
+  const q1Res = await q1;
+  assert.equal(q1Res.res.status, 200);
+  const q1Run = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${q1Res.data.runId}.json`), 'utf8'));
+  assert.equal(q1Run.providerSlot.status, 'released');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(q2Started, false);
+});
+
+test('http-api: fire-and-forget query stopped before provider-slot admission never sends', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-pre-slot-stop-'));
+  let settingsCalls = 0;
+  let releaseAdmission;
+  let admissionBlocked = false;
+  const admissionGate = new Promise((resolve) => {
+    releaseAdmission = resolve;
+  });
+  let queryStarted = false;
+  let stopCalls = 0;
+
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    requestStop: async () => {
+      stopCalls += 1;
+      return { ok: true, requested: false, clicked: false };
+    },
+    query: async () => {
+      queryStarted = true;
+      return { text: 'should not send' };
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't1', key: 'pre-slot', vendorId: 'chatgpt' }],
+    ensureTab: async () => 't1',
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true }),
+    getSettings: async () => {
+      settingsCalls += 1;
+      if (settingsCalls === 3) {
+        admissionBlocked = true;
+        await admissionGate;
+      }
+      return { maxInflightQueries: 1, maxQueriesPerMinute: 999, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false };
+    }
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'pre-slot', prompt: 'stop before slot', fireAndForget: true } });
+  assert.equal(started.res.status, 202);
+  assert.equal(admissionBlocked, true);
+
+  const stopped = await req({ port, token: 'secret', method: 'POST', pth: '/query/stop', body: { runId: started.data.runId } });
+  assert.equal(stopped.res.status, 200);
+  assert.equal(stopped.data.requested, true);
+  assert.equal(stopped.data.clicked, false);
+  assert.equal(stopCalls, 0);
+
+  releaseAdmission();
+  const stoppedRun = await waitFor(async () => {
+    const raw = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${started.data.runId}.json`), 'utf8'));
+    return raw.finishedAt ? raw : null;
+  });
+  assert.equal(stoppedRun.status, 'stopped');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(queryStarted, false);
+});
+
+test('http-api: research stopped before active tab resolution never sends', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-pre-active-stop-'));
+  let releaseTabResolution;
+  const tabResolutionGate = new Promise((resolve) => {
+    releaseTabResolution = resolve;
+  });
+  let queryStarted = false;
+  let stopCalls = 0;
+
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    requestStop: async () => {
+      stopCalls += 1;
+      return { ok: true, requested: false, clicked: false };
+    },
+    query: async () => {
+      queryStarted = true;
+      return { text: 'should not research' };
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't1', key: 'research-stop', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => {
+      await tabResolutionGate;
+      return 't1';
+    },
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true }),
+    getSettings: async () => ({ maxInflightQueries: 1, maxQueriesPerMinute: 999, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({ port, token: 'secret', method: 'POST', pth: '/research', body: { key: 'research-stop', prompt: 'stop before tab' } });
+  assert.equal(started.res.status, 202);
+
+  const stopped = await req({ port, token: 'secret', method: 'POST', pth: '/query/stop', body: { runId: started.data.runId } });
+  assert.equal(stopped.res.status, 200);
+  assert.equal(stopped.data.requested, true);
+  assert.equal(stopped.data.clicked, false);
+  assert.equal(stopCalls, 0);
+
+  releaseTabResolution();
+  const stoppedRun = await waitFor(async () => {
+    const raw = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${started.data.runId}.json`), 'utf8'));
+    return raw.finishedAt ? raw : null;
+  });
+  assert.equal(stoppedRun.status, 'stopped');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(queryStarted, false);
 });
 
 test('http-api: query pacing returns 429 with retryAfterMs when max wait is 0', async (t) => {
@@ -4502,7 +4734,7 @@ test('http-api: query rate limits (qpm + inflight)', async (t) => {
   assert.equal(r2.data.error, 'rate_limited');
   assert.equal(r2.data.reason, 'qpm');
 
-  // Inflight: simulate by having controller.query hang while maxInflightQueries=1.
+  // Provider slot: simulate by having controller.query hang while maxInflightQueries=1.
   inflightBlock = true;
   let resolveHang;
   const hang = new Promise((r) => (resolveHang = r));
@@ -4514,13 +4746,14 @@ test('http-api: query rate limits (qpm + inflight)', async (t) => {
   });
 
   const p1 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q1', prompt: 'a', attachments: [] } });
-  // Let the first request enter inflight.
+  // Let the first request enter a provider slot.
   await new Promise((r) => setTimeout(r, 20));
   const p2 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'b', attachments: [] } });
 
   const p2Res = await p2;
   assert.equal(p2Res.res.status, 429);
-  assert.equal(p2Res.data.reason, 'max_inflight');
+  assert.equal(p2Res.data.reason, 'provider_slot');
+  assert.equal(p2Res.data.legacyReason, 'max_inflight');
 
   resolveHang();
   const p1Res = await p1;

@@ -23,6 +23,7 @@ import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
 import { createRunStore } from './run-store.mjs';
+import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -798,10 +799,14 @@ export function startHttpApi({
   };
 
   // Governor state (per-desktop instance).
-  const inflight = { queries: 0 };
+  const providerSlots = createProviderSlotLeases({
+    maxSlots: 2,
+    onChange: () => emitRuntimeChanged()
+  });
   const activeQueries = new Map(); // tabId -> runtime status
   const activeScopes = new Map(); // request scope -> runtime status
   const lastOutcomes = new Map(); // tabId -> last finished outcome
+  const preProviderStops = new Map(); // runId -> local stop marker before provider send
   const lastQueryAt = new Map(); // tabId -> ms
   let lastAnyQueryAt = 0;
   const bucket = { tokens: null, lastRefillAt: Date.now(), lastCap: null };
@@ -813,17 +818,12 @@ export function startHttpApi({
     const minTabGapMs = Math.max(0, Number(s.minTabGapMs || 0) || 0);
     const minGlobalGapMs = Math.max(0, Number(s.minGlobalGapMs || 0) || 0);
     const showTabsByDefault = !!s.showTabsByDefault;
+    providerSlots.setMaxSlots(maxInflightQueries);
     return { maxInflightQueries, maxQueriesPerMinute, minTabGapMs, minGlobalGapMs, showTabsByDefault };
   };
 
-  const checkAndConsumeQueryBudget = ({ tabId, governor }) => {
+  const checkAndConsumePacingBudget = ({ tabId, governor }) => {
     const now = Date.now();
-    if (inflight.queries >= governor.maxInflightQueries) {
-      const err = new Error('rate_limited');
-      err.data = { reason: 'max_inflight', retryAfterMs: 250 };
-      throw err;
-    }
-
     const lastTab = lastQueryAt.get(tabId) || 0;
     const tabWait = governor.minTabGapMs - (now - lastTab);
     if (tabWait > 0) {
@@ -902,6 +902,14 @@ export function startHttpApi({
         status: 'stopped',
         label: 'Stopped',
         detail: 'Break-glass stop requested.'
+      };
+    }
+    if (message === 'provider_slot_cancelled') {
+      return {
+        ...base,
+        status: 'stopped',
+        label: 'Stopped',
+        detail: 'Queued run was stopped before a provider slot opened.'
       };
     }
     if (message === 'timeout_waiting_for_prompt') {
@@ -1172,7 +1180,7 @@ export function startHttpApi({
     if (!item?.id) return;
     try {
       await patchRunRecord(item.id, {
-        status: item.blocked ? 'blocked' : 'running',
+        status: item.status || (item.blocked ? 'blocked' : 'running'),
         phase: item.phase || null,
         tabId: item.tabId || null,
         key: item.key || null,
@@ -1193,6 +1201,9 @@ export function startHttpApi({
         ...(item.modelIntentProvenance
           ? { modelIntentProvenance: JSON.parse(JSON.stringify(item.modelIntentProvenance)) }
           : {}),
+        ...(item.providerSlot
+          ? { providerSlot: JSON.parse(JSON.stringify(item.providerSlot)) }
+          : {}),
         ...(item.conversationUrl
           ? { conversationUrl: item.conversationUrl }
           : {}),
@@ -1203,9 +1214,42 @@ export function startHttpApi({
     } catch {}
   };
 
+  const providerSlotForRun = (runId, { terminalStatus = null } = {}) => {
+    const id = String(runId || '').trim();
+    if (!id) return null;
+    let providerSlot = null;
+    for (const item of activeQueries.values()) {
+      if (item?.id === id && item.providerSlot) {
+        providerSlot = item.providerSlot;
+        break;
+      }
+    }
+    if (!providerSlot) {
+      try {
+        providerSlot = runStore.get(id)?.providerSlot || null;
+      } catch {}
+    }
+    if (!providerSlot || typeof providerSlot !== 'object' || Array.isArray(providerSlot)) return null;
+    const next = JSON.parse(JSON.stringify(providerSlot));
+    if (terminalStatus) {
+      next.status = terminalStatus;
+      next.releasedAt = Date.now();
+    }
+    return next;
+  };
+
   const durableRunFinalizeFromOutcome = async (runId, outcome) => {
     if (!runId || !outcome) return null;
     try {
+      const currentProviderSlot = providerSlotForRun(runId);
+      const terminalProviderSlot = currentProviderSlot
+        ? providerSlotForRun(runId, {
+          terminalStatus:
+            outcome.status === 'stopped' && currentProviderSlot.status === 'queued'
+              ? 'cancelled'
+              : 'released'
+        })
+        : null;
       return await finalizeRunRecord(runId, {
         status: outcome.status || 'error',
         label: outcome.label || null,
@@ -1213,7 +1257,8 @@ export function startHttpApi({
         blocked: !!outcome.blocked,
         blockedKind: outcome.blockedKind || null,
         blockedTitle: outcome.blockedKind ? blockedLabelForKind(outcome.blockedKind) : null,
-        conversationUrl: outcome.conversationUrl || null
+        conversationUrl: outcome.conversationUrl || null,
+        ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
       });
     } catch {
       return null;
@@ -1465,15 +1510,19 @@ export function startHttpApi({
     durationMs: Math.max(0, Date.now() - Number(op?.startedAt || Date.now()))
   });
 
-  const runtimeSnapshot = () => ({
-    inflightQueries: inflight.queries,
-    activeQueries: Array.from(activeQueries.values())
-      .map((item) => ({ ...item }))
-      .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0)),
-    lastOutcomes: Array.from(lastOutcomes.entries())
-      .map(([tabId, item]) => ({ tabId, ...item }))
-      .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0))
-  });
+  const runtimeSnapshot = () => {
+    const providerSlotsSnapshot = providerSlots.snapshot();
+    return {
+      inflightQueries: providerSlotsSnapshot.activeCount,
+      providerSlots: providerSlotsSnapshot,
+      activeQueries: Array.from(activeQueries.values())
+        .map((item) => ({ ...item }))
+        .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0)),
+      lastOutcomes: Array.from(lastOutcomes.entries())
+        .map(([tabId, item]) => ({ tabId, ...item }))
+        .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0))
+    };
+  };
 
   const emitRuntimeChanged = () => {
     try {
@@ -1539,6 +1588,14 @@ export function startHttpApi({
     activeScopes.delete(scope);
   };
 
+  const clearScopesForRunId = (runId) => {
+    const id = String(runId || '').trim();
+    if (!id) return;
+    for (const [scope, item] of activeScopes.entries()) {
+      if (item?.id === id) activeScopes.delete(scope);
+    }
+  };
+
   const patchActiveQuery = (tabId, patch) => {
     const current = activeQueries.get(tabId);
     if (!current) return null;
@@ -1584,6 +1641,221 @@ export function startHttpApi({
     if (expectedId && current.id !== expectedId) return;
     activeQueries.delete(tabId);
     emitRuntimeChanged();
+  };
+
+  const activeQueryByRunId = (runId) => {
+    const id = String(runId || '').trim();
+    if (!id) return null;
+    for (const item of activeQueries.values()) {
+      if (item?.id === id) return { ...item };
+    }
+    return null;
+  };
+
+  const runRecordForId = (runId) => {
+    const id = String(runId || '').trim();
+    if (!id) return null;
+    try {
+      return runStore.get(id);
+    } catch {
+      return null;
+    }
+  };
+
+  const queryAbortedError = (runId, reason = 'user_stop') => {
+    const err = new Error('query_aborted');
+    err.data = { reason, runId: String(runId || '').trim() || null };
+    return err;
+  };
+
+  const assertProviderSendAllowed = (runId) => {
+    const id = String(runId || '').trim();
+    if (!id) throw new Error('missing_run_id');
+    const marker = preProviderStops.get(id);
+    if (marker) throw queryAbortedError(id, marker.reason || 'user_stop');
+    const active = activeQueryByRunId(id);
+    if (active?.stopRequested) throw queryAbortedError(id, 'user_stop');
+    const run = runRecordForId(id);
+    if (run?.finishedAt && String(run.status || '') === 'stopped') {
+      throw queryAbortedError(id, 'user_stop');
+    }
+  };
+
+  const providerSlotPatch = (lease, status) => lease ? {
+    providerSlot: {
+      status,
+      leaseId: lease.leaseId || null,
+      runId: lease.runId || null,
+      tabId: lease.tabId || null,
+      key: lease.key || null,
+      vendorId: lease.vendorId || null,
+      kind: lease.kind || null,
+      source: lease.source || null,
+      acquiredAt: lease.acquiredAt || null,
+      heartbeatAt: lease.heartbeatAt || null
+    }
+  } : {};
+
+  const providerSlotRateLimitError = (error) => {
+    const err = new Error('rate_limited');
+    err.data = {
+      reason: 'provider_slot',
+      legacyReason: 'max_inflight',
+      retryAfterMs: Number(error?.data?.retryAfterMs || 250) || 250,
+      providerSlots: providerSlots.snapshot()
+    };
+    return err;
+  };
+
+  const patchProviderSlotWait = async ({ op, tabId, queuePosition = null }) => {
+    const patch = {
+      status: 'queued',
+      phase: 'waiting_for_provider_slot',
+      blocked: false,
+      blockedKind: null,
+      providerSlot: {
+        status: 'queued',
+        runId: op.id,
+        tabId: tabId || null,
+        key: op.key || null,
+        vendorId: op.vendorId || null,
+        kind: op.kind || null,
+        source: op.source || null,
+        queuedAt: Date.now(),
+        queuePosition
+      }
+    };
+    if (tabId) patchActiveQuery(tabId, patch);
+    try {
+      await patchRunRecord(op.id, patch);
+    } catch {}
+  };
+
+  const patchProviderSlotLease = async ({ op, tabId, lease }) => {
+    const patch = {
+      status: 'running',
+      phase: 'provider_slot_acquired',
+      ...providerSlotPatch(lease, 'leased')
+    };
+    if (tabId) patchActiveQuery(tabId, patch);
+    try {
+      await patchRunRecord(op.id, patch);
+    } catch {}
+  };
+
+  const withProviderSlot = async ({
+    op,
+    tabId,
+    tabMeta = null,
+    key = null,
+    vendorId = null,
+    mode = 'fail-fast'
+  }, fn) => {
+    if (!op?.id) throw new Error('missing_run_id');
+    const requestedKey = key || op.key || tabMeta?.key || null;
+    const requestedVendorId = normalizeVendorToken(vendorId || op.vendorId || tabMeta?.vendorId || 'chatgpt') || null;
+    await getGovernor();
+    assertProviderSendAllowed(op.id);
+    if (mode === 'queue') {
+      const currentQueue = providerSlots.snapshot().queued.find((item) => item.runId === op.id);
+      await patchProviderSlotWait({ op: { ...op, key: requestedKey, vendorId: requestedVendorId }, tabId, queuePosition: currentQueue?.position || null });
+      assertProviderSendAllowed(op.id);
+    }
+    let lease = null;
+    try {
+      lease = await providerSlots.acquire({
+        runId: op.id,
+        tabId,
+        key: requestedKey,
+        vendorId: requestedVendorId,
+        kind: op.kind,
+        source: op.source,
+        mode
+      });
+    } catch (error) {
+      if (String(error?.message || '') === 'provider_slot_unavailable') throw providerSlotRateLimitError(error);
+      throw error;
+    }
+    try {
+      assertProviderSendAllowed(op.id);
+      await patchProviderSlotLease({ op: { ...op, key: requestedKey, vendorId: requestedVendorId }, tabId, lease });
+      checkAndConsumePacingBudget({ tabId, governor: await getGovernor() });
+      assertProviderSendAllowed(op.id);
+      return await fn(lease);
+    } finally {
+      providerSlots.release(op.id);
+    }
+  };
+
+  const stopQueuedProviderRun = async ({ runId, reason = 'user_stop' } = {}) => {
+    const id = String(runId || '').trim();
+    if (!id) return null;
+    const cancelled = providerSlots.cancelQueued(id, { reason });
+    if (!cancelled.cancelled) return null;
+    const active = activeQueryByRunId(id);
+    const stoppedAt = Date.now();
+    if (active?.tabId) {
+      patchActiveQuery(active.tabId, { stopRequested: true, stopRequestedAt: stoppedAt });
+      setLastOutcome(active.tabId, {
+        status: 'stopped',
+        label: 'Stopped',
+        detail: 'Queued run stopped before a provider slot opened.',
+        source: active.source || 'http',
+        kind: active.kind || 'query',
+        finishedAt: stoppedAt,
+        durationMs: Math.max(0, stoppedAt - Number(active.startedAt || stoppedAt))
+      });
+      clearActiveQuery(active.tabId, id);
+    }
+    clearScope(active?.scope, id);
+    await durableRunFinalizeFromOutcome(id, {
+      status: 'stopped',
+      label: 'Stopped',
+      detail: 'Queued run stopped before a provider slot opened.',
+      source: active?.source || 'http',
+      kind: active?.kind || 'query',
+      finishedAt: stoppedAt,
+      durationMs: Math.max(0, stoppedAt - Number(active?.startedAt || stoppedAt))
+    });
+    return { cancelled, active };
+  };
+
+  const stopPendingProviderRun = async ({ runId, reason = 'user_stop' } = {}) => {
+    const id = String(runId || '').trim();
+    if (!id) return null;
+    const active = activeQueryByRunId(id);
+    const durable = runRecordForId(id);
+    const slotStatus = active?.providerSlot?.status || durable?.providerSlot?.status || null;
+    if (slotStatus === 'leased') return null;
+    if (!active && (!durable || durable.finishedAt)) return null;
+
+    const stoppedAt = Date.now();
+    preProviderStops.set(id, { reason, stoppedAt });
+    const tabId = active?.tabId || durable?.tabId || null;
+    if (tabId) {
+      patchActiveQuery(tabId, { stopRequested: true, stopRequestedAt: stoppedAt });
+      setLastOutcome(tabId, {
+        status: 'stopped',
+        label: 'Stopped',
+        detail: 'Run stopped before a provider request was sent.',
+        source: active?.source || durable?.source || 'http',
+        kind: active?.kind || durable?.kind || 'query',
+        finishedAt: stoppedAt,
+        durationMs: Math.max(0, stoppedAt - Number(active?.startedAt || durable?.startedAt || stoppedAt))
+      });
+      clearActiveQuery(tabId, id);
+    }
+    clearScopesForRunId(id);
+    await durableRunFinalizeFromOutcome(id, {
+      status: 'stopped',
+      label: 'Stopped',
+      detail: 'Run stopped before a provider request was sent.',
+      source: active?.source || durable?.source || 'http',
+      kind: active?.kind || durable?.kind || 'query',
+      finishedAt: stoppedAt,
+      durationMs: Math.max(0, stoppedAt - Number(active?.startedAt || durable?.startedAt || stoppedAt))
+    });
+    return { active, run: durable, stoppedAt };
   };
 
   const getRunRecordOrThrow = (runId) => {
@@ -1753,8 +2025,6 @@ export function startHttpApi({
           ? { researchMeta: defaultResearchMeta({ tabId, outputDir }) }
           : {})
       });
-      checkAndConsumeQueryBudget({ tabId, governor: await getGovernor() });
-      inflight.queries += 1;
       const controller = tabs.getControllerById(tabId);
       const executeRetry = async () => {
         const imageGeneration = !!original.logicalRequest?.imageGeneration;
@@ -1803,21 +2073,32 @@ export function startHttpApi({
         await durableRunFinalizeFromOutcome(op.id, outcome);
         return { result, conversationUrl };
       };
+      const runRetryWithLease = async () => await withProviderSlot({
+        op: {
+          ...op,
+          key: effectiveKey,
+          vendorId: tabMeta?.vendorId || original.vendorId || null
+        },
+        tabId,
+        tabMeta,
+        key: effectiveKey,
+        vendorId: tabMeta?.vendorId || original.vendorId || null,
+        mode: fireAndForget ? 'queue' : 'fail-fast'
+      }, executeRetry);
 
       if (fireAndForget) {
-        executeRetry().catch((error) => {
+        runRetryWithLease().catch((error) => {
           const outcome = outcomeFromError(error, op);
           setLastOutcome(tabId, outcome);
           return durableRunFinalizeFromOutcome(op.id, outcome);
         }).finally(() => {
           clearActiveQuery(tabId, op.id);
-          inflight.queries = Math.max(0, inflight.queries - 1);
           clearScope(scope, op.id);
         });
         return { ok: true, async: true, tabId, runId: op.id, retryOf: original.id };
       }
 
-      const completed = await executeRetry();
+      const completed = await runRetryWithLease();
       return { ok: true, tabId, runId: op.id, retryOf: original.id, result: completed?.result || null };
     } catch (error) {
       if (tabId) {
@@ -1829,7 +2110,6 @@ export function startHttpApi({
     } finally {
       if (!fireAndForget && tabId) {
         clearActiveQuery(tabId, op.id);
-        inflight.queries = Math.max(0, inflight.queries - 1);
       }
       if (!fireAndForget) clearScope(scope, op.id);
     }
@@ -2101,7 +2381,6 @@ export function startHttpApi({
           void (async () => {
           let tabId = null;
           let resolvedTabScope = null;
-          let queryReserved = false;
           try {
             tabId = await resolveTab({
               tabs,
@@ -2140,6 +2419,7 @@ export function startHttpApi({
               modeIntent: modeIntent || null,
               researchMeta: defaultResearchMeta({ tabId, outputDir })
             };
+            assertProviderSendAllowed(op.id);
             await patchRunRecord(op.id, {
               status: 'running',
               phase: activeOp.phase,
@@ -2151,6 +2431,7 @@ export function startHttpApi({
               modeIntent: modeIntent || null,
               researchMeta: activeOp.researchMeta
             });
+            assertProviderSendAllowed(op.id);
             setActiveQuery(tabId, activeOp);
 
             const bundle = bundleName ? await getBundle(stateDir, bundleName) : null;
@@ -2189,22 +2470,32 @@ export function startHttpApi({
               packedContextSummary: packed.context?.summary || null,
               packedContextBudget: effectiveBudget
             });
-            checkAndConsumeQueryBudget({ tabId, governor });
-            inflight.queries += 1;
-            queryReserved = true;
             const controller = tabs.getControllerById(tabId);
-            await executeResearchFlow({
-              op,
+            await withProviderSlot({
+              op: {
+                ...op,
+                key: effectiveKey,
+                vendorId: tabMeta?.vendorId || 'chatgpt'
+              },
               tabId,
               tabMeta,
-              controller,
-              prompt: packed.prompt,
-              attachments: packed.attachments,
-              timeoutMs,
-              outDir: outputDir,
-              existingConversationUrl: savedConversationUrl || null,
-              projectUrl: projectUrl || tabMeta?.projectUrl || null,
-              effectiveKey
+              key: effectiveKey,
+              vendorId: tabMeta?.vendorId || 'chatgpt',
+              mode: 'queue'
+            }, async () => {
+              await executeResearchFlow({
+                op,
+                tabId,
+                tabMeta,
+                controller,
+                prompt: packed.prompt,
+                attachments: packed.attachments,
+                timeoutMs,
+                outDir: outputDir,
+                existingConversationUrl: savedConversationUrl || null,
+                projectUrl: projectUrl || tabMeta?.projectUrl || null,
+                effectiveKey
+              });
             });
           } catch (error) {
             const outcome = outcomeFromError(error, op);
@@ -2221,7 +2512,6 @@ export function startHttpApi({
             await durableRunFinalizeFromOutcome(op.id, outcome);
           } finally {
             if (tabId) clearActiveQuery(tabId, op.id);
-            if (queryReserved) inflight.queries = Math.max(0, inflight.queries - 1);
             clearScope(scope, op.id);
             if (advisoryTabScope) clearScope(advisoryTabScope, op.id);
             if (resolvedTabScope) clearScope(resolvedTabScope, op.id);
@@ -2405,8 +2695,6 @@ export function startHttpApi({
               maxInlineFiles: effectiveBudget.maxInlineFiles,
               maxAttachmentFiles: effectiveBudget.maxAttachmentFiles
             });
-            checkAndConsumeQueryBudget({ tabId, governor });
-            inflight.queries += 1;
             const controller = tabs.getControllerById(tabId);
             const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
             await patchRunRecord(op.id, {
@@ -2453,16 +2741,23 @@ export function startHttpApi({
               await durableRunFinalizeFromOutcome(op.id, outcome);
               return result;
             };
+            const runQueryWithLease = async () => await withProviderSlot({
+              op: activeOp,
+              tabId,
+              tabMeta,
+              key: effectiveKey,
+              vendorId: tabMeta?.vendorId || null,
+              mode: fireAndForget ? 'queue' : 'fail-fast'
+            }, runQuery);
 
             if (fireAndForget) {
               const tabMeta = getTabMeta(tabs, tabId);
-              runQuery().catch((error) => {
+              runQueryWithLease().catch((error) => {
                 const outcome = outcomeFromError(error, op);
                 setLastOutcome(tabId, outcome);
                 return durableRunFinalizeFromOutcome(op.id, outcome);
               }).finally(() => {
                 clearActiveQuery(tabId, op.id);
-                inflight.queries = Math.max(0, inflight.queries - 1);
                 clearScope(scope, op.id);
               });
               return sendJson(res, 202, {
@@ -2476,7 +2771,7 @@ export function startHttpApi({
               });
             }
 
-            const result = await runQuery();
+            const result = await runQueryWithLease();
             return sendJson(res, 200, {
               ok: true,
               tabId,
@@ -2495,7 +2790,6 @@ export function startHttpApi({
           } finally {
             if (!fireAndForget) {
               clearActiveQuery(tabId, op.id);
-              inflight.queries = Math.max(0, inflight.queries - 1);
             }
           }
         } finally {
@@ -2529,23 +2823,60 @@ export function startHttpApi({
         };
         reserveScope(scope, op);
         let tabId = null;
+        let runCreated = false;
         try {
           tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
           op.tabId = tabId;
-          setActiveQuery(tabId, op);
-          checkAndConsumeQueryBudget({ tabId, governor });
-          inflight.queries += 1;
+          const tabMeta = getTabMeta(tabs, tabId);
+          const activeOp = {
+            ...op,
+            key: tabMeta?.key || null,
+            vendorId: tabMeta?.vendorId || null,
+            vendorName: tabMeta?.vendorName || null
+          };
+          setActiveQuery(tabId, activeOp);
+          await createRunRecord({
+            id: op.id,
+            kind: 'send',
+            source,
+            status: 'running',
+            phase: op.phase,
+            tabId,
+            key: tabMeta?.key || null,
+            vendorId: tabMeta?.vendorId || null,
+            vendorName: tabMeta?.vendorName || null,
+            promptPreview: op.promptPreview,
+            startedAt: op.startedAt,
+            logicalRequest: {
+              kind: 'send',
+              text,
+              timeoutMs,
+              stopAfterSend,
+              source,
+              tabId,
+              key: tabMeta?.key || null,
+              vendorId: tabMeta?.vendorId || null
+            }
+          });
+          runCreated = true;
           const controller = tabs.getControllerById(tabId);
-          const result = await runExclusive(controller, async () =>
+          const result = await withProviderSlot({
+            op: activeOp,
+            tabId,
+            tabMeta,
+            key: tabMeta?.key || null,
+            vendorId: tabMeta?.vendorId || null,
+            mode: 'fail-fast'
+          }, async () => await runExclusive(controller, async () =>
             controller.send({
               text,
               timeoutMs,
               stopAfterSend,
               onProgress: (patch) => patchActiveQuery(tabId, patch)
             })
-          );
-          setLastOutcome(tabId, {
+          ));
+          const outcome = {
             status: 'success',
             label: 'Sent',
             detail: 'Prompt sent successfully.',
@@ -2553,20 +2884,52 @@ export function startHttpApi({
             kind: 'send',
             finishedAt: Date.now(),
             durationMs: Math.max(0, Date.now() - op.startedAt)
-          });
-          return sendJson(res, 200, { ok: true, tabId, result });
+          };
+          setLastOutcome(tabId, outcome);
+          await durableRunFinalizeFromOutcome(op.id, outcome);
+          return sendJson(res, 200, { ok: true, tabId, runId: op.id, result });
         } catch (error) {
-          if (tabId) setLastOutcome(tabId, outcomeFromError(error, op));
+          const outcome = outcomeFromError(error, op);
+          if (tabId) setLastOutcome(tabId, outcome);
+          if (runCreated) await durableRunFinalizeFromOutcome(op.id, outcome);
           throw error;
         } finally {
           if (tabId) clearActiveQuery(tabId, op.id);
           clearScope(scope, op.id);
-          inflight.queries = Math.max(0, inflight.queries - 1);
         }
       }
 
       if (url.pathname === '/query/stop' && req.method === 'POST') {
         const body = await parseBody(req);
+        const requestedRunId = body?.runId ? String(body.runId).trim() : '';
+        if (requestedRunId) {
+          const queuedStop = await stopQueuedProviderRun({ runId: requestedRunId, reason: 'user_stop' });
+          if (queuedStop) {
+            return sendJson(res, 200, {
+              ok: true,
+              runId: requestedRunId,
+              tabId: queuedStop.active?.tabId || null,
+              requested: true,
+              clicked: false,
+              activeQuery: queuedStop.active || null,
+              runtime: runtimeSnapshot()
+            });
+          }
+          const pendingStop = await stopPendingProviderRun({ runId: requestedRunId, reason: 'user_stop' });
+          if (pendingStop) {
+            return sendJson(res, 200, {
+              ok: true,
+              runId: requestedRunId,
+              tabId: pendingStop.active?.tabId || pendingStop.run?.tabId || null,
+              requested: true,
+              clicked: false,
+              activeQuery: pendingStop.active || null,
+              runtime: runtimeSnapshot()
+            });
+          }
+          const activeByRun = activeQueryByRunId(requestedRunId);
+          if (activeByRun?.tabId) body.tabId = activeByRun.tabId;
+        }
         const hasScopedTab = !!(
           (body?.tabId ? String(body.tabId).trim() : '') ||
           (body?.key ? String(body.key).trim() : '') ||
@@ -2577,6 +2940,42 @@ export function startHttpApi({
           ? await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: false, vendors })
           : defaultTabId;
         const active = patchActiveQuery(tabId, { stopRequested: true, stopRequestedAt: Date.now() }) || null;
+        if (active?.providerSlot?.status === 'queued') {
+          const queuedStop = await stopQueuedProviderRun({ runId: active.id, reason: 'user_stop' });
+          if (!queuedStop) {
+            const pendingStop = await stopPendingProviderRun({ runId: active.id, reason: 'user_stop' });
+            return sendJson(res, 200, {
+              ok: true,
+              tabId,
+              runId: active.id,
+              requested: !!pendingStop,
+              clicked: false,
+              activeQuery: pendingStop?.active || active || null,
+              runtime: runtimeSnapshot()
+            });
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            tabId,
+            runId: active.id,
+            requested: true,
+            clicked: false,
+            activeQuery: queuedStop?.active || activeQueries.get(tabId) || active || null,
+            runtime: runtimeSnapshot()
+          });
+        }
+        if (active && active.providerSlot?.status !== 'leased') {
+          const pendingStop = await stopPendingProviderRun({ runId: active.id, reason: 'user_stop' });
+          return sendJson(res, 200, {
+            ok: true,
+            tabId,
+            runId: active.id,
+            requested: !!pendingStop,
+            clicked: false,
+            activeQuery: pendingStop?.active || active || null,
+            runtime: runtimeSnapshot()
+          });
+        }
         const controller = tabs.getControllerById(tabId);
         const stopped = typeof controller?.requestStop === 'function'
           ? await controller.requestStop({ reason: 'user_stop' })
@@ -2840,8 +3239,67 @@ export function startHttpApi({
   server.retryRun = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
     return await retryRunAction({ runId, timeoutMs, fireAndForget, show, source });
   };
-  server.stopActiveQuery = async ({ tabId }) => {
+  server.stopActiveQuery = async ({ tabId, runId = null }) => {
+    if (runId) {
+      const queuedStop = await stopQueuedProviderRun({ runId, reason: 'user_stop' });
+      if (queuedStop) {
+        return {
+          ok: true,
+          tabId: queuedStop.active?.tabId || tabId || null,
+          runId,
+          requested: true,
+          clicked: false,
+          activeQuery: queuedStop.active || null,
+          runtime: runtimeSnapshot()
+        };
+      }
+      const pendingStop = await stopPendingProviderRun({ runId, reason: 'user_stop' });
+      if (pendingStop) {
+        return {
+          ok: true,
+          tabId: pendingStop.active?.tabId || pendingStop.run?.tabId || tabId || null,
+          runId,
+          requested: true,
+          clicked: false,
+          activeQuery: pendingStop.active || null,
+          runtime: runtimeSnapshot()
+        };
+      }
+    }
     const active = patchActiveQuery(tabId, { stopRequested: true, stopRequestedAt: Date.now() }) || null;
+    if (active?.providerSlot?.status === 'queued') {
+      const queuedStop = await stopQueuedProviderRun({ runId: active.id, reason: 'user_stop' });
+      if (!queuedStop) {
+        const pendingStop = await stopPendingProviderRun({ runId: active.id, reason: 'user_stop' });
+        return {
+          ok: true,
+          tabId,
+          requested: !!pendingStop,
+          clicked: false,
+          activeQuery: pendingStop?.active || active || null,
+          runtime: runtimeSnapshot()
+        };
+      }
+      return {
+        ok: true,
+        tabId,
+        requested: true,
+        clicked: false,
+        activeQuery: activeQueries.get(tabId) || active || null,
+        runtime: runtimeSnapshot()
+      };
+    }
+    if (active && active.providerSlot?.status !== 'leased') {
+      const pendingStop = await stopPendingProviderRun({ runId: active.id, reason: 'user_stop' });
+      return {
+        ok: true,
+        tabId,
+        requested: !!pendingStop,
+        clicked: false,
+        activeQuery: pendingStop?.active || active || null,
+        runtime: runtimeSnapshot()
+      };
+    }
     const controller = tabs.getControllerById(tabId);
     const stopped = typeof controller?.requestStop === 'function'
       ? await controller.requestStop({ reason: 'user_stop' })

@@ -35,6 +35,8 @@ function fmtPhase(phase) {
   if (key === 'resolving_tab') return 'Starting';
   if (key === 'preparing_context') return 'Packing context';
   if (key === 'waiting_for_ready') return 'Checking page';
+  if (key === 'waiting_for_provider_slot') return 'Queued for slot';
+  if (key === 'provider_slot_acquired') return 'Slot acquired';
   if (key === 'activating_model_intent') return 'Selecting model';
   if (key === 'model_intent_confirmed') return 'Model selected';
   if (key === 'activating_mode_intent') return 'Selecting mode';
@@ -152,7 +154,7 @@ function defaultState() {
     stateDir: '',
     browserBackend: 'electron',
     browser: null,
-    runtime: { inflightQueries: 0, activeQueries: [], lastOutcomes: [] }
+    runtime: { inflightQueries: 0, providerSlots: { max: 2, activeLeases: [], queued: [] }, activeQueries: [], lastOutcomes: [] }
   };
 }
 
@@ -238,9 +240,10 @@ async function refresh() {
     }
 
     const tabs = Array.isArray(lastState.tabs) ? lastState.tabs : [];
-    const runtime = lastState.runtime || { inflightQueries: 0, activeQueries: [], lastOutcomes: [] };
+    const runtime = lastState.runtime || { inflightQueries: 0, providerSlots: { max: 2, activeLeases: [], queued: [] }, activeQueries: [], lastOutcomes: [] };
     const activeQueries = Array.isArray(runtime.activeQueries) ? runtime.activeQueries : [];
     const lastOutcomes = Array.isArray(runtime.lastOutcomes) ? runtime.lastOutcomes : [];
+    const providerSlots = runtime.providerSlots || { max: settings.maxInflightQueries || 2, activeLeases: [], queued: [] };
     const activeByTab = new Map(activeQueries.map((item) => [item.tabId, item]));
     const outcomeByTab = new Map(lastOutcomes.map((item) => [item.tabId, item]));
     const sortedTabs = [...tabs].sort((a, b) => {
@@ -297,7 +300,8 @@ async function refresh() {
       };
       if (t.protectedTab) addBadge('Pinned', 'info');
       if (active) {
-        addBadge(active.stopRequested ? 'Stopping' : 'Running', active.stopRequested ? 'warn' : 'ok');
+        const queuedForSlot = active.providerSlot?.status === 'queued' || active.phase === 'waiting_for_provider_slot';
+        addBadge(active.stopRequested ? 'Stopping' : queuedForSlot ? 'Queued' : 'Running', active.stopRequested ? 'warn' : queuedForSlot ? 'dim' : 'ok');
         if (active.source) addBadge(fmtSource(active.source), 'info');
         if (active.modelIntent) addBadge(fmtIntent(active.modelIntent), 'info');
         if (active.modeIntent) addBadge(fmtIntent(active.modeIntent), 'info');
@@ -343,7 +347,7 @@ async function refresh() {
         btnStop.disabled = !!active.stopRequested;
         btnStop.onclick = async () => {
           try {
-            const out = await callApi('stopQuery', { tabId: t.id }, { required: true });
+            const out = await callApi('stopQuery', { tabId: t.id, runId: active.id }, { required: true });
             statusText(out?.requested ? `Stop requested for ${t.name || t.key || t.id}` : `No active query on ${t.name || t.key || t.id}`);
           } catch (e) {
             statusText(`Stop failed: ${e?.message || String(e)}`);
@@ -590,7 +594,9 @@ async function refresh() {
       lastState.browserBackend === 'chrome-cdp'
         ? `Chrome CDP${lastState.browser?.profileMode === 'existing' ? ' (existing profile)' : ''}${lastState.browser?.debugPort ? `:${lastState.browser.debugPort}` : ''}`
         : 'Electron';
-    const runningSummary = ` • Running: ${activeQueries.length}`;
+    const activeSlots = Array.isArray(providerSlots.activeLeases) ? providerSlots.activeLeases.length : Number(runtime.inflightQueries || 0);
+    const queuedSlots = Array.isArray(providerSlots.queued) ? providerSlots.queued.length : 0;
+    const runningSummary = ` • Slots: ${activeSlots}/${providerSlots.max || settings.maxInflightQueries || 2}${queuedSlots ? ` +${queuedSlots} queued` : ''} • Running: ${activeQueries.length}`;
     const runsSummary = ` • Runs: ${runs.length}`;
     const liveSummary = hasLiveUpdates ? 'Live updates on' : 'Polling every 3s';
     const refreshedSummary = lastRefreshAt ? ` • Refreshed ${new Date(lastRefreshAt).toLocaleTimeString()}` : '';

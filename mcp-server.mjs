@@ -290,17 +290,18 @@ registerTool(
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to stop.'),
+      runId: z.string().optional().describe('Durable run id to stop, including queued runs waiting for provider capacity.'),
       key: z.string().optional().describe('Stable tab key to stop.'),
       vendorId: z.string().optional().describe('Target vendor id to stop.')
     }
   },
-  async ({ model, tabId, key, vendorId }) => {
+  async ({ model, tabId, runId, key, vendorId }) => {
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/query/stop',
-      body: { model, tabId, key, vendorId }
+      body: { model, tabId, runId, key, vendorId }
     });
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }], structuredContent: data };
   }

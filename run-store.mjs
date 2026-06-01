@@ -89,6 +89,7 @@ function normalizeRun(input = {}) {
     materializedReplay: normalizeObject(input.materializedReplay),
     packedContextSummary: normalizeObject(input.packedContextSummary),
     packedContextBudget: normalizeObject(input.packedContextBudget),
+    providerSlot: normalizeObject(input.providerSlot),
     modeIntentProvenance: normalizeObject(input.modeIntentProvenance),
     modelIntentProvenance: normalizeObject(input.modelIntentProvenance),
     researchMeta: normalizeObject(input.researchMeta)

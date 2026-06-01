@@ -333,7 +333,7 @@ async function main() {
       stateDir,
       browserBackend: browserBackendKind,
       browser: browserState,
-      runtime: server?.getRuntimeState?.() || { inflightQueries: 0, activeQueries: [] }
+      runtime: server?.getRuntimeState?.() || { inflightQueries: 0, providerSlots: { max: settings.maxInflightQueries || 2, activeLeases: [], queued: [] }, activeQueries: [] }
     };
   });
 
@@ -421,7 +421,8 @@ async function main() {
   });
   ipcMain.handle('agentify:stopQuery', async (_evt, args) => {
     const tabId = String(args?.tabId || '').trim() || defaultTabId;
-    return await server?.stopActiveQuery?.({ tabId });
+    const runId = String(args?.runId || '').trim() || null;
+    return await server?.stopActiveQuery?.({ tabId, runId });
   });
   ipcMain.handle('agentify:getRuns', async (_evt, args) => {
     const includeArchived = !!args?.includeArchived;

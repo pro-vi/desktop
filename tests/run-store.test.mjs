@@ -25,6 +25,12 @@ test('run-store: create, patch, finalize, and archive lifecycle', async () => {
   assert.equal(created.id, 'run-1');
   assert.equal(created.status, 'running');
 
+  const slotPatched = await store.patch('run-1', {
+    providerSlot: { status: 'leased', leaseId: 'lease-1', runId: 'run-1', acquiredAt: 123 }
+  });
+  assert.equal(slotPatched.providerSlot.status, 'leased');
+  assert.equal(slotPatched.providerSlot.leaseId, 'lease-1');
+
   const patched = await store.patch('run-1', { status: 'blocked', blocked: true, blockedKind: 'login' });
   assert.equal(patched.status, 'blocked');
   assert.equal(patched.blocked, true);
