@@ -511,6 +511,13 @@ async function writeResearchResponseFile({ outDir, text }) {
   return responsePath;
 }
 
+async function writeQueryResponseFile({ outDir, text }) {
+  await fs.mkdir(outDir, { recursive: true });
+  const responsePath = path.join(outDir, 'assistant_response.md');
+  await fs.writeFile(responsePath, responseMarkdownContent(text), 'utf8');
+  return responsePath;
+}
+
 async function collectRegisteredArtifacts({
   stateDir,
   tabId,
@@ -1018,6 +1025,16 @@ export function startHttpApi({
     if (message === 'mode_intent_activation_failed') {
       const targetIntent = detail?.targetIntent ? String(detail.targetIntent) : null;
       const activeIntent = detail?.state?.activeIntent ? String(detail.state.activeIntent) : null;
+      if (detail?.reason === 'mode_intent_downgrade_detected') {
+        return {
+          ...base,
+          status: 'error',
+          label: 'ChatGPT mode downgraded',
+          detail: targetIntent && activeIntent
+            ? `ChatGPT mode intent requested ${targetIntent}, but the completed response reported ${activeIntent}.`
+            : 'ChatGPT completed the response in a different mode than requested.'
+        };
+      }
       const label = detail?.state?.label ? trimPreview(detail.state.label, 60) : null;
       const stateMenuOpen = typeof detail?.state?.menuOpen === 'boolean' ? detail.state.menuOpen : null;
       const stateMenuText = detail?.state?.menuText ? trimPreview(detail.state.menuText, 80) : null;
@@ -1176,6 +1193,52 @@ export function startHttpApi({
     throw err;
   };
 
+  const queryUsageForResult = ({ result, modeIntent = null, modelIntent = null, activeQuery = null } = {}) => {
+    const resultMeta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+    const modelProvenance = activeQuery?.modelIntentProvenance || null;
+    const modeUsed = normalizeChatGptModeIntent(resultMeta.modeUsed || resultMeta.actualModeIntent, { fallback: null });
+    const modelUsed = normalizeChatGptModelIntent(
+      resultMeta.modelUsed ||
+        resultMeta.actualModelIntent ||
+        modelProvenance?.activeIntent ||
+        (modelIntent ? modelProvenance?.requestedIntent || modelIntent : null),
+      { fallback: null }
+    );
+    const degradedFrom = resultMeta.degradedFrom && typeof resultMeta.degradedFrom === 'object'
+      ? JSON.parse(JSON.stringify(resultMeta.degradedFrom))
+      : null;
+    return {
+      modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null }),
+      modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
+      modeUsed,
+      modelUsed,
+      degradedFrom
+    };
+  };
+
+  const assertNoModeDowngrade = ({ modeIntent, result } = {}) => {
+    const targetIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
+    if (!targetIntent) return;
+    const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+    const modeUsed = normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null });
+    const actualModeSource = String(meta.actualModeSource || '').trim();
+    if (!modeUsed || modeUsed === targetIntent || actualModeSource !== 'page_footer') return;
+    const err = new Error('mode_intent_activation_failed');
+    err.data = {
+      reason: 'mode_intent_downgrade_detected',
+      targetIntent,
+      state: {
+        activeIntent: modeUsed,
+        actualMode: {
+          intent: modeUsed,
+          label: meta.actualModeLabel || null,
+          source: actualModeSource || null
+        }
+      }
+    };
+    throw err;
+  };
+
   const durableRunPatchFromActive = async (item) => {
     if (!item?.id) return;
     try {
@@ -1258,6 +1321,10 @@ export function startHttpApi({
         blockedKind: outcome.blockedKind || null,
         blockedTitle: outcome.blockedKind ? blockedLabelForKind(outcome.blockedKind) : null,
         conversationUrl: outcome.conversationUrl || null,
+        modeUsed: outcome.modeUsed || null,
+        modelUsed: outcome.modelUsed || null,
+        degradedFrom: outcome.degradedFrom || null,
+        outputManifest: outcome.outputManifest || null,
         ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
       });
     } catch {
@@ -1431,6 +1498,89 @@ export function startHttpApi({
     };
   };
 
+  const finalizeQueryOutputs = async ({
+    runId,
+    tabId,
+    tabMeta,
+    result,
+    conversationUrl = null,
+    modeIntent = null,
+    modelIntent = null,
+    activeQuery = null
+  } = {}) => {
+    const outDir = await ensureRunArtifactsDir({
+      stateDir,
+      runId,
+      kind: 'query',
+      tabKey: tabMeta?.key || null,
+      vendorId: tabMeta?.vendorId || null
+    });
+    const usage = queryUsageForResult({ result, modeIntent, modelIntent, activeQuery });
+    const responsePath = await writeQueryResponseFile({ outDir, text: result?.text || '' });
+    const metadataPath = path.join(outDir, 'metadata.json');
+    await fs.writeFile(
+      metadataPath,
+      `${JSON.stringify({
+        runId: String(runId || '').trim() || null,
+        tabId: String(tabId || '').trim() || null,
+        key: tabMeta?.key || null,
+        vendorId: tabMeta?.vendorId || null,
+        vendorName: tabMeta?.vendorName || null,
+        conversationUrl: conversationUrl || null,
+        modeIntent: usage.modeIntent || null,
+        modelIntent: usage.modelIntent || null,
+        modeUsed: usage.modeUsed || null,
+        modelUsed: usage.modelUsed || null,
+        degradedFrom: usage.degradedFrom || null,
+        responsePath,
+        capturedAt: new Date().toISOString()
+      }, null, 2)}\n`,
+      'utf8'
+    );
+    const artifacts = await collectRegisteredArtifacts({
+      stateDir,
+      tabId,
+      tabKey: tabMeta?.key || null,
+      vendorId: tabMeta?.vendorId || null,
+      runId,
+      outDir,
+      candidates: [
+        {
+          kind: 'file',
+          filePath: responsePath,
+          originalName: path.basename(responsePath),
+          mime: 'text/markdown',
+          source: 'agentify_query',
+          meta: { role: 'assistant_response' }
+        },
+        {
+          kind: 'metadata',
+          filePath: metadataPath,
+          originalName: path.basename(metadataPath),
+          mime: 'application/json',
+          source: 'agentify_query',
+          meta: { role: 'metadata' }
+        }
+      ]
+    });
+    return {
+      dir: outDir,
+      responsePath,
+      metadataPath,
+      modeUsed: usage.modeUsed || null,
+      modelUsed: usage.modelUsed || null,
+      degradedFrom: usage.degradedFrom || null,
+      files: artifacts.map((item) => ({
+        id: item.id,
+        path: item.path,
+        name: item.name,
+        mime: item.mime || null,
+        source: item.source || null,
+        role: item?.meta?.role || null
+      }))
+    };
+  };
+
   const executeResearchFlow = async ({
     op,
     tabId,
@@ -1499,16 +1649,24 @@ export function startHttpApi({
     return { result, researchMeta, outputManifest, conversationUrl };
   };
 
-  const successOutcomeForResult = ({ result, op, conversationUrl }) => ({
-    status: 'success',
-    label: 'Response received',
-    detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
-    conversationUrl: conversationUrl || null,
-    source: op?.source || 'http',
-    kind: op?.kind || 'query',
-    finishedAt: Date.now(),
-    durationMs: Math.max(0, Date.now() - Number(op?.startedAt || Date.now()))
-  });
+  const successOutcomeForResult = ({ result, op, conversationUrl, outputManifest = null }) => {
+    const now = Date.now();
+    const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+    return {
+      status: 'success',
+      label: 'Response received',
+      detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
+      conversationUrl: conversationUrl || null,
+      source: op?.source || 'http',
+      kind: op?.kind || 'query',
+      finishedAt: now,
+      durationMs: Math.max(0, now - Number(op?.startedAt || now)),
+      modeUsed: outputManifest?.modeUsed || normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null }),
+      modelUsed: outputManifest?.modelUsed || normalizeChatGptModelIntent(meta.modelUsed || meta.actualModelIntent, { fallback: null }),
+      degradedFrom: outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
+      outputManifest: outputManifest || null
+    };
+  };
 
   const runtimeSnapshot = () => {
     const providerSlotsSnapshot = providerSlots.snapshot();
@@ -2061,17 +2219,40 @@ export function startHttpApi({
             modelIntent: originalModelIntent
           });
         });
-        assertConfirmedModelIntent({ modelIntent: originalModelIntent, activeQuery: activeQueries.get(tabId) });
+        assertNoModeDowngrade({ modeIntent: originalModeIntent, result });
+        const activeQuery = activeQueries.get(tabId);
+        assertConfirmedModelIntent({ modelIntent: originalModelIntent, activeQuery });
         const conversationUrl = typeof controller.getUrl === 'function'
           ? await controller.getUrl().catch(() => originalConversationUrl || null)
           : originalConversationUrl || null;
         if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
           persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: originalProjectUrl });
         }
-        const outcome = successOutcomeForResult({ result, op, conversationUrl });
+        const outputManifest = await finalizeQueryOutputs({
+          runId: op.id,
+          tabId,
+          tabMeta,
+          result,
+          conversationUrl,
+          modeIntent: originalModeIntent,
+          modelIntent: originalModelIntent,
+          activeQuery
+        });
+        const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest });
+        const resultWithMeta = {
+          ...result,
+          meta: {
+            ...(result?.meta && typeof result.meta === 'object' ? result.meta : {}),
+            modeUsed: outputManifest.modeUsed || null,
+            modelUsed: outputManifest.modelUsed || null,
+            degradedFrom: outputManifest.degradedFrom || null,
+            outputManifest,
+            durationMs: outcome.durationMs
+          }
+        };
         setLastOutcome(tabId, outcome);
         await durableRunFinalizeFromOutcome(op.id, outcome);
-        return { result, conversationUrl };
+        return { result: resultWithMeta, conversationUrl };
       };
       const runRetryWithLease = async () => await withProviderSlot({
         op: {
@@ -2730,16 +2911,39 @@ export function startHttpApi({
                   modelIntent
                 });
               });
-              assertConfirmedModelIntent({ modelIntent, activeQuery: activeQueries.get(tabId) });
+              assertNoModeDowngrade({ modeIntent, result });
+              const activeQuery = activeQueries.get(tabId);
+              assertConfirmedModelIntent({ modelIntent, activeQuery });
               // Capture conversation URL after successful query
               const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
               if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
                 persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: effectiveProjectUrl });
               }
-              const outcome = successOutcomeForResult({ result, op, conversationUrl });
+              const outputManifest = await finalizeQueryOutputs({
+                runId: op.id,
+                tabId,
+                tabMeta,
+                result,
+                conversationUrl,
+                modeIntent,
+                modelIntent,
+                activeQuery
+              });
+              const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest });
+              const resultWithMeta = {
+                ...result,
+                meta: {
+                  ...(result?.meta && typeof result.meta === 'object' ? result.meta : {}),
+                  modeUsed: outputManifest.modeUsed || null,
+                  modelUsed: outputManifest.modelUsed || null,
+                  degradedFrom: outputManifest.degradedFrom || null,
+                  outputManifest,
+                  durationMs: outcome.durationMs
+                }
+              };
               setLastOutcome(tabId, outcome);
               await durableRunFinalizeFromOutcome(op.id, outcome);
-              return result;
+              return resultWithMeta;
             };
             const runQueryWithLease = async () => await withProviderSlot({
               op: activeOp,
@@ -2798,6 +3002,7 @@ export function startHttpApi({
       }
 
       if (url.pathname === '/send' && req.method === 'POST') {
+        await runsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
         const timeoutMs = positiveIntOr(body.timeoutMs, 3 * 60_000, 30 * 60_000);
         const text = String(body.text || '');

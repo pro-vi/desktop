@@ -309,6 +309,14 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(persisted.modeIntentProvenance?.stage, 'before_send');
   assert.equal(persisted.modelIntentProvenance, null);
   assert.equal(typeof persisted.finishedAt, 'number');
+  assert.equal(path.basename(persisted.outputManifest?.responsePath || ''), 'assistant_response.md');
+  assert.equal(path.basename(persisted.outputManifest?.metadataPath || ''), 'metadata.json');
+  assert.equal(await fs.readFile(persisted.outputManifest.responsePath, 'utf8'), 'durable answer\n');
+  const outputMetadata = JSON.parse(await fs.readFile(persisted.outputManifest.metadataPath, 'utf8'));
+  assert.equal(outputMetadata.runId, response.data.runId);
+  assert.equal(outputMetadata.conversationUrl, 'https://chatgpt.com/c/durable-run');
+  const fetched = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: response.data.runId } });
+  assert.equal(fetched.data.run.outputManifest.responsePath, persisted.outputManifest.responsePath);
 });
 
 test('http-api: fire-and-forget query finalizes durable run on async error', async (t) => {
@@ -498,6 +506,70 @@ test('http-api: explicit model intent fails if controller returns without confir
   assert.equal(runs.data.runs[0]?.modelIntent, 'gpt-5.4-pro');
 });
 
+test('http-api: query fails closed when actual mode used downgrades from requested mode', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-downgrade-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async ({ modeIntent }) => {
+      assert.equal(modeIntent, 'extended-pro');
+      return {
+        text: 'prompt echo\nInstant\nChatGPT can make mistakes. Check important info.',
+        codeBlocks: [],
+        meta: {
+          modeUsed: 'instant',
+          actualModeIntent: 'instant',
+          actualModeSource: 'page_footer'
+        }
+      };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/mode-downgraded'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    updateTabMeta: () => {},
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'must stay pro', source: 'mcp', modeIntent: 'extended-pro' }
+  });
+  assert.equal(response.res.status, 409);
+  assert.equal(response.data.error, 'mode_intent_activation_failed');
+  assert.equal(response.data.data?.reason, 'mode_intent_downgrade_detected');
+  assert.equal(response.data.data?.state?.activeIntent, 'instant');
+
+  const runs = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: { includeArchived: true } });
+  assert.equal(runs.res.status, 200);
+  assert.equal(runs.data.runs[0]?.status, 'error');
+  assert.equal(runs.data.runs[0]?.phase, 'failed');
+  assert.equal(runs.data.runs[0]?.modeIntent, 'extended-pro');
+});
+
 test('http-api: runs list/get/archive expose durable query history', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-list-'));
   const controller = {
@@ -565,6 +637,54 @@ test('http-api: runs list/get/archive expose durable query history', async (t) =
   });
   assert.equal(listedArchived.res.status, 200);
   assert.equal(listedArchived.data.runs.some((item) => item.id === runId), true);
+});
+
+test('http-api: runs get reloads query output manifest after restart', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-query-output-restart-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => ({ text: 'restart durable answer', codeBlocks: [], meta: {} }),
+    getUrl: async () => 'https://chatgpt.com/c/restart-output-run'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const common = {
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  };
+  const server1 = await startHttpApi({ ...common, port: 0, serverId: 'sid-restart-1' });
+  const port1 = server1.address().port;
+  const response = await req({
+    port: port1,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'persist this across restart' }
+  });
+  assert.equal(response.res.status, 200);
+  const runId = response.data.runId;
+  await new Promise((resolve) => server1.close(resolve));
+
+  const server2 = await startHttpApi({ ...common, port: 0, serverId: 'sid-restart-2' });
+  try {
+    const port2 = server2.address().port;
+    const fetched = await req({ port: port2, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId } });
+    assert.equal(fetched.res.status, 200);
+    assert.equal(fetched.data.run.id, runId);
+    assert.equal(path.basename(fetched.data.run.outputManifest.responsePath), 'assistant_response.md');
+    assert.equal(await fs.readFile(fetched.data.run.outputManifest.responsePath, 'utf8'), 'restart durable answer\n');
+  } finally {
+    await new Promise((resolve) => server2.close(resolve));
+  }
 });
 
 test('http-api: runs open saved conversations and retry exact materialized replay', async (t) => {

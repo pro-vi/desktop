@@ -52,7 +52,7 @@ registerTool(
       maxContextInlineFiles: z.number().optional().describe('Maximum number of text files to inline into the prompt.'),
       maxContextAttachments: z.number().optional().describe('Maximum binary/image files auto-attached from contextPaths.'),
       timeoutMs: z.number().optional().describe('Maximum time to wait for completion.'),
-      fireAndForget: z.boolean().optional().describe('Return immediately after sending the prompt. Poll agentify_status for completion, then agentify_read_page for the response.')
+      fireAndForget: z.boolean().optional().describe('Return immediately after sending the prompt. Poll agentify_get_run for completion and outputManifest.responsePath.')
     }
   },
   async ({
@@ -111,7 +111,7 @@ registerTool(
     });
     if (data.async) {
       return {
-        content: [{ type: 'text', text: `Query submitted (async). tabId=${data.tabId}, key=${data.key || ''}, queryId=${data.queryId || ''}, runId=${data.runId || ''}. Poll agentify_get_run for durable state, then agentify_read_page to retrieve the response.` }],
+        content: [{ type: 'text', text: `Query submitted (async). tabId=${data.tabId}, key=${data.key || ''}, queryId=${data.queryId || ''}, runId=${data.runId || ''}. Poll agentify_get_run for durable state and outputManifest.responsePath.` }],
         structuredContent: data
       };
     }
@@ -334,7 +334,7 @@ registerTool(
 registerTool(
   'agentify_get_run',
   {
-    description: 'Fetch the full durable record for a run, including replay payload and final outcome.',
+    description: 'Fetch the full durable record for a run, including replay payload, final outcome, and saved outputManifest paths.',
     inputSchema: {
       runId: z.string().describe('Durable run id.')
     }

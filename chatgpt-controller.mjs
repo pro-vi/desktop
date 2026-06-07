@@ -56,6 +56,57 @@ function extractConversationUrl(value) {
   }
 }
 
+function inferModeIntentFromFooterText(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const footerIndex = Math.max(
+    lower.lastIndexOf('chatgpt can make mistakes'),
+    lower.lastIndexOf('check important info')
+  );
+  const start = footerIndex >= 0 ? Math.max(0, footerIndex - 320) : Math.max(0, text.length - 480);
+  const end = footerIndex >= 0 ? Math.min(text.length, footerIndex + 220) : text.length;
+  const scope = text.slice(start, end);
+  const candidates = [];
+  const collect = (intent, label, re) => {
+    for (const match of scope.matchAll(re)) {
+      candidates.push({
+        intent,
+        label: match[0] || label,
+        index: Number.isFinite(match.index) ? match.index : 0
+      });
+    }
+  };
+  collect('instant', 'Instant', /\binstant\b/gi);
+  collect('thinking', 'Thinking', /\bthinking\b|\breasoning\b/gi);
+  collect('extended-pro', 'Extended Pro', /\bextended\s*pro\b|\bpro\b/gi);
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.index - a.index);
+  const best = candidates[0];
+  return {
+    intent: best.intent,
+    label: best.label,
+    source: footerIndex >= 0 ? 'page_footer' : 'page_tail'
+  };
+}
+
+function inferActualModeIntent({ text = '', pageText = '' } = {}) {
+  return inferModeIntentFromFooterText(pageText) || inferModeIntentFromFooterText(text);
+}
+
+function buildModeIntentDowngradeError({ requestedIntent, modeUsed, actualMode } = {}) {
+  const err = new Error('mode_intent_activation_failed');
+  err.data = {
+    reason: 'mode_intent_downgrade_detected',
+    targetIntent: requestedIntent || null,
+    state: {
+      activeIntent: modeUsed || null,
+      actualMode: actualMode || null
+    }
+  };
+  return err;
+}
+
 function buildResearchMeta({ activated = false, error = null, tabId = null, conversationUrl = null, debug = null } = {}) {
   return {
     activation: {
@@ -2996,7 +3047,19 @@ export class ChatGPTController {
           }).filter(c => c.text);
           return { codeBlocks: codes };
         })()`);
-        return { text: txt, codeBlocks: extra?.codeBlocks || [], meta: { count: snap?.count || 0, hasError: !!snap?.hasError } };
+        const actualMode = inferActualModeIntent({ text: txt, pageText });
+        return {
+          text: txt,
+          codeBlocks: extra?.codeBlocks || [],
+          meta: {
+            count: snap?.count || 0,
+            hasError: !!snap?.hasError,
+            modeUsed: actualMode?.intent || null,
+            actualModeIntent: actualMode?.intent || null,
+            actualModeLabel: actualMode?.label || null,
+            actualModeSource: actualMode?.source || null
+          }
+        };
       }
 
       await sleep(pollMs);
@@ -3055,7 +3118,7 @@ export class ChatGPTController {
       })()`);
       await this.#typePrompt(prompt);
       const sendDebug = await this.#clickSend();
-      return await this.#waitForAssistantStable({
+      const result = await this.#waitForAssistantStable({
         timeoutMs,
         preSendCount: prePrompt?.count || 0,
         preSendText: prePrompt?.lastText || '',
@@ -3063,6 +3126,27 @@ export class ChatGPTController {
         preSendStopCount: sendDebug?.initialStopCount || 0,
         imageGeneration
       });
+      const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
+      const modeUsed = normalizeChatGptModeIntent(result?.meta?.modeUsed || result?.meta?.actualModeIntent, { fallback: null });
+      const actualModeSource = String(result?.meta?.actualModeSource || '');
+      if (requestedModeIntent && modeUsed && modeUsed !== requestedModeIntent && actualModeSource === 'page_footer') {
+        await this.#emitProgress({
+          phase: 'mode_intent_mismatch',
+          modeIntent: requestedModeIntent,
+          modeUsed,
+          degradedFrom: { modeIntent: requestedModeIntent }
+        });
+        throw buildModeIntentDowngradeError({
+          requestedIntent: requestedModeIntent,
+          modeUsed,
+          actualMode: {
+            intent: modeUsed,
+            label: result?.meta?.actualModeLabel || null,
+            source: result?.meta?.actualModeSource || null
+          }
+        });
+      }
+      return result;
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
