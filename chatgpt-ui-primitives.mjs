@@ -49,7 +49,7 @@ export function normalizeUiText(value) {
 export function isBlockedUiLabel(label) {
   const text = normalizeUiText(label);
   return (
-    /\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b/.test(text) ||
+    /\bfeedback\b|click to remove|remove attached|remove file|\battachment\b|\buploaded\b|\btry again\b|\bretry\b|\bregenerate\b/.test(text) ||
     /project-modal-trigger|open project icon|open conversation options|selected icon|icon color|\blight mode\b|\bdark mode\b/.test(text)
   );
 }
@@ -102,6 +102,11 @@ export function modelIntentForLabel(label, modelEntries = CHATGPT_MODEL_INTENT_E
 export function modelIntentLabelLooksUsable(label, targetIntent) {
   const target = normalizeChatGptModelIntent(targetIntent, { fallback: null });
   return modelIntentPatternMatchesLabel(label, target);
+}
+
+export function modelOptionLabelLooksSelected(label) {
+  const text = normalizeUiText(label);
+  return /^[•●✓✔]\s+/.test(text);
 }
 
 export function isModeOnlyModelPickerState({ menuText = '', optionHints = [] } = {}) {
@@ -268,8 +273,6 @@ export function scoreModelTriggerCandidate(candidate = {}) {
     score = targetMatches ? 165 : 120;
   } else if (modelKeyword && candidate.modelRegion) {
     score = 115;
-  } else if (candidate.projectOptions && !candidate.menuOpen) {
-    score = 90;
   }
 
   if (score >= 0 && candidate.hasDataTestId) score += 10;
@@ -425,6 +428,7 @@ export const CHATGPT_MODEL_PICKER_PRIMITIVES_JS = String.raw`
     ${isBlockedUiLabel.toString()}
     ${modelIntentPatternMatchesLabel.toString()}
     ${modelIntentForLabel.toString()}
+    ${modelOptionLabelLooksSelected.toString()}
     ${isModeOnlyModelPickerState.toString()}
     ${isModelGenerationPickerState.toString()}
     ${modelPickerControlText.toString()}
@@ -439,6 +443,7 @@ export const CHATGPT_MODEL_PICKER_PRIMITIVES_JS = String.raw`
     ${scoreModelVersionDropdownCandidate.toString()}
     return {
       modelIntentForLabel,
+      modelOptionLabelLooksSelected,
       isModeOnlyModelPickerState,
       isModelGenerationPickerState,
       modelPickerControlText,

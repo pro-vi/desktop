@@ -15,6 +15,7 @@ import {
   modeIntentLabelLooksUsable,
   modelIntentForLabel,
   modelIntentLabelLooksUsable,
+  modelOptionLabelLooksSelected,
   scoreModeOptionCandidate,
   scoreModeTriggerCandidate,
   scoreModelConfigureCandidate,
@@ -32,6 +33,10 @@ test('chatgpt-ui-primitives: maps usable model labels and rejects attachment chr
   assert.equal(modelIntentForLabel('Legacy Pro'), 'gpt-5.4-pro');
   assert.equal(modelIntentForLabel('uploaded GPT-5.4 Pro attached file'), null);
   assert.equal(modelIntentLabelLooksUsable('uploaded GPT-5.4 Pro attached file', 'gpt-5.4-pro'), false);
+  assert.equal(modelIntentForLabel('Try again • 5.5 Pro'), null);
+  assert.equal(modelIntentLabelLooksUsable('Try again • 5.5 Pro', 'gpt-5.5-pro'), false);
+  assert.equal(modelIntentForLabel('• 5.5 Pro'), 'gpt-5.5-pro');
+  assert.equal(modelOptionLabelLooksSelected('• 5.5 Pro'), true);
 });
 
 test('chatgpt-ui-primitives: detects current mode-only model switcher menus', () => {
@@ -179,6 +184,19 @@ test('chatgpt-ui-primitives: does not score off-region project mode or stale-ope
     }),
     -1
   );
+  assert.equal(
+    scoreModelTriggerCandidate({
+      label: 'Open project options for Agentify',
+      targetIntent: 'gpt-5.5-pro',
+      projectOptions: true,
+      modelRegion: true,
+      menuOpen: false,
+      area: 1_024,
+      width: 32,
+      height: 32
+    }),
+    -1
+  );
 });
 
 test('chatgpt-ui-primitives: scores target model options and pending trigger tracking', () => {
@@ -197,6 +215,17 @@ test('chatgpt-ui-primitives: scores target model options and pending trigger tra
     scoreModelOptionCandidate({
       label: 'GPT-5.5 Pro',
       targetIntent: 'gpt-5.4-pro',
+      optionInsideMenu: true,
+      area: 7_200,
+      width: 200,
+      height: 36
+    }),
+    -1
+  );
+  assert.equal(
+    scoreModelOptionCandidate({
+      label: 'Try again • 5.5 Pro',
+      targetIntent: 'gpt-5.5-pro',
       optionInsideMenu: true,
       area: 7_200,
       width: 200,
@@ -358,6 +387,7 @@ test('chatgpt-ui-primitives: exposes browser evaluator source for the controller
   assert.match(CHATGPT_MODEL_PICKER_PRIMITIVES_JS, /isModeOnlyModelPickerState/);
   assert.match(CHATGPT_MODEL_PICKER_PRIMITIVES_JS, /isModelGenerationPickerState/);
   assert.match(CHATGPT_MODEL_PICKER_PRIMITIVES_JS, /isProjectModelModeControlDescriptor/);
+  assert.match(CHATGPT_MODEL_PICKER_PRIMITIVES_JS, /modelOptionLabelLooksSelected/);
 });
 
 test('chatgpt-ui-primitives: maps usable mode labels and rejects attachment chrome', () => {

@@ -861,7 +861,9 @@ export class ChatGPTController {
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
-            const ariaChecked = String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true';
+            const ariaChecked =
+              String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true' ||
+              modelPickerPrimitives.modelOptionLabelLooksSelected(label);
             const active = isActive(node);
             const score = modelPickerPrimitives.scoreModelOptionCandidate({
               label,
@@ -2648,6 +2650,19 @@ export class ChatGPTController {
 
     // Fallback to CDP setFileInputFiles if Blob injection didn't find an input
     if (!injected?.ok) {
+      const sawFileInput =
+        attachOpen?.action === 'file_input_ready' ||
+        Number(injected?.localInputCount || 0) > 0 ||
+        Number(injected?.totalInputCount || 0) > 0;
+      if (!sawFileInput) {
+        const err = new Error('attachment_input_unavailable');
+        err.data = {
+          reason: clipText(injected?.error || attachOpen?.reason || 'no_file_input', 160),
+          pickerAction: attachOpen?.action || null,
+          pickerLabel: clipText(attachOpen?.label || '', 160) || null
+        };
+        throw err;
+      }
       await this.page.setFileInputFiles(absFiles);
       await this.#emitProgress({
         attachmentDebug: {

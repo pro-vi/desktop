@@ -2113,7 +2113,7 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
   }
 });
 
-test('chatgpt-controller: query does not click direct Add files controls that can open native picker', async () => {
+test('chatgpt-controller: query fails fast on direct Add files controls that can open native picker', async () => {
   const realNow = Date.now;
   let fakeNow = 5_000_000;
   Date.now = () => {
@@ -2124,6 +2124,7 @@ test('chatgpt-controller: query does not click direct Add files controls that ca
   const attachment = path.join(dir, 'PROGRESS.md');
   await fs.writeFile(attachment, '# progress\n', 'utf8');
   let clicked = false;
+  let fallbackCalled = false;
 
   try {
     const page = {
@@ -2152,6 +2153,7 @@ test('chatgpt-controller: query does not click direct Add files controls that ca
       },
       async mouseUp() {},
       async setFileInputFiles() {
+        fallbackCalled = true;
         throw new Error('missing_file_input');
       }
     };
@@ -2168,9 +2170,10 @@ test('chatgpt-controller: query does not click direct Add files controls that ca
 
     await assert.rejects(
       controller.query({ prompt: 'agentify', attachments: [attachment], timeoutMs: 20_000 }),
-      /missing_file_input/
+      /attachment_input_unavailable/
     );
     assert.equal(clicked, false);
+    assert.equal(fallbackCalled, false);
   } finally {
     Date.now = realNow;
     await fs.rm(dir, { recursive: true, force: true });
