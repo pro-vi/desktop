@@ -106,11 +106,53 @@ function assertRunId(runId) {
   return id;
 }
 
-function toSummary(run) {
+function summarizeResearchMeta(researchMeta) {
+  const meta = normalizeObject(researchMeta);
+  if (!meta) return null;
+  const activation = normalizeObject(meta.activation) || {};
+  const outputManifest = normalizeObject(meta.outputManifest) || {};
+  const out = {
+    activation: {
+      requested: activation.requested !== false,
+      activated: !!activation.activated,
+      error: normalizeString(activation.error),
+      tabId: normalizeString(activation.tabId),
+      conversationUrl: normalizeString(activation.conversationUrl)
+    },
+    outputManifest: {
+      dir: normalizeString(outputManifest.dir),
+      responsePath: normalizeString(outputManifest.responsePath),
+      exportedMarkdownPath: normalizeString(outputManifest.exportedMarkdownPath),
+      files: Array.isArray(outputManifest.files)
+        ? outputManifest.files
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => safeClone(item))
+        : []
+    }
+  };
+  if (
+    !out.activation.requested &&
+    !out.activation.activated &&
+    !out.activation.error &&
+    !out.activation.tabId &&
+    !out.activation.conversationUrl &&
+    !out.outputManifest.dir &&
+    !out.outputManifest.responsePath &&
+    !out.outputManifest.exportedMarkdownPath &&
+    !out.outputManifest.files.length
+  ) {
+    return null;
+  }
+  return out;
+}
+
+export function summarizeRun(run, { includeResearchMeta = false } = {}) {
   const record = normalizeRun(run);
+  const researchMeta = includeResearchMeta ? summarizeResearchMeta(record.researchMeta) : null;
   delete record.logicalRequest;
   delete record.materializedReplay;
   delete record.researchMeta;
+  if (researchMeta) record.researchMeta = researchMeta;
   return record;
 }
 
@@ -233,13 +275,19 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     return current ? safeClone(current) : null;
   }
 
+  function getSummary(runId, options = {}) {
+    const id = assertRunId(runId);
+    const current = records.get(id);
+    return current ? summarizeRun(current, options) : null;
+  }
+
   function list({ includeArchived = false, limit = 100 } = {}) {
     const cap = Math.max(1, Math.min(500, Number(limit) || 100));
     return Array.from(records.values())
       .filter((item) => includeArchived || !item.archivedAt)
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
       .slice(0, cap)
-      .map((item) => toSummary(item));
+      .map((item) => summarizeRun(item));
   }
 
   async function finalizeStaleRunning({ status = 'stopped', detail = 'Interrupted by desktop restart.' } = {}) {
@@ -269,6 +317,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     finalizeStaleRunning,
     archive,
     get,
+    getSummary,
     list
   };
 }

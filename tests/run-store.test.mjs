@@ -236,4 +236,11 @@ test('run-store: researchMeta persists, merges on patch, and stays out of list s
   const listed = store.list({ includeArchived: true });
   assert.equal(listed.length, 1);
   assert.equal('researchMeta' in listed[0], false);
+
+  const summary = store.getSummary('run-research-1', { includeResearchMeta: true });
+  assert.equal('logicalRequest' in summary, false);
+  assert.equal('materializedReplay' in summary, false);
+  assert.equal(summary.researchMeta.activation.activated, true);
+  assert.equal(summary.researchMeta.activation.debug, undefined);
+  assert.equal(summary.researchMeta.outputManifest.responsePath, '/tmp/research-output/final-response.md');
 });

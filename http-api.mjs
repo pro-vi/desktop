@@ -2024,6 +2024,76 @@ export function startHttpApi({
     return run;
   };
 
+  const getRunSummaryOrThrow = (runId) => {
+    const id = String(runId || '').trim();
+    if (!id) throw new Error('missing_run_id');
+    const run = runStore.getSummary(id, { includeResearchMeta: true });
+    if (!run) throw new Error('run_not_found');
+    return run;
+  };
+
+  const compactRunViewRequested = (body = {}) => {
+    if (body.full === false || body.compact === true) return true;
+    const view = String(body.view || '').trim().toLowerCase();
+    return view === 'summary' || view === 'compact' || view === 'poll';
+  };
+
+  const outputManifestForRun = (run) => {
+    const queryManifest = run?.outputManifest && typeof run.outputManifest === 'object' ? run.outputManifest : null;
+    const researchManifest = run?.researchMeta?.outputManifest && typeof run.researchMeta.outputManifest === 'object'
+      ? run.researchMeta.outputManifest
+      : null;
+    const hasOutputPath = (manifest) => !!String(manifest?.responsePath || manifest?.exportedMarkdownPath || '').trim();
+    if (hasOutputPath(queryManifest)) return queryManifest;
+    if (hasOutputPath(researchManifest)) return researchManifest;
+    return queryManifest || researchManifest || null;
+  };
+
+  const readRunOutputText = async (run, { maxOutputChars } = {}) => {
+    const max = positiveIntOr(maxOutputChars, 200_000, 1_000_000);
+    const manifest = outputManifestForRun(run);
+    const outputPath = String(manifest?.responsePath || manifest?.exportedMarkdownPath || '').trim();
+    const base = {
+      outputPath: outputPath || null,
+      outputText: null,
+      outputTruncated: false,
+      outputChars: 0,
+      maxOutputChars: max
+    };
+    if (!outputPath) return base;
+    try {
+      const ready = await assertArtifactFileReady(outputPath);
+      const realArtifactsRoot = await fs.realpath(artifactsRoot(stateDir)).catch(() => path.resolve(artifactsRoot(stateDir)));
+      const realOutputPath = ready.realFilePath || ready.filePath;
+      assertWithin({ filePath: realOutputPath, allowedRoots: [realArtifactsRoot] });
+      const text = await fs.readFile(realOutputPath, 'utf8');
+      return {
+        ...base,
+        outputPath: realOutputPath,
+        outputText: text.length > max ? text.slice(0, max) : text,
+        outputTruncated: text.length > max,
+        outputChars: text.length
+      };
+    } catch (error) {
+      return {
+        ...base,
+        outputError: String(error?.message || 'output_read_failed')
+      };
+    }
+  };
+
+  const getRunPayload = async (body = {}) => {
+    const fullRun = getRunRecordOrThrow(body.runId);
+    const run = compactRunViewRequested(body)
+      ? getRunSummaryOrThrow(body.runId)
+      : fullRun;
+    const payload = { ok: true, run };
+    if (body.includeOutputText === true) {
+      Object.assign(payload, await readRunOutputText(fullRun, { maxOutputChars: body.maxOutputChars }));
+    }
+    return payload;
+  };
+
   const listRunsAction = async ({ includeArchived = false, limit = 100 } = {}) => {
     await runsReady;
     return runsSnapshot({ includeArchived, limit });
@@ -3206,8 +3276,7 @@ export function startHttpApi({
       if (url.pathname === '/runs/get' && req.method === 'POST') {
         await runsReady;
         const body = await parseBody(req);
-        const run = getRunRecordOrThrow(body.runId);
-        return sendJson(res, 200, { ok: true, run });
+        return sendJson(res, 200, await getRunPayload(body));
       }
 
       if (url.pathname === '/runs/archive' && req.method === 'POST') {

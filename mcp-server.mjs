@@ -19,6 +19,49 @@ function resolveLocalPaths(items) {
     .map((item) => (path.isAbsolute(item) ? item : path.resolve(process.cwd(), item)));
 }
 
+function asyncQueryStructuredContent(data = {}) {
+  return {
+    ok: data.ok !== false,
+    async: true,
+    tabId: data.tabId || null,
+    key: data.key || null,
+    queryId: data.queryId || null,
+    runId: data.runId || null,
+    packedContextSummary: data.packedContextSummary || null
+  };
+}
+
+function runOutputPath(run = {}, data = {}) {
+  return (
+    data.outputPath ||
+    run?.outputManifest?.responsePath ||
+    run?.researchMeta?.outputManifest?.responsePath ||
+    run?.researchMeta?.outputManifest?.exportedMarkdownPath ||
+    null
+  );
+}
+
+function runStatusText(run = {}, data = {}) {
+  if (!run) return 'Run not found.';
+  const bits = [
+    `runId=${run.id || ''}`,
+    `status=${run.status || ''}`,
+    run.phase ? `phase=${run.phase}` : null,
+    run.kind ? `kind=${run.kind}` : null
+  ].filter(Boolean);
+  const lines = [bits.join(' ')];
+  if (run.label) lines.push(`label=${run.label}`);
+  if (run.detail) lines.push(`detail=${run.detail}`);
+  const outputPath = runOutputPath(run, data);
+  if (outputPath) lines.push(`outputPath=${outputPath}`);
+  if (data.outputError) lines.push(`outputError=${data.outputError}`);
+  if (typeof data.outputText === 'string') {
+    const truncation = data.outputTruncated ? `\n\n[output truncated at ${data.maxOutputChars} chars]\n` : '\n';
+    lines.push(`${truncation}${data.outputText}`);
+  }
+  return lines.join('\n');
+}
+
 function registerTool(name, def, handler) {
   server.registerTool(name, def, handler);
 }
@@ -52,7 +95,7 @@ registerTool(
       maxContextInlineFiles: z.number().optional().describe('Maximum number of text files to inline into the prompt.'),
       maxContextAttachments: z.number().optional().describe('Maximum binary/image files auto-attached from contextPaths.'),
       timeoutMs: z.number().optional().describe('Maximum time to wait for completion.'),
-      fireAndForget: z.boolean().optional().describe('Return immediately after sending the prompt. Poll agentify_get_run for completion and outputManifest.responsePath.')
+      fireAndForget: z.boolean().optional().describe('Return immediately after sending the prompt. Poll agentify_get_run for compact state; use includeOutputText after completion to pull the saved response.')
     }
   },
   async ({
@@ -110,9 +153,10 @@ registerTool(
       }
     });
     if (data.async) {
+      const structuredContent = asyncQueryStructuredContent(data);
       return {
-        content: [{ type: 'text', text: `Query submitted (async). tabId=${data.tabId}, key=${data.key || ''}, queryId=${data.queryId || ''}, runId=${data.runId || ''}. Poll agentify_get_run for durable state and outputManifest.responsePath.` }],
-        structuredContent: data
+        content: [{ type: 'text', text: `Query submitted (async). tabId=${structuredContent.tabId || ''}, key=${structuredContent.key || ''}, queryId=${structuredContent.queryId || ''}, runId=${structuredContent.runId || ''}. Poll agentify_get_run for compact state; use includeOutputText after completion to pull the saved response.` }],
+        structuredContent
       };
     }
     const structuredContent = {
@@ -334,21 +378,35 @@ registerTool(
 registerTool(
   'agentify_get_run',
   {
-    description: 'Fetch the full durable record for a run, including replay payload, final outcome, and saved outputManifest paths.',
+    description: 'Fetch durable run status. Defaults to a compact polling view that omits replay payloads; set full=true only for replay/debug. Set includeOutputText=true after completion to pull saved markdown output without replay data.',
     inputSchema: {
-      runId: z.string().describe('Durable run id.')
+      runId: z.string().describe('Durable run id.'),
+      full: z.boolean().optional().describe('Return the full durable replay/debug record. Defaults to false for low-token polling.'),
+      includeOutputText: z.boolean().optional().describe('Include saved response markdown from outputManifest.responsePath, capped by maxOutputChars.'),
+      maxOutputChars: z.number().optional().describe('Maximum output markdown characters to return when includeOutputText is true. Defaults to 200000.')
     }
   },
-  async ({ runId }) => {
+  async ({ runId, full, includeOutputText, maxOutputChars }) => {
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/runs/get',
-      body: { runId }
+      body: {
+        runId,
+        view: full ? 'full' : 'summary',
+        includeOutputText: !!includeOutputText,
+        maxOutputChars: maxOutputChars || undefined
+      }
     });
+    if (full && !includeOutputText) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(data.run || null, null, 2) }],
+        structuredContent: data
+      };
+    }
     return {
-      content: [{ type: 'text', text: JSON.stringify(data.run || null, null, 2) }],
+      content: [{ type: 'text', text: runStatusText(data.run || null, data) }],
       structuredContent: data
     };
   }

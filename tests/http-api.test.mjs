@@ -619,6 +619,27 @@ test('http-api: runs list/get/archive expose durable query history', async (t) =
   assert.equal(fetched.data.run.logicalRequest.prompt, 'keep this durable');
   assert.equal(fetched.data.run.materializedReplay.prompt, 'keep this durable');
 
+  const compact = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId, view: 'summary' } });
+  assert.equal(compact.res.status, 200);
+  assert.equal(compact.data.run.id, runId);
+  assert.equal('logicalRequest' in compact.data.run, false);
+  assert.equal('materializedReplay' in compact.data.run, false);
+  assert.equal(compact.data.run.outputManifest.responsePath, fetched.data.run.outputManifest.responsePath);
+
+  const output = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId, view: 'summary', includeOutputText: true, maxOutputChars: 7 }
+  });
+  assert.equal(output.res.status, 200);
+  assert.equal(output.data.run.id, runId);
+  assert.equal('logicalRequest' in output.data.run, false);
+  assert.equal(output.data.outputText, 'history');
+  assert.equal(output.data.outputTruncated, true);
+  assert.equal(output.data.outputChars, 'history answer\n'.length);
+
   const archived = await req({ port, token: 'secret', method: 'POST', pth: '/runs/archive', body: { runId } });
   assert.equal(archived.res.status, 200);
   assert.equal(archived.data.runId, runId);
@@ -637,6 +658,75 @@ test('http-api: runs list/get/archive expose durable query history', async (t) =
   });
   assert.equal(listedArchived.res.status, 200);
   assert.equal(listedArchived.data.runs.some((item) => item.id === runId), true);
+});
+
+test('http-api: compact runs/get payload is materially smaller than full replay payload', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-payload-size-'));
+  const longPrompt = 'token-heavy prompt line\n'.repeat(4_000);
+  const longAnswer = 'final answer line\n'.repeat(500);
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async ({ prompt }) => {
+      assert.equal(prompt, longPrompt);
+      return { text: longAnswer, codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/payload-proof'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const queried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: longPrompt, source: 'mcp' }
+  });
+  assert.equal(queried.res.status, 200);
+  const runId = queried.data.runId;
+
+  const full = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId } });
+  const compact = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId, view: 'summary' } });
+  const compactWithOutput = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId, view: 'summary', includeOutputText: true, maxOutputChars: 1_200 }
+  });
+
+  const fullBytes = Buffer.byteLength(JSON.stringify(full.data), 'utf8');
+  const compactBytes = Buffer.byteLength(JSON.stringify(compact.data), 'utf8');
+  const compactWithOutputBytes = Buffer.byteLength(JSON.stringify(compactWithOutput.data), 'utf8');
+
+  assert.equal(full.data.run.logicalRequest.prompt, longPrompt);
+  assert.equal(full.data.run.materializedReplay.prompt, longPrompt);
+  assert.equal('logicalRequest' in compact.data.run, false);
+  assert.equal('materializedReplay' in compact.data.run, false);
+  assert.equal('logicalRequest' in compactWithOutput.data.run, false);
+  assert.equal('materializedReplay' in compactWithOutput.data.run, false);
+  assert.equal(compactWithOutput.data.outputText, longAnswer.slice(0, 1_200));
+  assert.equal(compactWithOutput.data.outputTruncated, true);
+  assert.ok(fullBytes > 175_000, `expected full replay payload to be large, got ${fullBytes}`);
+  assert.ok(compactBytes * 20 < fullBytes, `expected compact payload to be >20x smaller, got full=${fullBytes} compact=${compactBytes}`);
+  assert.ok(compactWithOutputBytes * 10 < fullBytes, `expected compact output payload to stay >10x smaller, got full=${fullBytes} compactWithOutput=${compactWithOutputBytes}`);
 });
 
 test('http-api: runs get reloads query output manifest after restart', async () => {
@@ -1192,6 +1282,20 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
   const summary = listed.data.runs.find((item) => item.id === originalRunId);
   assert.ok(summary);
   assert.equal('researchMeta' in summary, false);
+
+  const compact = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: originalRunId, view: 'summary', includeOutputText: true }
+  });
+  assert.equal(compact.res.status, 200);
+  assert.equal('logicalRequest' in compact.data.run, false);
+  assert.equal('materializedReplay' in compact.data.run, false);
+  assert.equal(compact.data.run.researchMeta.activation.activated, true);
+  assert.equal(path.basename(compact.data.run.researchMeta.outputManifest.responsePath), 'response.md');
+  assert.equal(compact.data.outputText, 'research answer 1\n');
 
   const retried = await req({
     port,
