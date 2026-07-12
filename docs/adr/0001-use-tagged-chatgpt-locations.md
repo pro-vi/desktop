@@ -48,4 +48,3 @@ Negative:
 - `chatgpt-location.mjs`
 - `tests/chatgpt-location.test.mjs`
 - `tests/http-api.test.mjs`
-

@@ -143,4 +143,3 @@ export function derivedChatKey(chatUrl) {
   const target = parseChatGptEntryTarget(chatUrl);
   return `chat-${crypto.createHash('sha256').update(target.chatUrl).digest('hex').slice(0, 16)}`;
 }
-

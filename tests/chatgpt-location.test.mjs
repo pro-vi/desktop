@@ -56,4 +56,3 @@ test('chatgpt-location: derives stable isolated keys', () => {
   assert.equal(derivedChatKey('https://chatgpt.com/share/a'), derivedChatKey('https://chatgpt.com/share/a#fragment'));
   assert.match(derivedChatKey('https://chatgpt.com/share/a'), /^chat-[a-f0-9]{16}$/);
 });
-
