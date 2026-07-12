@@ -1,6 +1,6 @@
 # ADR 0002: Use Service-Owned Runs and Receipt-Backed Completion
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-12
 - **Deciders:** Agentify Desktop maintainers and Codex architecture/build session
 
