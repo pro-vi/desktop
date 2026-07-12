@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
+import { parseChatGptEntryTarget } from './chatgpt-location.mjs';
 import {
   CHATGPT_ANY_MODE_PATTERN,
   CHATGPT_ANY_MODEL_PATTERN,
@@ -288,6 +289,14 @@ export class ChatGPTController {
 
   async navigate(url) {
     await this.page.navigate(url);
+  }
+
+  async prepareChatEntry({ chatUrl, timeoutMs = 30_000 } = {}) {
+    const target = parseChatGptEntryTarget(chatUrl);
+    const currentUrl = await this.getUrl().catch(() => '');
+    if (currentUrl !== target.chatUrl) await this.navigate(target.chatUrl);
+    await this.ensureReady({ timeoutMs });
+    return target;
   }
 
   async #eval(js) {
@@ -3732,9 +3741,34 @@ export class ChatGPTController {
       const run = { kind: 'send', requested: false, requestedAt: null, reason: null, onProgress };
       this.currentRun = run;
       try {
+        const initialUrl = await this.getUrl().catch(() => '');
+        const initialTarget = (() => {
+          try { return parseChatGptEntryTarget(initialUrl); } catch { return null; }
+        })();
         await this.ensureReady({ timeoutMs });
         await this.#typePrompt(prompt);
         await this.#clickSend();
+
+        let materializedConversationUrl = null;
+        if (initialTarget?.kind === 'shared-snapshot') {
+          const startedAt = Date.now();
+          const materializationTimeoutMs = Math.min(Math.max(1_000, timeoutMs), 15_000);
+          while (Date.now() - startedAt < materializationTimeoutMs) {
+            this.#throwIfStopRequested();
+            const candidate = extractConversationUrl(await this.getUrl().catch(() => ''));
+            if (candidate) {
+              materializedConversationUrl = candidate;
+              await this.#emitProgress({ phase: 'conversation_materialized', conversationUrl: candidate });
+              break;
+            }
+            await sleep(120);
+          }
+          if (!materializedConversationUrl) {
+            const error = new Error('shared_chat_materialization_failed');
+            error.data = { sourceUrl: initialTarget.chatUrl };
+            throw error;
+          }
+        }
 
         if (stopAfterSend) {
           const start = Date.now();
@@ -3746,7 +3780,9 @@ export class ChatGPTController {
           }
         }
 
-        return { ok: true };
+        return materializedConversationUrl
+          ? { ok: true, conversationUrl: materializedConversationUrl }
+          : { ok: true };
       } finally {
         if (this.currentRun === run) this.currentRun = null;
       }

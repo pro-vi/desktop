@@ -69,6 +69,8 @@ function normalizeRun(input = {}) {
     key: normalizeString(input.key),
     vendorId: normalizeString(input.vendorId),
     vendorName: normalizeString(input.vendorName),
+    location: normalizeObject(input.location),
+    sourceChatUrl: normalizeString(input.sourceChatUrl),
     projectUrl: normalizeString(input.projectUrl),
     conversationUrl: normalizeString(input.conversationUrl),
     modeIntent: normalizeString(input.modeIntent),

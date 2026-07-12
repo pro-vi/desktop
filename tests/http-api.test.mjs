@@ -1151,6 +1151,103 @@ test('http-api: keyed navigate persists conversationUrl for later query recovery
   assert.equal(navigateCalls.at(-1), recoveredConversationUrl);
 });
 
+test('http-api: explicit shared chat materializes outside the default project and replaces stale affinity', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-shared-chat-'));
+  await writeProjects({
+    external: {
+      projectUrl: 'https://chatgpt.com/g/g-p-agentify/project',
+      conversationUrl: null,
+      modeIntent: 'extended-pro'
+    }
+  }, stateDir);
+  let currentUrl = 'https://chatgpt.com/';
+  const navigations = [];
+  const tabsList = [{ id: 't-external', key: 'external', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: 'https://chatgpt.com/g/g-p-agentify/project' }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async ({ chatUrl }) => {
+      navigations.push(chatUrl);
+      currentUrl = chatUrl;
+    },
+    query: async ({ onProgress }) => {
+      currentUrl = 'https://chatgpt.com/c/private-copy';
+      await onProgress?.({ phase: 'conversation_materialized', conversationUrl: currentUrl });
+      return { text: 'continued outside project', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => currentUrl
+  };
+  const tabs = {
+    listTabs: () => tabsList,
+    ensureTab: async () => 't-external',
+    createTab: async () => 't-external',
+    updateTabMeta: (tabId, patch) => Object.assign(tabsList.find((item) => item.id === tabId), patch || {}),
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't-external',
+    stateDir,
+    getSettings: async () => ({
+      defaultProjectUrl: 'https://chatgpt.com/g/g-p-agentify/project',
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0
+    }),
+    getStatus: async () => ({ ok: true, url: currentUrl, tabs: tabsList })
+  });
+  t.after(() => server.close());
+
+  const response = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      key: 'external',
+      chatUrl: 'https://chatgpt.com/share/source-thread',
+      prompt: 'continue here'
+    }
+  });
+
+  assert.equal(response.res.status, 200);
+  assert.deepEqual(navigations, ['https://chatgpt.com/share/source-thread']);
+  assert.equal(tabsList[0].projectUrl, null);
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'projects.json'), 'utf8'));
+  assert.equal(persisted.external.location.kind, 'standalone-conversation');
+  assert.equal(persisted.external.location.sourceUrl, 'https://chatgpt.com/share/source-thread');
+  assert.equal(persisted.external.projectUrl, null);
+  assert.equal(persisted.external.conversationUrl, 'https://chatgpt.com/c/private-copy');
+});
+
+test('http-api: chatUrl and projectUrl conflict before navigation', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-chat-conflict-'));
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs: { listTabs: () => [], createTab: async () => { throw new Error('should_not_navigate'); } },
+    defaultTabId: 't0',
+    stateDir,
+    getSettings: async () => ({})
+  });
+  t.after(() => server.close());
+  const response = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      chatUrl: 'https://chatgpt.com/c/a',
+      projectUrl: 'https://chatgpt.com/g/g-p-a/project',
+      prompt: 'conflict'
+    }
+  });
+  assert.equal(response.res.status, 400);
+  assert.equal(response.data.error, 'chatgpt_location_conflict');
+});
+
 test('http-api: research is async, clamps timeout, persists outputs, and retries as research', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-success-'));
   const researchCalls = [];

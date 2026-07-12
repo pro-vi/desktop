@@ -79,6 +79,55 @@ test('chatgpt-controller: send falls back to requestSubmit on the active compose
   assert.equal(events.includes('key:Enter'), false);
 });
 
+test('chatgpt-controller: shared reply materializes a canonical private conversation', async () => {
+  let currentUrl = 'https://chatgpt.com/share/shared-source';
+  let waitForSendChecks = 0;
+  const progress = [];
+  const page = {
+    async navigate(url) { currentUrl = url; },
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return { ...readyState(), url: currentUrl };
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 200, h: 40 } };
+      if (js.includes('form.requestSubmit')) return true;
+      if (js.includes('already_generating')) {
+        currentUrl = 'https://chatgpt.com/c/materialized-copy';
+        return { ok: true, requestSubmit: true, host: 'chatgpt.com', promptLen: 5 };
+      }
+      if (js.includes('promptLen')) {
+        waitForSendChecks += 1;
+        return waitForSendChecks >= 2
+          ? { stopVisible: false, sendDisabled: true, promptLen: 0 }
+          : { stopVisible: false, sendDisabled: false, promptLen: 5 };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return currentUrl; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.send({
+    text: 'reply',
+    timeoutMs: 5_000,
+    onProgress: (patch) => progress.push(patch)
+  });
+  assert.deepEqual(result, { ok: true, conversationUrl: 'https://chatgpt.com/c/materialized-copy' });
+  assert.equal(progress.some((patch) => patch.phase === 'conversation_materialized'), true);
+});
+
 test('chatgpt-controller: send avoids requestSubmit when no explicit send submitter is available', async () => {
   const events = [];
   let waitForSendChecks = 0;
