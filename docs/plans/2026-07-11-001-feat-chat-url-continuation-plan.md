@@ -2,7 +2,7 @@
 title: Standalone ChatGPT URL Continuation
 objective: Let coding agents continue supplied ChatGPT conversations without silently moving work into Agentify's default ChatGPT project.
 type: feat
-status: active
+status: completed
 date: 2026-07-11
 origin: standalone architecture conversation
 ---
@@ -214,4 +214,3 @@ If this transition is not reliable, canonical `/c/...` continuation may ship whi
 | Legacy migration changes routing | Conversation-specific URL wins over stale broad project; exhaustive fixtures |
 | Explicit URL contaminates default key | Deterministic dedicated key when none supplied |
 | Future URL families are misclassified | Allowlist HTTPS host/path families and reject unknown variants |
-
