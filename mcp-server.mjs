@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { defaultStateDir } from './state.mjs';
 import { ensureDesktopRunning, requestJson } from './mcp-lib.mjs';
+import { waitForRun } from './run-waiter.mjs';
 
 const server = new McpServer({ name: 'agentify-desktop', version: '0.1.0' });
 const stateDir = defaultStateDir();
@@ -411,6 +412,34 @@ registerTool(
     return {
       content: [{ type: 'text', text: runStatusText(data.run || null, data) }],
       structuredContent: data
+    };
+  }
+);
+
+registerTool(
+  'agentify_wait_run',
+  {
+    description: 'Wait for a durable output-bearing run to truly finish. Success is returned only after Agentify validates and registers the saved response artifacts. Waiting does not cancel or mutate the run.',
+    inputSchema: {
+      runId: z.string().describe('Durable query or research run id. Dispatch-only send runs are unsupported.'),
+      timeoutMs: z.number().optional().describe('Caller-only wait deadline. Omit or use 0 to wait indefinitely; this never changes run state.'),
+      includeOutputText: z.boolean().optional().describe('Include saved response markdown. Defaults to true.'),
+      maxOutputChars: z.number().optional().describe('Maximum response characters to include.')
+    }
+  },
+  async ({ runId, timeoutMs, includeOutputText, maxOutputChars }) => {
+    const conn = await getConn();
+    const data = await waitForRun({
+      conn,
+      runId,
+      timeoutMs: timeoutMs || 0,
+      includeOutputText: includeOutputText !== false,
+      maxOutputChars
+    });
+    return {
+      content: [{ type: 'text', text: runStatusText(data.run || null, data) }],
+      structuredContent: data,
+      isError: data.run?.status !== 'success'
     };
   }
 );

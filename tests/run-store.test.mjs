@@ -6,6 +6,17 @@ import fs from 'node:fs/promises';
 
 import { createRunStore } from '../run-store.mjs';
 
+function completionReceipt(kind = 'assistant-response') {
+  return {
+    version: 1,
+    kind,
+    responsePath: '/tmp/response.md',
+    artifactIds: ['response'],
+    responseSha256: 'a'.repeat(64),
+    capturedAt: Date.now()
+  };
+}
+
 test('run-store: create, patch, finalize, and archive lifecycle', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-'));
   const store = createRunStore(stateDir);
@@ -36,7 +47,7 @@ test('run-store: create, patch, finalize, and archive lifecycle', async () => {
   assert.equal(patched.blocked, true);
   assert.equal(patched.blockedKind, 'login');
 
-  const finalized = await store.finalize('run-1', { status: 'success', detail: 'Done.', conversationUrl: 'https://chatgpt.com/c/abc' });
+  const finalized = await store.finalize('run-1', { status: 'success', detail: 'Done.', conversationUrl: 'https://chatgpt.com/c/abc', completionReceipt: completionReceipt() });
   assert.equal(finalized.status, 'success');
   assert.equal(typeof finalized.finishedAt, 'number');
   assert.equal(finalized.conversationUrl, 'https://chatgpt.com/c/abc');
@@ -85,7 +96,7 @@ test('run-store: finalize is exact-once for terminal state', async () => {
   });
 
   const first = await store.finalize('run-3', { status: 'stopped', detail: 'user_stop' });
-  const second = await store.finalize('run-3', { status: 'success', detail: 'should_not_replace' });
+  const second = await store.finalize('run-3', { status: 'success', detail: 'should_not_replace', completionReceipt: completionReceipt() });
 
   assert.equal(first.status, 'stopped');
   assert.equal(second.status, 'stopped');
@@ -108,7 +119,8 @@ test('run-store: terminal success cannot retain an in-flight phase', async () =>
 
   const finalized = await store.finalize('run-terminal-phase', {
     status: 'success',
-    detail: 'done'
+    detail: 'done',
+    completionReceipt: completionReceipt()
   });
 
   assert.equal(finalized.status, 'success');
@@ -168,13 +180,34 @@ test('run-store: queued writes keep finalized runs terminal on disk', async () =
 
   await Promise.all([
     store.patch('run-4', { phase: 'waiting_for_response', status: 'running' }),
-    store.finalize('run-4', { status: 'success', detail: 'done' })
+    store.finalize('run-4', { status: 'success', detail: 'done', completionReceipt: completionReceipt() })
   ]);
 
   const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', 'run-4.json'), 'utf8'));
   assert.equal(persisted.status, 'success');
   assert.equal(persisted.detail, 'done');
   assert.equal(typeof persisted.finishedAt, 'number');
+});
+
+test('run-store: revisions publish only after durable writes and support multiple listeners', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-revisions-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  const seenA = [];
+  const seenB = [];
+  const unsubscribeA = store.subscribe((run) => seenA.push(run.revision));
+  const unsubscribeB = store.subscribe((run) => seenB.push(run.revision));
+  const created = await store.create({ id: 'run-revision', kind: 'query', status: 'running' });
+  const patched = await store.patch('run-revision', { phase: 'waiting_for_response' });
+  unsubscribeA();
+  await store.finalize('run-revision', { status: 'interrupted' });
+  unsubscribeB();
+
+  assert.deepEqual([created.revision, patched.revision], [1, 2]);
+  assert.deepEqual(seenA, [1, 2]);
+  assert.deepEqual(seenB, [1, 2, 3]);
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', 'run-revision.json'), 'utf8'));
+  assert.equal(persisted.revision, 3);
 });
 
 test('run-store: researchMeta persists, merges on patch, and stays out of list summaries', async (t) => {
@@ -227,7 +260,7 @@ test('run-store: researchMeta persists, merges on patch, and stays out of list s
   assert.equal(patched?.researchMeta?.outputManifest?.responsePath, '/tmp/research-output/final-response.md');
   assert.equal(patched?.researchMeta?.outputManifest?.exportedMarkdownPath, '/tmp/research-output/export.md');
 
-  await store.finalize('run-research-1', { status: 'success' });
+  await store.finalize('run-research-1', { status: 'success', completionReceipt: completionReceipt('research-report') });
 
   const reloaded = createRunStore(stateDir);
   await reloaded.load();

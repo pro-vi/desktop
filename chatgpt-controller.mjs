@@ -2873,7 +2873,8 @@ export class ChatGPTController {
     minimumTimeoutMs = 0,
     minimumStableMs = 0,
     extraThinkingPattern = '',
-    imageGeneration = false
+    imageGeneration = false,
+    durableObservation = false
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
@@ -2895,10 +2896,19 @@ export class ChatGPTController {
     let generationObserved = false;
     let emittedConversationUrl = null;
     let lastWaitDebugAt = 0;
+    let reconciling = false;
     const baselineStopCount = Math.max(0, Number(preSendStopCount) || 0);
 
-    while (Date.now() - start < effectiveTimeoutMs) {
+    while (durableObservation || Date.now() - start < effectiveTimeoutMs) {
       this.#throwIfStopRequested();
+      if (durableObservation && !reconciling && Date.now() - start >= effectiveTimeoutMs) {
+        reconciling = true;
+        await this.#emitProgress({
+          phase: 'reconciling_response',
+          blocked: false,
+          responseDebug: { softDeadlineMs: effectiveTimeoutMs, elapsedMs: Date.now() - start }
+        });
+      }
       const snap = await this.#eval(`(() => {
         const extraThinkingRe = ${extraThinkingSource} ? new RegExp(${extraThinkingSource}, 'i') : null;
         const visible = (n) => {
@@ -3102,7 +3112,8 @@ export class ChatGPTController {
     onProgress = null,
     imageGeneration = false,
     modeIntent = null,
-    modelIntent = null
+    modelIntent = null,
+    durableObservation = false
   } = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
@@ -3148,7 +3159,8 @@ export class ChatGPTController {
         preSendText: prePrompt?.lastText || '',
         preSendPageText: prePrompt?.pageText || '',
         preSendStopCount: sendDebug?.initialStopCount || 0,
-        imageGeneration
+        imageGeneration,
+        durableObservation
       });
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
       const modeUsed = normalizeChatGptModeIntent(result?.meta?.modeUsed || result?.meta?.actualModeIntent, { fallback: null });

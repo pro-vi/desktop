@@ -26,6 +26,8 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_list_artifacts'"), 'expected agentify_list_artifacts tool');
   assert.ok(src.includes("'agentify_list_runs'"), 'expected agentify_list_runs tool');
   assert.ok(src.includes("'agentify_get_run'"), 'expected agentify_get_run tool');
+  assert.ok(src.includes("'agentify_wait_run'"), 'expected agentify_wait_run tool');
+  assert.ok(src.includes('await waitForRun({'), 'expected wait_run to use the shared durable waiter');
   assert.ok(src.includes('full: z.boolean().optional().describe('), 'expected compact/full toggle on agentify_get_run');
   assert.ok(src.includes('includeOutputText: z.boolean().optional().describe('), 'expected output text toggle on agentify_get_run');
   assert.ok(src.includes("view: full ? 'full' : 'summary'"), 'expected agentify_get_run to default to summary view');

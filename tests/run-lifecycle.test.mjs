@@ -33,3 +33,12 @@ test('completion receipt validates proof-bearing fields', () => {
   assert.equal(receipt?.responsePath, '/tmp/response.md');
   assert.equal(validateCompletionReceipt({ version: 1, kind: 'assistant-response' }), null);
 });
+
+test('output-bearing success requires a completion receipt', () => {
+  assert.throws(() => assertRunLifecycle({
+    kind: 'query',
+    status: 'success',
+    phase: 'completed',
+    finishedAt: 1
+  }, { requireCompletionReceipt: true }), /missing_completion_receipt/);
+});

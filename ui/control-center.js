@@ -45,6 +45,7 @@ function fmtPhase(phase) {
   if (key === 'typing_prompt') return 'Typing prompt';
   if (key === 'sending_prompt') return 'Sending prompt';
   if (key === 'waiting_for_response') return 'Waiting for response';
+  if (key === 'reconciling_response') return 'Still listening for completion';
   if (key === 'awaiting_user') return 'Waiting for you';
   return key ? key.replace(/_/g, ' ') : 'Working';
 }
@@ -53,6 +54,7 @@ function fmtOutcomeStatus(status) {
   const key = String(status || '').trim().toLowerCase();
   if (key === 'success') return 'Last OK';
   if (key === 'stopped') return 'Last stop';
+  if (key === 'interrupted') return 'Last interrupted';
   if (key === 'blocked') return 'Last blocked';
   if (key === 'error') return 'Last error';
   return 'Last run';
@@ -64,6 +66,7 @@ function fmtRunStatus(status) {
   if (key === 'error') return 'Failed';
   if (key === 'blocked') return 'Blocked';
   if (key === 'stopped') return 'Stopped';
+  if (key === 'interrupted') return 'Interrupted';
   if (key === 'running') return 'Running';
   if (key === 'queued') return 'Queued';
   if (key === 'archived') return 'Archived';
@@ -85,6 +88,7 @@ function badgeClassForRunStatus(status) {
   if (key === 'success') return 'ok';
   if (key === 'running') return 'ok';
   if (key === 'stopped') return 'info';
+  if (key === 'interrupted') return 'warn';
   if (key === 'archived') return 'dim';
   if (key === 'queued') return 'dim';
   return 'warn';

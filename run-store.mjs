@@ -197,7 +197,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     const previous = records.get(record?.id);
     const next = normalizeRun({ ...record, revision: Math.max(Number(previous?.revision) || 0, Number(record?.revision) || 0) + 1 });
     if (!next.id) throw new Error('missing_run_id');
-    assertRunLifecycle(next);
+    assertRunLifecycle(next, { requireCompletionReceipt: true });
     await writeFile(runPath(stateDir, next.id), `${JSON.stringify(next, null, 2)}\n`);
     records.set(next.id, next);
     for (const listener of listeners) listener(safeClone(next));

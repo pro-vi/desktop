@@ -31,6 +31,8 @@ import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
 import { createRunStore } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
+import { isTerminalRunStatus } from './run-lifecycle.mjs';
+import { atomicWriteFile } from './fs-utils.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -107,6 +109,7 @@ function mapErrorToHttp(error) {
   if (msg === 'missing_run_id') return { code: 400, body: { error: 'missing_run_id' } };
   if (msg === 'run_not_found') return { code: 404, body: { error: 'run_not_found' } };
   if (msg === 'run_not_retryable') return { code: 409, body: { error: 'run_not_retryable' } };
+  if (msg === 'run_wait_unsupported') return { code: 409, body: { error: 'run_wait_unsupported' } };
   if (msg === 'tab_busy') return { code: 409, body: { error: 'tab_busy', data: error?.data || null } };
   if (msg === 'key_vendor_mismatch') return { code: 409, body: { error: 'key_vendor_mismatch' } };
   if (msg === 'tab_not_found') return { code: 404, body: { error: 'tab_not_found' } };
@@ -531,14 +534,14 @@ function looksLikeResearchPlaceholder(text) {
 async function writeResearchResponseFile({ outDir, text }) {
   await fs.mkdir(outDir, { recursive: true });
   const responsePath = path.join(outDir, 'response.md');
-  await fs.writeFile(responsePath, responseMarkdownContent(text), 'utf8');
+  await atomicWriteFile(responsePath, responseMarkdownContent(text), { mode: 0o600 });
   return responsePath;
 }
 
 async function writeQueryResponseFile({ outDir, text }) {
   await fs.mkdir(outDir, { recursive: true });
   const responsePath = path.join(outDir, 'assistant_response.md');
-  await fs.writeFile(responsePath, responseMarkdownContent(text), 'utf8');
+  await atomicWriteFile(responsePath, responseMarkdownContent(text), { mode: 0o600 });
   return responsePath;
 }
 
@@ -802,7 +805,7 @@ export function startHttpApi({
   };
   const runsReady = runStore.load().then(async () => {
     await runStore.finalizeStaleRunning?.({
-      status: 'stopped',
+      status: 'interrupted',
       detail: 'Interrupted by Agentify Desktop restart.'
     });
     emitRunsChanged();
@@ -1356,6 +1359,7 @@ export function startHttpApi({
         modelUsed: outcome.modelUsed || null,
         degradedFrom: outcome.degradedFrom || null,
         outputManifest: outcome.outputManifest || null,
+        completionReceipt: outcome.completionReceipt || null,
         ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
       });
     } catch {
@@ -1549,7 +1553,7 @@ export function startHttpApi({
     const usage = queryUsageForResult({ result, modeIntent, modelIntent, activeQuery });
     const responsePath = await writeQueryResponseFile({ outDir, text: result?.text || '' });
     const metadataPath = path.join(outDir, 'metadata.json');
-    await fs.writeFile(
+    await atomicWriteFile(
       metadataPath,
       `${JSON.stringify({
         runId: String(runId || '').trim() || null,
@@ -1566,7 +1570,7 @@ export function startHttpApi({
         responsePath,
         capturedAt: new Date().toISOString()
       }, null, 2)}\n`,
-      'utf8'
+      { mode: 0o600 }
     );
     const artifacts = await collectRegisteredArtifacts({
       stateDir,
@@ -1609,6 +1613,27 @@ export function startHttpApi({
         source: item.source || null,
         role: item?.meta?.role || null
       }))
+    };
+  };
+
+  const completionReceiptForManifest = async ({ kind, outputManifest, conversationUrl = null } = {}) => {
+    const responsePath = String(outputManifest?.exportedMarkdownPath || outputManifest?.responsePath || '').trim();
+    if (!responsePath) throw new Error('completion_receipt_missing_response');
+    const ready = await assertArtifactFileReady(responsePath);
+    const resolvedPath = ready.realFilePath || ready.filePath;
+    const bytes = await fs.readFile(resolvedPath);
+    if (!bytes.length) throw new Error('completion_receipt_empty_response');
+    return {
+      version: 1,
+      kind,
+      responsePath: resolvedPath,
+      metadataPath: String(outputManifest?.metadataPath || '').trim() || null,
+      artifactIds: Array.isArray(outputManifest?.files)
+        ? outputManifest.files.map((item) => String(item?.id || '').trim()).filter(Boolean)
+        : [],
+      responseSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      conversationUrl: conversationUrl || null,
+      capturedAt: Date.now()
     };
   };
 
@@ -1674,13 +1699,14 @@ export function startHttpApi({
     researchMeta.activation.conversationUrl = conversationUrl || researchMeta.activation.conversationUrl || null;
     researchMeta.outputManifest = outputManifest;
     await patchRunRecord(op.id, { researchMeta });
-    const outcome = successOutcomeForResult({ result, op, conversationUrl });
+    const completionReceipt = await completionReceiptForManifest({ kind: 'research-report', outputManifest, conversationUrl });
+    const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest, completionReceipt });
     setLastOutcome(tabId, outcome);
     await durableRunFinalizeFromOutcome(op.id, outcome);
     return { result, researchMeta, outputManifest, conversationUrl };
   };
 
-  const successOutcomeForResult = ({ result, op, conversationUrl, outputManifest = null }) => {
+  const successOutcomeForResult = ({ result, op, conversationUrl, outputManifest = null, completionReceipt = null }) => {
     const now = Date.now();
     const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
     return {
@@ -1695,7 +1721,8 @@ export function startHttpApi({
       modeUsed: outputManifest?.modeUsed || normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null }),
       modelUsed: outputManifest?.modelUsed || normalizeChatGptModelIntent(meta.modelUsed || meta.actualModelIntent, { fallback: null }),
       degradedFrom: outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
-      outputManifest: outputManifest || null
+      outputManifest: outputManifest || null,
+      completionReceipt
     };
   };
 
@@ -2139,6 +2166,36 @@ export function startHttpApi({
     return payload;
   };
 
+  const waitForRunTransition = async ({ runId, afterRevision = 0, waitTimeoutMs = 25_000, signal } = {}) => {
+    await runsReady;
+    const initial = getRunRecordOrThrow(runId);
+    if (initial.kind === 'send') throw new Error('run_wait_unsupported');
+    const after = Math.max(0, Number(afterRevision) || 0);
+    if (isTerminalRunStatus(initial.status) || initial.revision > after) return initial;
+    const timeout = positiveIntOr(waitTimeoutMs, 25_000, 30_000);
+    return await new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      let unsubscribe = () => {};
+      const finish = (run = null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        unsubscribe();
+        signal?.removeEventListener?.('abort', onAbort);
+        resolve(run);
+      };
+      const onAbort = () => finish(null);
+      unsubscribe = runStore.subscribe((run) => {
+        if (run.id === initial.id && (isTerminalRunStatus(run.status) || run.revision > after)) finish(run);
+      });
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      const current = runStore.get(initial.id);
+      if (isTerminalRunStatus(current?.status) || Number(current?.revision) > after) return finish(current);
+      timer = setTimeout(() => finish(runStore.get(initial.id)), timeout);
+    });
+  };
+
   const listRunsAction = async ({ includeArchived = false, limit = 100 } = {}) => {
     await runsReady;
     return runsSnapshot({ includeArchived, limit });
@@ -2331,7 +2388,8 @@ export function startHttpApi({
             onProgress: (patch) => patchActiveQuery(tabId, patch),
             imageGeneration,
             modeIntent: originalModeIntent,
-            modelIntent: originalModelIntent
+            modelIntent: originalModelIntent,
+            durableObservation: true
           });
         });
         assertNoModeDowngrade({ modeIntent: originalModeIntent, result });
@@ -2353,7 +2411,8 @@ export function startHttpApi({
           modelIntent: originalModelIntent,
           activeQuery
         });
-        const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest });
+        const completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
+        const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest, completionReceipt });
         const resultWithMeta = {
           ...result,
           meta: {
@@ -3035,7 +3094,8 @@ export function startHttpApi({
                   onProgress: (patch) => patchActiveQuery(tabId, patch),
                   imageGeneration,
                   modeIntent,
-                  modelIntent
+                  modelIntent,
+                  durableObservation: true
                 });
               });
               assertNoModeDowngrade({ modeIntent, result });
@@ -3065,7 +3125,8 @@ export function startHttpApi({
                 modelIntent,
                 activeQuery
               });
-              const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest });
+              const completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
+              const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest, completionReceipt });
               const resultWithMeta = {
                 ...result,
                 meta: {
@@ -3405,6 +3466,21 @@ export function startHttpApi({
         await runsReady;
         const body = await parseBody(req);
         return sendJson(res, 200, await getRunPayload(body));
+      }
+
+      if (url.pathname === '/runs/wait' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const abortController = new AbortController();
+        res.once('close', () => abortController.abort());
+        const waited = await waitForRunTransition({
+          runId: body.runId,
+          afterRevision: body.afterRevision,
+          waitTimeoutMs: body.waitTimeoutMs,
+          signal: abortController.signal
+        });
+        if (res.destroyed || !waited) return;
+        const payload = await getRunPayload({ ...body, runId: waited.id });
+        return sendJson(res, isTerminalRunStatus(waited.status) ? 200 : 202, payload);
       }
 
       if (url.pathname === '/runs/archive' && req.method === 'POST') {

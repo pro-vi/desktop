@@ -232,7 +232,15 @@ That proves the artifact loop:
 
 If your normal ChatGPT workflow uses a Pro-only project, keep image generation on a separate key or project. `agentify_query`, `agentify_image_gen`, and `agentify_tab_create` accept a ChatGPT `modeIntent` (`extended-pro`, `thinking`, or `instant`) as a first-class routing hint. Normal ChatGPT keys use their explicit/saved/default Agentify project URL for text requests. Image-generation calls honor the dedicated image key/project path without overwriting normal keyed chat routing. `agentify_query` also accepts an explicit per-query `modelIntent` (`gpt-5.5-pro` or `gpt-5.4-pro`) for paired Pro checks; the controller opens the picker, traverses `Configure...` / legacy model controls when present, and fails closed before sending if it cannot confirm the requested generation. If ChatGPT later reports a different mode in the completed response footer, the run fails instead of silently returning a downgraded result. `modelIntent` is intentionally not accepted by `agentify_tab_create` or image-generation requests so generation pins never become sticky project/key defaults.
 
-For `fireAndForget` calls, record the returned `runId`. Completed query responses are persisted under the run's `outputManifest` and can be retrieved with `agentify_get_run` after an app restart, independent of the live tab/key binding.
+For `fireAndForget` calls, record the returned `runId`. `agentify_get_run` is a non-blocking snapshot. Use `agentify_wait_run` when the caller should block until the run is genuinely terminal, or spawn the standalone waiter:
+
+```bash
+npm run wait-run -- <runId>
+```
+
+The waiter exits `0` only for receipt-backed success, after the response artifact has been written, read back, hashed, and registered. It exits `2` for provider/error failure, `3` for an explicit stop, and `4` when an app restart interrupted observation. `--timeout-ms N` applies only to that waiter and never cancels or changes the provider run.
+
+The response observation timeout is soft for service-owned queries: the run remains `running` in `reconciling_response` while Agentify continues listening in the original provider tab. Completed query responses are persisted under the run's `outputManifest` and proven by `completionReceipt`. Electron restart does not yet reattach that browser observer; live survivors are marked `interrupted` rather than falsely failed or successful.
 
 ### First codebase stuffing workflow
 Use this when you want to hand a repo or folder tree to the model without manually copy/pasting files.

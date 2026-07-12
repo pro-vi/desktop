@@ -65,4 +65,4 @@ File: `chatgpt-controller.mjs`, method `#waitForAssistantStable`:
 - [ ] Verify other vendors (Claude.ai, Gemini, etc.) aren't affected
 - [ ] If working, open PR upstream at agentify-sh/desktop
 - [ ] Consider adding `isThinking` to the response metadata so callers know thinking is in progress
-- [ ] MCP transport timeout: Claude Code's MCP call times out before long queries finish — separate issue from the fix itself
+- For long queries, submit with `fireAndForget`, then call `agentify_wait_run` or spawn `npm run wait-run -- <runId>`. The waiter succeeds only after receipt-backed output completion; its deadline does not mutate the run.

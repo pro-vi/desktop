@@ -297,6 +297,8 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(persisted.id, response.data.runId);
   assert.equal(persisted.kind, 'query');
   assert.equal(persisted.status, 'success');
+  assert.equal(persisted.completionReceipt?.kind, 'assistant-response');
+  assert.match(persisted.completionReceipt?.responseSha256 || '', /^[a-f0-9]{64}$/);
   assert.equal(persisted.source, 'mcp');
   assert.equal(persisted.logicalRequest?.prompt, 'make this durable');
   assert.equal(persisted.logicalRequest?.modelIntent, null);
@@ -373,6 +375,66 @@ test('http-api: fire-and-forget query finalizes durable run on async error', asy
   assert.equal(persisted.label, 'Response timed out');
   assert.equal(persisted.conversationUrl, 'https://chatgpt.com/c/slow-run');
   assert.equal(typeof persisted.finishedAt, 'number');
+});
+
+test('http-api: runs/wait follows a reconciling background query through durable success', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-wait-'));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async ({ onProgress, durableObservation }) => {
+      assert.equal(durableObservation, true);
+      await onProgress?.({ phase: 'reconciling_response', responseDebug: { softDeadlineMs: 10 } });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return { text: 'late but complete', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/late-complete'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const submitted = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'finish after soft deadline', fireAndForget: true, timeoutMs: 10 }
+  });
+  assert.equal(submitted.res.status, 202);
+
+  const reconciling = await waitFor(async () => {
+    const snapshot = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: submitted.data.runId } });
+    return snapshot.data.run?.phase === 'reconciling_response' ? snapshot.data.run : null;
+  });
+  assert.equal(reconciling.finishedAt, null);
+
+  const waited = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/wait',
+    body: { runId: submitted.data.runId, afterRevision: reconciling.revision, waitTimeoutMs: 1_000, includeOutputText: true }
+  });
+  assert.equal(waited.res.status, 200);
+  assert.equal(waited.data.run.status, 'success');
+  assert.equal(waited.data.outputText, 'late but complete\n');
+  assert.ok(waited.data.run.revision > reconciling.revision);
 });
 
 test('http-api: query forwards explicit model intent without persisting it as key meta', async (t) => {
