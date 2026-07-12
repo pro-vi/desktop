@@ -28,6 +28,9 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_get_run'"), 'expected agentify_get_run tool');
   assert.ok(src.includes("'agentify_wait_run'"), 'expected agentify_wait_run tool');
   assert.ok(src.includes('await waitForRun({'), 'expected wait_run to use the shared durable waiter');
+  assert.ok(src.includes('Next: call agentify_wait_run'), 'async tools should teach the wait workflow in their result');
+  assert.ok(src.includes('Do not poll this to await completion'), 'get_run should identify itself as snapshot-only');
+  assert.ok(!src.includes('Poll agentify_get_run'), 'async tool guidance must not teach polling');
   assert.ok(src.includes('full: z.boolean().optional().describe('), 'expected compact/full toggle on agentify_get_run');
   assert.ok(src.includes('includeOutputText: z.boolean().optional().describe('), 'expected output text toggle on agentify_get_run');
   assert.ok(src.includes("view: full ? 'full' : 'summary'"), 'expected agentify_get_run to default to summary view');

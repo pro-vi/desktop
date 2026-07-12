@@ -75,7 +75,7 @@ registerTool(
   'agentify_query',
   {
     description:
-      'Send a prompt to the local Agentify Desktop session (ChatGPT web) and return the latest assistant response. If a CAPTCHA/login challenge appears, the desktop window will ask for user intervention and resume automatically.',
+      'Send a prompt to the local Agentify Desktop session and return the assistant response. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
@@ -96,8 +96,8 @@ registerTool(
       maxContextChunksPerFile: z.number().optional().describe('Maximum number of chunks to inline for any single file.'),
       maxContextInlineFiles: z.number().optional().describe('Maximum number of text files to inline into the prompt.'),
       maxContextAttachments: z.number().optional().describe('Maximum binary/image files auto-attached from contextPaths.'),
-      timeoutMs: z.number().optional().describe('Maximum time to wait for completion.'),
-      fireAndForget: z.boolean().optional().describe('Return immediately after sending the prompt. Poll agentify_get_run for compact state; use includeOutputText after completion to pull the saved response.')
+      timeoutMs: z.number().optional().describe('Soft response-observation deadline. Agentify continues listening after this deadline; it does not prove provider failure.'),
+      fireAndForget: z.boolean().optional().describe('Return a runId immediately. Next call agentify_wait_run to await proven completion, or agentify_get_run for a non-blocking snapshot.')
     }
   },
   async ({
@@ -159,7 +159,7 @@ registerTool(
     if (data.async) {
       const structuredContent = asyncQueryStructuredContent(data);
       return {
-        content: [{ type: 'text', text: `Query submitted (async). tabId=${structuredContent.tabId || ''}, key=${structuredContent.key || ''}, queryId=${structuredContent.queryId || ''}, runId=${structuredContent.runId || ''}. Poll agentify_get_run for compact state; use includeOutputText after completion to pull the saved response.` }],
+        content: [{ type: 'text', text: `Query submitted. runId=${structuredContent.runId || ''}. Next: call agentify_wait_run with this runId for proven completion. Use agentify_get_run only for a non-blocking snapshot.` }],
         structuredContent
       };
     }
@@ -183,7 +183,7 @@ registerTool(
   'agentify_research',
   {
     description:
-      'Send a prompt through the ChatGPT Deep Research channel asynchronously. Returns immediately with a durable run id; poll agentify_get_run for status and outputs.',
+      'Start ChatGPT Deep Research asynchronously and return a durable runId. Next call agentify_wait_run with that runId for receipt-backed completion; agentify_get_run is snapshot-only.',
     inputSchema: {
       tabId: z.string().optional().describe('Tab/session id to use. Must point to a ChatGPT tab if provided.'),
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a ChatGPT tab if missing.'),
@@ -192,7 +192,7 @@ registerTool(
       prompt: z.string().describe('Full prompt to send to ChatGPT Deep Research.'),
       attachments: z.array(z.string()).optional().describe('Local file paths to upload before sending the prompt.'),
       contextPaths: z.array(z.string()).optional().describe('Local files/folders to pack into the prompt and/or attach automatically.'),
-      timeoutMs: z.number().optional().describe('Maximum time to allow the research run before it is marked timed out.')
+      timeoutMs: z.number().optional().describe('Soft observation deadline; research continues under service supervision after it elapses.')
     }
   },
   async ({ tabId, key, projectUrl, bundleName, prompt, attachments, contextPaths, timeoutMs }) => {
@@ -216,7 +216,7 @@ registerTool(
       }
     });
     return {
-      content: [{ type: 'text', text: `Research submitted (async). tabId=${data.tabId || ''}, key=${data.key || ''}, runId=${data.runId || ''}. Poll agentify_get_run for progress and outputs.` }],
+      content: [{ type: 'text', text: `Research submitted. runId=${data.runId || ''}. Next: call agentify_wait_run with this runId for receipt-backed completion.` }],
       structuredContent: data
     };
   }
@@ -382,7 +382,7 @@ registerTool(
 registerTool(
   'agentify_get_run',
   {
-    description: 'Fetch durable run status. Defaults to a compact polling view that omits replay payloads; set full=true only for replay/debug. Set includeOutputText=true after completion to pull saved markdown output without replay data.',
+    description: 'Fetch one non-blocking durable-run snapshot. Do not poll this to await completion; call agentify_wait_run instead. Set full=true only for replay/debug.',
     inputSchema: {
       runId: z.string().describe('Durable run id.'),
       full: z.boolean().optional().describe('Return the full durable replay/debug record. Defaults to false for low-token polling.'),
