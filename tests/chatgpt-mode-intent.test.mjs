@@ -36,6 +36,11 @@ test('chatgpt-mode-intent: normalizes persisted key metadata', () => {
       modelIntent: ' legacy pro '
     }),
     {
+      location: {
+        kind: 'project-conversation',
+        projectUrl: 'https://chatgpt.com/g/g-p-test/project',
+        conversationUrl: 'https://chatgpt.com/g/g-p-test/c/thread'
+      },
       projectUrl: 'https://chatgpt.com/g/g-p-test/project',
       conversationUrl: 'https://chatgpt.com/g/g-p-test/c/thread',
       modeIntent: 'extended-pro'
@@ -60,6 +65,13 @@ test('chatgpt-mode-intent: chat profile prefers saved key metadata and does not 
     imageGeneration: false,
     requestedKey: 'main',
     requestedTabId: null,
+    location: {
+      kind: 'project-conversation',
+      projectUrl: 'https://chatgpt.com/g/g-p-saved/project',
+      conversationUrl: 'https://chatgpt.com/g/g-p-saved/c/thread'
+    },
+    entryTarget: null,
+    locationSource: 'saved-key',
     projectUrl: 'https://chatgpt.com/g/g-p-saved/project',
     conversationUrl: 'https://chatgpt.com/g/g-p-saved/c/thread',
     modeIntent: 'extended-pro',

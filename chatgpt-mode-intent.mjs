@@ -1,3 +1,10 @@
+import {
+  conversationUrlForLocation,
+  decodePersistedChatGptLocation,
+  projectUrlForLocation,
+  resolveChatGptLocation
+} from './chatgpt-location.mjs';
+
 export const CHATGPT_MODE_INTENTS = ['extended-pro', 'thinking', 'instant'];
 export const CHATGPT_MODEL_INTENTS = ['gpt-5.5-pro', 'gpt-5.4-pro'];
 export const DEFAULT_CHAT_MODE_INTENT = 'extended-pro';
@@ -26,22 +33,20 @@ export function normalizeChatGptModelIntent(value, { fallback = null } = {}) {
 }
 
 export function normalizePersistedChatGptKeyMeta(input) {
-  if (typeof input === 'string') {
-    return { projectUrl: trimOrNull(input), conversationUrl: null, modeIntent: null };
-  }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return { projectUrl: null, conversationUrl: null, modeIntent: null };
-  }
+  const objectInput = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const location = decodePersistedChatGptLocation(input);
   return {
-    projectUrl: trimOrNull(input.projectUrl),
-    conversationUrl: trimOrNull(input.conversationUrl),
-    modeIntent: normalizeChatGptModeIntent(input.modeIntent, { fallback: null })
+    location,
+    projectUrl: projectUrlForLocation(location),
+    conversationUrl: conversationUrlForLocation(location),
+    modeIntent: normalizeChatGptModeIntent(objectInput.modeIntent, { fallback: null })
   };
 }
 
 export function resolveChatGptChatProfile({
   key = null,
   tabId = null,
+  chatUrl = null,
   projectUrl = null,
   modeIntent = null,
   modelIntent = null,
@@ -50,23 +55,22 @@ export function resolveChatGptChatProfile({
 } = {}) {
   const normalizedSavedMeta = normalizePersistedChatGptKeyMeta(savedMeta);
   const normalizedModelIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
-  const explicitProjectUrl = trimOrNull(projectUrl);
-  const defaultProjectUrl = trimOrNull(settings.defaultProjectUrl);
-  let resolvedProjectUrl = null;
-  if (explicitProjectUrl) {
-    resolvedProjectUrl = explicitProjectUrl;
-  } else if (normalizedSavedMeta.projectUrl) {
-    resolvedProjectUrl = normalizedSavedMeta.projectUrl;
-  } else if (defaultProjectUrl) {
-    resolvedProjectUrl = defaultProjectUrl;
-  }
+  const resolved = resolveChatGptLocation({
+    chatUrl: trimOrNull(chatUrl),
+    projectUrl: trimOrNull(projectUrl),
+    savedMeta: normalizedSavedMeta,
+    defaultProjectUrl: trimOrNull(settings.defaultProjectUrl)
+  });
   return {
     profile: 'chat',
     imageGeneration: false,
     requestedKey: trimOrNull(key),
     requestedTabId: trimOrNull(tabId),
-    projectUrl: resolvedProjectUrl,
-    conversationUrl: normalizedSavedMeta.conversationUrl,
+    location: resolved.location,
+    entryTarget: resolved.entryTarget,
+    locationSource: resolved.source,
+    projectUrl: projectUrlForLocation(resolved.location),
+    conversationUrl: conversationUrlForLocation(resolved.location),
     modeIntent: normalizeChatGptModeIntent(modeIntent, {
       fallback: normalizedSavedMeta.modeIntent || settings.defaultChatModeIntent || DEFAULT_CHAT_MODE_INTENT
     }),
@@ -106,6 +110,7 @@ export function resolveChatGptQueryProfile({
   imageGeneration = false,
   key = null,
   tabId = null,
+  chatUrl = null,
   projectUrl = null,
   modeIntent = null,
   modelIntent = null,
@@ -114,5 +119,5 @@ export function resolveChatGptQueryProfile({
 } = {}) {
   return imageGeneration
     ? resolveChatGptImageProfile({ key, tabId, projectUrl, modeIntent, modelIntent, settings })
-    : resolveChatGptChatProfile({ key, tabId, projectUrl, modeIntent, modelIntent, settings, savedMeta });
+    : resolveChatGptChatProfile({ key, tabId, chatUrl, projectUrl, modeIntent, modelIntent, settings, savedMeta });
 }
