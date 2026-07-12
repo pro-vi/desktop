@@ -1,4 +1,4 @@
-import { isTerminalRunStatus } from './run-lifecycle.mjs';
+import { isTerminalRunStatus, validateCompletionReceipt } from './run-lifecycle.mjs';
 import { requestJson } from './mcp-lib.mjs';
 
 export const RUN_EXIT_CODE_BY_STATUS = Object.freeze({
@@ -41,7 +41,12 @@ export async function waitForRun({
     const run = data?.run;
     if (!run) throw new Error('invalid_run_wait_response');
     afterRevision = Math.max(afterRevision, Number(run.revision) || 0);
-    if (isTerminalRunStatus(run.status)) return data;
+    if (isTerminalRunStatus(run.status)) {
+      if (run.status === 'success' && ['query', 'research'].includes(run.kind) && !validateCompletionReceipt(run.completionReceipt)) {
+        throw new Error('success_without_completion_receipt');
+      }
+      return data;
+    }
   }
 }
 

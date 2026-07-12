@@ -210,6 +210,27 @@ test('run-store: revisions publish only after durable writes and support multipl
   assert.equal(persisted.revision, 3);
 });
 
+test('run-store: failed persistence publishes no transition and leaves memory unchanged', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-write-failure-'));
+  let fail = false;
+  const store = createRunStore(stateDir, {
+    writeFile: async (filePath, data) => {
+      if (fail) throw new Error('disk_full');
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, data, 'utf8');
+    }
+  });
+  await store.load();
+  await store.create({ id: 'run-write-failure', kind: 'query', status: 'running' });
+  const seen = [];
+  store.subscribe((run) => seen.push(run.revision));
+  fail = true;
+  await assert.rejects(() => store.patch('run-write-failure', { phase: 'waiting_for_response' }), /disk_full/);
+  assert.equal(store.get('run-write-failure').revision, 1);
+  assert.equal(store.get('run-write-failure').phase, null);
+  assert.deepEqual(seen, []);
+});
+
 test('run-store: researchMeta persists, merges on patch, and stays out of list summaries', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-research-'));
   t.after(async () => {

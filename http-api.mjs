@@ -1337,34 +1337,30 @@ export function startHttpApi({
 
   const durableRunFinalizeFromOutcome = async (runId, outcome) => {
     if (!runId || !outcome) return null;
-    try {
-      const currentProviderSlot = providerSlotForRun(runId);
-      const terminalProviderSlot = currentProviderSlot
-        ? providerSlotForRun(runId, {
-          terminalStatus:
-            outcome.status === 'stopped' && currentProviderSlot.status === 'queued'
-              ? 'cancelled'
-              : 'released'
-        })
-        : null;
-      return await finalizeRunRecord(runId, {
-        status: outcome.status || 'error',
-        label: outcome.label || null,
-        detail: outcome.detail || null,
-        blocked: !!outcome.blocked,
-        blockedKind: outcome.blockedKind || null,
-        blockedTitle: outcome.blockedKind ? blockedLabelForKind(outcome.blockedKind) : null,
-        conversationUrl: outcome.conversationUrl || null,
-        modeUsed: outcome.modeUsed || null,
-        modelUsed: outcome.modelUsed || null,
-        degradedFrom: outcome.degradedFrom || null,
-        outputManifest: outcome.outputManifest || null,
-        completionReceipt: outcome.completionReceipt || null,
-        ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
-      });
-    } catch {
-      return null;
-    }
+    const currentProviderSlot = providerSlotForRun(runId);
+    const terminalProviderSlot = currentProviderSlot
+      ? providerSlotForRun(runId, {
+        terminalStatus:
+          outcome.status === 'stopped' && currentProviderSlot.status === 'queued'
+            ? 'cancelled'
+            : 'released'
+      })
+      : null;
+    return await finalizeRunRecord(runId, {
+      status: outcome.status || 'error',
+      label: outcome.label || null,
+      detail: outcome.detail || null,
+      blocked: !!outcome.blocked,
+      blockedKind: outcome.blockedKind || null,
+      blockedTitle: outcome.blockedKind ? blockedLabelForKind(outcome.blockedKind) : null,
+      conversationUrl: outcome.conversationUrl || null,
+      modeUsed: outcome.modeUsed || null,
+      modelUsed: outcome.modelUsed || null,
+      degradedFrom: outcome.degradedFrom || null,
+      outputManifest: outcome.outputManifest || null,
+      completionReceipt: outcome.completionReceipt || null,
+      ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
+    });
   };
 
   const vendorForId = (vendorId) => {

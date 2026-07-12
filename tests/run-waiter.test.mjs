@@ -7,7 +7,13 @@ test('run waiter follows revisions until a receipt-backed terminal result', asyn
   const bodies = [];
   const responses = [
     { ok: true, run: { id: 'run-1', status: 'running', revision: 3 } },
-    { ok: true, run: { id: 'run-1', status: 'success', revision: 4, completionReceipt: { version: 1 } }, outputText: 'done' }
+    { ok: true, run: { id: 'run-1', kind: 'query', status: 'success', revision: 4, completionReceipt: {
+      version: 1,
+      kind: 'assistant-response',
+      responsePath: '/tmp/response.md',
+      responseSha256: 'a'.repeat(64),
+      capturedAt: 1
+    } }, outputText: 'done' }
   ];
   const result = await waitForRun({
     conn: { baseUrl: 'http://127.0.0.1', token: 't' },
@@ -20,6 +26,14 @@ test('run waiter follows revisions until a receipt-backed terminal result', asyn
   assert.equal(result.run.status, 'success');
   assert.equal(result.outputText, 'done');
   assert.deepEqual(bodies.map((body) => body.afterRevision), [0, 3]);
+});
+
+test('run waiter refuses a legacy output success without completion proof', async () => {
+  await assert.rejects(() => waitForRun({
+    conn: {},
+    runId: 'legacy-success',
+    request: async () => ({ ok: true, run: { id: 'legacy-success', kind: 'query', status: 'success', revision: 1 } })
+  }), /success_without_completion_receipt/);
 });
 
 test('run waiter exit codes distinguish every terminal outcome', () => {

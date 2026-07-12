@@ -2,7 +2,7 @@
 title: Durable Run Completion and Background Waiters
 objective: Make Agentify report completion only after provider work is truly finished and durable output artifacts are validated.
 type: fix
-status: active
+status: completed
 date: 2026-07-12
 origin: timeout reproduction and approved architecture conversation
 ---

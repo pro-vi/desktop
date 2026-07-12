@@ -3703,6 +3703,7 @@ export class ChatGPTController {
           preSendStopCount: sendDebug?.initialStopCount || 0,
           minimumTimeoutMs: 60 * 60_000,
           minimumStableMs: 60_000,
+          durableObservation: true,
           extraThinkingPattern: '\\bresearching\\b|\\bsearching(?: the web)?\\b|\\breading sources?\\b|\\bclarifying\\b|\\bgathering\\b'
         });
         const exported = await this.#exportResearchMarkdown({
