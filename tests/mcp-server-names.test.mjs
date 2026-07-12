@@ -35,6 +35,8 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes('model,'), 'expected model hint to be forwarded to HTTP query');
   assert.ok(src.includes('modeIntent: z.string().optional().describe('), 'expected modeIntent inputs on ChatGPT tools');
   assert.ok(queryBlock, 'expected agentify_query registration block');
+  assert.ok(queryBlock[0].includes('chatUrl: z.string().optional().describe('), 'expected chatUrl on agentify_query');
+  assert.ok(queryBlock[0].includes('chatUrl,'), 'expected chatUrl forwarding on agentify_query');
   assert.ok(queryBlock[0].includes('modelIntent: z.string().optional().describe('), 'expected modelIntent on agentify_query');
   assert.ok(queryBlock[0].includes('modelIntent,'), 'expected modelIntent forwarding on agentify_query');
   assert.ok(src.includes("body: { model, key, name, projectUrl, modeIntent, show: typeof show === 'boolean' ? show : undefined }"), 'expected modeIntent on tab_create');

@@ -22,6 +22,15 @@ Claude Code session
 - No bundling — all pure `.mjs` loaded directly from disk.
 - ~95% of changes are Electron-side, so `agentify_shutdown` covers most cases.
 
+Changes to the `agentify_query` MCP schema (for example, adding `chatUrl`) require both reloads: restart the MCP server so the client sees the new tool schema, then run `agentify_shutdown` so Electron reloads the HTTP routing/controller implementation.
+
+## Chat location vs coding workspace
+
+- `chatUrl`, `projectUrl`, and the persisted keyed ChatGPT location control the browser thread only.
+- `orchestrator/workspaces.json` controls the filesystem directory where Codex runs.
+- Never derive or replace a coding workspace from a ChatGPT URL.
+- A `/share/...` URL is a source snapshot. Only the resulting validated `/c/...` URL becomes durable conversation affinity after the first successful reply.
+
 ## GPT Pro Extended Thinking Fix (in progress)
 
 `agentify_query` returns after ~5 seconds during GPT Pro's "Extended Pro" thinking mode instead of waiting for the full response (~20 min). Three compounding bugs in `chatgpt-controller.mjs`:

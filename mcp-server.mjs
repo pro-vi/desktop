@@ -79,6 +79,7 @@ registerTool(
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
+      chatUrl: z.string().optional().describe('ChatGPT conversation or shared-chat URL to continue. Mutually exclusive with projectUrl; suppresses saved/default project routing.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
       modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro, thinking, instant. This is separate from the vendor `model` hint.'),
       modelIntent: z.string().optional().describe('Optional explicit ChatGPT generation intent for this query only. Supported intents: gpt-5.5-pro, gpt-5.4-pro. The controller fails closed unless the UI can confirm the requested generation before sending.'),
@@ -102,6 +103,7 @@ registerTool(
     model,
     tabId,
     key,
+    chatUrl,
     projectUrl,
     modeIntent,
     modelIntent,
@@ -122,7 +124,7 @@ registerTool(
   }) => {
     const resolvedAttachments = resolveLocalPaths(attachments || []);
     const resolvedContextPaths = resolveLocalPaths(contextPaths || []);
-    const effectiveKey = key || (fireAndForget ? `async-${Date.now().toString(36)}` : undefined);
+    const effectiveKey = key || (fireAndForget && !chatUrl ? `async-${Date.now().toString(36)}` : undefined);
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
@@ -133,6 +135,7 @@ registerTool(
         model,
         tabId,
         key: effectiveKey,
+        chatUrl,
         projectUrl,
         modeIntent,
         modelIntent,

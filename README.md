@@ -148,6 +148,30 @@ That proves the core loop:
 - call it from Codex / Claude Code over MCP
 - reuse the same tab/session across multiple requests
 
+### Continue a supplied ChatGPT conversation
+
+Use `chatUrl` when a coding agent should continue an existing ChatGPT conversation without routing the reply into Agentify's default ChatGPT project:
+
+```json
+{
+  "tool": "agentify_query",
+  "arguments": {
+    "chatUrl": "https://chatgpt.com/share/CONVERSATION_ID",
+    "prompt": "Continue from this context and produce the implementation plan."
+  }
+}
+```
+
+`chatUrl` accepts an owned `https://chatgpt.com/c/...` conversation or a `https://chatgpt.com/share/...` snapshot. It is mutually exclusive with `projectUrl` and takes precedence over saved/default project routing. When replying to a shared snapshot, ChatGPT creates a private copy in the signed-in account; Agentify captures that new `/c/...` URL and binds follow-ups to it. If no key is supplied, Agentify derives an isolated stable key from the URL instead of reusing the default project tab.
+
+For the built-in coding orchestrator, pass the source thread separately from the local code workspace:
+
+```bash
+npm run orchestrator -- --key external-chat --chat-url https://chatgpt.com/share/CONVERSATION_ID
+```
+
+`--chat-url` changes only the browser conversation. Codex still runs in the workspace configured for that key (or the detected current workspace when none has been configured).
+
 ### First artifact workflow
 This is the fastest way to prove the image/file pipeline is useful.
 

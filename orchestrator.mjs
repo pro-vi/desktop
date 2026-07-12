@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { defaultStateDir } from './state.mjs';
 import { ensureDesktopRunning, requestJson } from './mcp-lib.mjs';
@@ -27,13 +28,20 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function sendNoWait(conn, { key, text, stopAfterSend = true }) {
-  return await requestJson({
+export async function sendNoWait(conn, { key, text, stopAfterSend = true, continuation = null }, request = requestJson) {
+  const data = await request({
     ...conn,
     method: 'POST',
     path: '/send',
-    body: { key, text, stopAfterSend: !!stopAfterSend }
+    body: {
+      key,
+      text,
+      stopAfterSend: !!stopAfterSend,
+      chatUrl: continuation?.chatUrl || undefined
+    }
   });
+  if (continuation?.chatUrl) continuation.chatUrl = null;
+  return data;
 }
 
 async function readThread(conn, { key, maxChars = 200_000 }) {
@@ -68,7 +76,7 @@ async function runTestsMaybe({ workspaceDir, testCommand, timeoutMs = 20 * 60_00
   });
 }
 
-async function handleCodexRun({ stateDir, key, mode, args, conn }) {
+async function handleCodexRun({ stateDir, key, mode, args, conn, continuation = null }) {
   const prompt = String(args.prompt || '').trim();
   if (!prompt) throw new Error('missing_prompt');
 
@@ -91,7 +99,9 @@ async function handleCodexRun({ stateDir, key, mode, args, conn }) {
     const now = Date.now();
     if (now - lastPostAt < 45_000) return;
     lastPostAt = now;
-    await sendNoWait(conn, { key, text: `Progress update (no reply needed): ${msg}`, stopAfterSend: true }).catch(() => {});
+    await sendNoWait(conn, { key, text: `Progress update (no reply needed): ${msg}`, stopAfterSend: true, continuation }).catch(async (error) => {
+      await appendLog(stateDir, key, `progress post failed: ${error?.message || String(error)}`);
+    });
   };
 
   await appendLog(stateDir, key, `codex.run start mode=${mode}`);
@@ -147,12 +157,12 @@ async function handleCodexRun({ stateDir, key, mode, args, conn }) {
 
   const msgs = makeChunkedMessages({ header: 'Agentify Tool Result', body: reviewText, maxChars: Number(args.maxPostChars || 25_000) || 25_000 });
   for (const m of msgs) {
-    await sendNoWait(conn, { key, text: m, stopAfterSend: true }).catch(() => {});
+    await sendNoWait(conn, { key, text: m, stopAfterSend: true, continuation });
     await sleep(500);
   }
 }
 
-async function handleGitDiff({ stateDir, key, args, conn }) {
+async function handleGitDiff({ stateDir, key, args, conn, continuation = null }) {
   let ws = await getWorkspace(stateDir, { key });
   if (!ws) {
     const root = await detectWorkspaceRoot(process.cwd());
@@ -172,13 +182,13 @@ async function handleGitDiff({ stateDir, key, args, conn }) {
     formatResultBlock(result) +
     (diffPacket.patch ? `\n\`\`\`diff\n${diffPacket.patch}\n\`\`\`\n` : '');
   for (const m of makeChunkedMessages({ header: 'Agentify Tool Result', body, maxChars: Number(args.maxPostChars || 25_000) || 25_000 })) {
-    await sendNoWait(conn, { key, text: m, stopAfterSend: true }).catch(() => {});
+    await sendNoWait(conn, { key, text: m, stopAfterSend: true, continuation });
     await sleep(400);
   }
   await appendLog(stateDir, key, 'git.diff done');
 }
 
-async function handleTestsRun({ stateDir, key, args, conn }) {
+async function handleTestsRun({ stateDir, key, args, conn, continuation = null }) {
   let ws = await getWorkspace(stateDir, { key });
   if (!ws) {
     const root = await detectWorkspaceRoot(process.cwd());
@@ -196,13 +206,13 @@ async function handleTestsRun({ stateDir, key, args, conn }) {
   };
   const body = `Agentify tests:\n\n${formatResultBlock(result)}`;
   for (const m of makeChunkedMessages({ header: 'Agentify Tool Result', body, maxChars: Number(args.maxPostChars || 25_000) || 25_000 })) {
-    await sendNoWait(conn, { key, text: m, stopAfterSend: true }).catch(() => {});
+    await sendNoWait(conn, { key, text: m, stopAfterSend: true, continuation });
     await sleep(400);
   }
   await appendLog(stateDir, key, `tests.run done ok=${tests.ok}`);
 }
 
-async function handleFsRead({ stateDir, key, args, conn }) {
+async function handleFsRead({ stateDir, key, args, conn, continuation = null }) {
   const file = String(args.path || '').trim();
   if (!file) throw new Error('missing_path');
   const maxBytes = Math.max(1, Math.min(200_000, Number(args.maxBytes || 50_000) || 50_000));
@@ -231,26 +241,26 @@ async function handleFsRead({ stateDir, key, args, conn }) {
     formatResultBlock(result) +
     `\n\`\`\`\n${text}\n\`\`\`\n`;
   for (const m of makeChunkedMessages({ header: 'Agentify Tool Result', body, maxChars: Number(args.maxPostChars || 25_000) || 25_000 })) {
-    await sendNoWait(conn, { key, text: m, stopAfterSend: true }).catch(() => {});
+    await sendNoWait(conn, { key, text: m, stopAfterSend: true, continuation });
     await sleep(350);
   }
 }
 
-async function executeTool({ stateDir, req, conn }) {
+async function executeTool({ stateDir, req, conn, continuation = null }) {
   if (req.tool === 'codex.run') {
-    await handleCodexRun({ stateDir, key: req.key, mode: req.mode, args: { ...req.args, id: req.id }, conn });
+    await handleCodexRun({ stateDir, key: req.key, mode: req.mode, args: { ...req.args, id: req.id }, conn, continuation });
     return;
   }
   if (req.tool === 'git.diff') {
-    await handleGitDiff({ stateDir, key: req.key, args: { ...req.args, id: req.id }, conn });
+    await handleGitDiff({ stateDir, key: req.key, args: { ...req.args, id: req.id }, conn, continuation });
     return;
   }
   if (req.tool === 'tests.run') {
-    await handleTestsRun({ stateDir, key: req.key, args: { ...req.args, id: req.id }, conn });
+    await handleTestsRun({ stateDir, key: req.key, args: { ...req.args, id: req.id }, conn, continuation });
     return;
   }
   if (req.tool === 'fs.read') {
-    await handleFsRead({ stateDir, key: req.key, args: { ...req.args, id: req.id }, conn });
+    await handleFsRead({ stateDir, key: req.key, args: { ...req.args, id: req.id }, conn, continuation });
     return;
   }
   const err = new Error('unknown_tool');
@@ -261,13 +271,20 @@ async function executeTool({ stateDir, req, conn }) {
 async function main() {
   const stateDir = argValue('--state-dir') || defaultStateDir();
   const key = argValue('--key') || 'default';
+  const chatUrl = argValue('--chat-url');
+  const continuation = { chatUrl: chatUrl || null };
   const pollMs = Number(argValue('--poll-ms') || 1500);
   const maxChars = Number(argValue('--max-chars') || 200_000);
   const once = argFlag('--once');
 
   const conn = await ensureDesktopRunning({ stateDir });
   await appendLog(stateDir, key, 'orchestrator started');
-  await ensureReady(conn, { key }).catch(() => {});
+  if (chatUrl) {
+    await requestJson({ ...conn, method: 'POST', path: '/navigate', body: { key, url: chatUrl } });
+    await ensureReady(conn, { key });
+  } else {
+    await ensureReady(conn, { key }).catch(() => {});
+  }
 
   while (true) {
     const text = await readThread(conn, { key, maxChars }).catch(() => '');
@@ -289,7 +306,7 @@ async function main() {
         }
         if (!(await isHandled(stateDir, { key: req.key, id: req.id }))) {
           await markHandled(stateDir, { key: req.key, id: req.id, status: 'started' });
-          await executeTool({ stateDir, req, conn });
+          await executeTool({ stateDir, req, conn, continuation });
           await markHandled(stateDir, { key: req.key, id: req.id, status: 'done' });
           handled.keys[key] = handled.keys[key] || {};
           handled.keys[key][req.id] = { status: 'done' };
@@ -299,7 +316,7 @@ async function main() {
         }
       } catch (e) {
         const msg = `Agentify orchestrator error: ${e?.message || String(e)}`;
-        await sendNoWait(conn, { key, text: msg, stopAfterSend: true }).catch(() => {});
+        await sendNoWait(conn, { key, text: msg, stopAfterSend: true, continuation }).catch(() => {});
         await appendLog(stateDir, key, `error: ${e?.message || String(e)}`);
         await markHandled(stateDir, { key, id: String(next?.id || ''), status: 'error', meta: { message: e?.message || String(e) } }).catch(() => {});
         break;
@@ -311,7 +328,10 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error('[agentify-orchestrator] fatal', e);
-  process.exit(1);
-});
+const invokedAsScript = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+if (invokedAsScript) {
+  main().catch((e) => {
+    console.error('[agentify-orchestrator] fatal', e);
+    process.exit(1);
+  });
+}

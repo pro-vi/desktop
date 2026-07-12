@@ -1248,6 +1248,52 @@ test('http-api: chatUrl and projectUrl conflict before navigation', async (t) =>
   assert.equal(response.data.error, 'chatgpt_location_conflict');
 });
 
+test('http-api: failed shared materialization preserves keyed project affinity without fallback navigation', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-shared-failure-'));
+  const projectUrl = 'https://chatgpt.com/g/g-p-agentify/project';
+  await writeProjects({ external: { projectUrl, conversationUrl: null } }, stateDir);
+  const navigations = [];
+  const tabsList = [{ id: 't-external', key: 'external', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async ({ chatUrl }) => navigations.push(chatUrl),
+    query: async () => {
+      const error = new Error('shared_chat_materialization_failed');
+      error.data = { sourceUrl: 'https://chatgpt.com/share/unavailable' };
+      throw error;
+    },
+    getUrl: async () => 'https://chatgpt.com/share/unavailable'
+  };
+  const tabs = {
+    listTabs: () => tabsList,
+    ensureTab: async () => 't-external',
+    updateTabMeta: (tabId, patch) => Object.assign(tabsList.find((item) => item.id === tabId), patch || {}),
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't-external',
+    stateDir,
+    getSettings: async () => ({ defaultProjectUrl: projectUrl, maxInflightQueries: 2, maxQueriesPerMinute: 100 })
+  });
+  t.after(() => server.close());
+
+  const response = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'external', chatUrl: 'https://chatgpt.com/share/unavailable', prompt: 'continue' }
+  });
+  assert.equal(response.res.status, 409, JSON.stringify(response.data));
+  assert.deepEqual(navigations, ['https://chatgpt.com/share/unavailable']);
+  const persisted = JSON.parse(await fs.readFile(path.join(stateDir, 'projects.json'), 'utf8'));
+  assert.equal(persisted.external.projectUrl, projectUrl);
+  assert.equal(persisted.external.conversationUrl, null);
+});
+
 test('http-api: research is async, clamps timeout, persists outputs, and retries as research', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-success-'));
   const researchCalls = [];
