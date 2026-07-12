@@ -189,7 +189,7 @@ test('run-store: researchMeta persists, merges on patch, and stays out of list s
     id: 'run-research-1',
     kind: 'research',
     source: 'mcp',
-    status: 'success',
+    status: 'running',
     phase: 'exporting_output',
     startedAt: Date.now(),
     promptPreview: 'deep research',
@@ -226,6 +226,8 @@ test('run-store: researchMeta persists, merges on patch, and stays out of list s
   assert.equal(patched?.researchMeta?.activation?.activated, true);
   assert.equal(patched?.researchMeta?.outputManifest?.responsePath, '/tmp/research-output/final-response.md');
   assert.equal(patched?.researchMeta?.outputManifest?.exportedMarkdownPath, '/tmp/research-output/export.md');
+
+  await store.finalize('run-research-1', { status: 'success' });
 
   const reloaded = createRunStore(stateDir);
   await reloaded.load();

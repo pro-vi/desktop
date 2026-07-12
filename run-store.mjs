@@ -2,6 +2,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { atomicWriteFile } from './fs-utils.mjs';
+import {
+  LIVE_RUN_STATUSES,
+  assertRunLifecycle,
+  isTerminalRunStatus,
+  normalizeRunStatus,
+  phaseForRunStatus,
+  validateCompletionReceipt
+} from './run-lifecycle.mjs';
 
 function safeClone(value) {
   return globalThis.structuredClone
@@ -31,18 +39,8 @@ function normalizeTime(value) {
   return Number.isFinite(num) && num > 0 ? num : null;
 }
 
-const TERMINAL_PHASE_BY_STATUS = Object.freeze({
-  success: 'completed',
-  error: 'failed',
-  stopped: 'stopped',
-  timeout: 'timed_out'
-});
-
 function normalizePhaseForStatus({ status, phase, finishedAt }) {
-  const normalizedStatus = normalizeString(status);
-  const normalizedPhase = normalizeString(phase);
-  if (normalizedStatus === 'blocked') return finishedAt ? 'blocked' : normalizedPhase;
-  return TERMINAL_PHASE_BY_STATUS[normalizedStatus] || normalizedPhase;
+  return phaseForRunStatus(status, phase);
 }
 
 function normalizeObject(value) {
@@ -53,9 +51,10 @@ function normalizeRun(input = {}) {
   const now = Date.now();
   const startedAt = normalizeTime(input.startedAt) || now;
   const updatedAt = normalizeTime(input.updatedAt) || startedAt;
-  const finishedAt = normalizeTime(input.finishedAt);
+  const inputFinishedAt = normalizeTime(input.finishedAt);
   const archivedAt = normalizeTime(input.archivedAt);
-  const status = normalizeString(input.status) || 'queued';
+  const status = normalizeRunStatus(input.status);
+  const finishedAt = isTerminalRunStatus(status) ? (inputFinishedAt || updatedAt) : null;
   const phase = normalizePhaseForStatus({ status, phase: input.phase, finishedAt });
   return {
     id: normalizeString(input.id),
@@ -98,7 +97,9 @@ function normalizeRun(input = {}) {
     modeIntentProvenance: normalizeObject(input.modeIntentProvenance),
     modelIntentProvenance: normalizeObject(input.modelIntentProvenance),
     outputManifest: normalizeObject(input.outputManifest),
-    researchMeta: normalizeObject(input.researchMeta)
+    researchMeta: normalizeObject(input.researchMeta),
+    completionReceipt: validateCompletionReceipt(input.completionReceipt),
+    revision: Math.max(0, Number(input.revision) || 0)
   };
 }
 
@@ -179,6 +180,7 @@ function mergeResearchMeta(current, patchData) {
 export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) {
   const records = new Map();
   const writeQueues = new Map();
+  const listeners = new Set();
 
   function enqueueRunOp(runId, fn) {
     const id = assertRunId(runId);
@@ -192,10 +194,13 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
   }
 
   async function writeRecord(record) {
-    const next = normalizeRun(record);
+    const previous = records.get(record?.id);
+    const next = normalizeRun({ ...record, revision: Math.max(Number(previous?.revision) || 0, Number(record?.revision) || 0) + 1 });
     if (!next.id) throw new Error('missing_run_id');
-    records.set(next.id, next);
+    assertRunLifecycle(next);
     await writeFile(runPath(stateDir, next.id), `${JSON.stringify(next, null, 2)}\n`);
+    records.set(next.id, next);
+    for (const listener of listeners) listener(safeClone(next));
     return safeClone(next);
   }
 
@@ -252,6 +257,8 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
       const current = records.get(id);
       if (!current) throw new Error('run_not_found');
       if (current.finishedAt) return safeClone(current);
+      const status = normalizeRunStatus(patchData?.status, { fallback: null });
+      if (!isTerminalRunStatus(status)) throw new Error('finalize_requires_terminal_status');
       const finishedAt = Date.now();
       const next = normalizeRun({
         ...current,
@@ -294,7 +301,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
 
   async function finalizeStaleRunning({ status = 'stopped', detail = 'Interrupted by desktop restart.' } = {}) {
     const stale = Array.from(records.values()).filter((item) =>
-      !item.finishedAt && ['queued', 'running', 'blocked'].includes(String(item.status || '').trim().toLowerCase())
+      !item.finishedAt && LIVE_RUN_STATUSES.includes(String(item.status || '').trim().toLowerCase())
     );
     const finalized = [];
     for (const item of stale) {
@@ -320,6 +327,11 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     archive,
     get,
     getSummary,
-    list
+    list,
+    subscribe(listener) {
+      if (typeof listener !== 'function') throw new Error('listener_required');
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
   };
 }
