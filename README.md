@@ -505,6 +505,33 @@ opencode mcp list
 
 If you already had your client open, restart it (or start a new session) so it reloads MCP server config.
 
+### MCP tool profiles
+
+Agentify exposes the complete 34-tool surface by default for compatibility. Coding agents usually need only the 9-tool core workflow:
+
+```bash
+node mcp-server.mjs --tool-profile core
+```
+
+Profiles compose with commas:
+
+```bash
+node mcp-server.mjs --tool-profile core,browser
+AGENTIFY_MCP_TOOL_PROFILE=core,context node mcp-server.mjs
+```
+
+Available profiles:
+
+- `core`: query, research, durable wait/snapshots, stop/status, page reading, and image generation.
+- `browser`: navigation, readiness, window visibility, and tab controls.
+- `context`: watch folders, bundles, and artifact management.
+- `operations`: listing, opening, retrying, and archiving durable runs.
+- `media`: image generation/download and artifact access.
+- `admin`: shutdown and bearer-token rotation.
+- `full`: every tool; the compatibility default.
+
+Profile selection happens when the MCP server starts. Restart the MCP connection after changing it so the client refreshes `tools/list`.
+
 ## Developer workflows (natural language)
 Use plain requests in your MCP client. You usually do not need to call tool IDs directly.
 

@@ -7,10 +7,13 @@ import { z } from 'zod';
 import { defaultStateDir } from './state.mjs';
 import { ensureDesktopRunning, requestJson } from './mcp-lib.mjs';
 import { waitForRun } from './run-waiter.mjs';
+import { resolveMcpToolProfile } from './mcp-tool-profile.mjs';
 
 const server = new McpServer({ name: 'agentify-desktop', version: '0.1.0' });
 const stateDir = defaultStateDir();
 const showTabs = process.argv.includes('--show-tabs');
+const toolProfile = resolveMcpToolProfile({ argv: process.argv.slice(2) });
+const enabledTools = new Set(toolProfile.tools);
 
 function resolveLocalPaths(items) {
   if (!Array.isArray(items)) return [];
@@ -64,6 +67,7 @@ function runStatusText(run = {}, data = {}) {
 }
 
 function registerTool(name, def, handler) {
+  if (!enabledTools.has(name)) return;
   server.registerTool(name, def, handler);
 }
 
@@ -935,7 +939,7 @@ registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('agentify-desktop MCP server running on stdio');
+  console.error(`agentify-desktop MCP server running on stdio (profiles=${toolProfile.profiles.join(',')}; tools=${enabledTools.size})`);
 }
 
 main().catch((e) => {
