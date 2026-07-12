@@ -5,6 +5,7 @@ import { exitCodeForRunStatus, waitForRun } from './run-waiter.mjs';
 
 function parseArgs(argv) {
   const args = [...argv];
+  if (args.includes('--help') || args.includes('-h')) return { help: true };
   const runId = String(args.shift() || '').trim();
   let timeoutMs = 0;
   let includeOutputText = true;
@@ -26,6 +27,10 @@ async function main() {
   } catch (error) {
     process.stderr.write(`${error.message}\nusage: npm run wait-run -- <runId> [--timeout-ms N] [--no-output]\n`);
     process.exitCode = 64;
+    return;
+  }
+  if (args.help) {
+    process.stdout.write('Wait for an Agentify query or research run to reach proven terminal completion.\n\nUsage:\n  npm run wait-run -- <runId> [--timeout-ms N] [--no-output]\n\nExit codes:\n  0 success, 2 error, 3 stopped, 4 interrupted, 64 usage, 75 caller timeout, 130 signal\n');
     return;
   }
   const abortController = new AbortController();

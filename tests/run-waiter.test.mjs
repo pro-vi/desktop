@@ -26,6 +26,7 @@ test('run waiter follows revisions until a receipt-backed terminal result', asyn
   assert.equal(result.run.status, 'success');
   assert.equal(result.outputText, 'done');
   assert.deepEqual(bodies.map((body) => body.afterRevision), [0, 3]);
+  assert.ok(bodies.every((body) => body.view === 'summary'));
 });
 
 test('run waiter refuses a legacy output success without completion proof', async () => {

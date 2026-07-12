@@ -31,6 +31,7 @@ export async function waitForRun({
       path: '/runs/wait',
       body: {
         runId: id,
+        view: 'summary',
         afterRevision,
         waitTimeoutMs: Math.min(30_000, Number.isFinite(remaining) ? Math.max(1, remaining) : 25_000),
         includeOutputText,
