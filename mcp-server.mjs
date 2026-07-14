@@ -86,7 +86,7 @@ registerTool(
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
       chatUrl: z.string().optional().describe('ChatGPT conversation or shared-chat URL to continue. Mutually exclusive with projectUrl; suppresses saved/default project routing.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
-      modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro, thinking, instant. This is separate from the vendor `model` hint.'),
+      modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro (Pro Extended), thinking (Medium), instant. This is separate from the vendor `model` hint.'),
       modelIntent: z.string().optional().describe('Optional explicit ChatGPT generation intent for this query only. Supported intents: gpt-5.5-pro, gpt-5.4-pro. The controller fails closed unless the UI can confirm the requested generation before sending.'),
       bundleName: z.string().optional().describe('Named context bundle to merge into this query before sending.'),
       prompt: z.string().describe('Prompt to send to ChatGPT.'),
@@ -894,7 +894,7 @@ registerTool(
       key: z.string().optional(),
       name: z.string().optional(),
       projectUrl: z.string().optional().describe('ChatGPT Project URL. Routes conversations on this tab into the project.'),
-      modeIntent: z.string().optional().describe('ChatGPT mode intent to associate with this tab. Supported intents: extended-pro, thinking, instant.'),
+      modeIntent: z.string().optional().describe('ChatGPT mode intent to associate with this tab. Supported intents: extended-pro (Pro Extended), thinking (Medium), instant.'),
       show: z.boolean().optional().describe('Show the tab window immediately.')
     }
   },

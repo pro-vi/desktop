@@ -75,8 +75,8 @@ function fmtRunStatus(status) {
 
 function fmtIntent(intent) {
   const key = String(intent || '').trim().toLowerCase();
-  if (key === 'extended-pro') return 'Extended Pro';
-  if (key === 'thinking') return 'Thinking';
+  if (key === 'extended-pro') return 'Pro Extended';
+  if (key === 'thinking') return 'Medium (Thinking)';
   if (key === 'instant') return 'Instant';
   if (key === 'gpt-5.5-pro') return 'GPT-5.5 Pro';
   if (key === 'gpt-5.4-pro') return 'GPT-5.4 Pro';

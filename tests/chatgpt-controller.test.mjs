@@ -1318,7 +1318,7 @@ test('chatgpt-controller: query does not click mode controls when the requested 
           reason: 'mode_already_active',
           targetIntent: 'thinking',
           activeIntent: 'thinking',
-          label: 'Thinking'
+          label: 'Medium'
         };
       }
       if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
@@ -1343,7 +1343,7 @@ test('chatgpt-controller: query does not click mode controls when the requested 
           hasContinue: false,
           hasRegenerate: false,
           isThinking: false,
-          pageText: 'Done'
+          pageText: 'Done\nMedium\nChatGPT can make mistakes. Check important info.'
         };
       }
       if (js.includes('const codes = Array.from')) {
@@ -1385,6 +1385,7 @@ test('chatgpt-controller: query does not click mode controls when the requested 
   });
 
   assert.equal(result.text, 'Done');
+  assert.equal(result.meta?.modeUsed, 'thinking');
   assert.equal(modeChecks, 1);
   assert.equal(pointerEvents.filter((item) => item.startsWith('down:')).length, 2);
 });

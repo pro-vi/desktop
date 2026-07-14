@@ -393,11 +393,17 @@ test('chatgpt-ui-primitives: exposes browser evaluator source for the controller
 test('chatgpt-ui-primitives: maps usable mode labels and rejects attachment chrome', () => {
   assert.equal(modeIntentForLabel('Extended Pro'), 'extended-pro');
   assert.equal(modeIntentForLabel('Pro'), 'extended-pro');
+  assert.equal(modeIntentForLabel('Pro Extended'), 'extended-pro');
+  assert.equal(modeIntentForLabel('Pro Standard'), null);
   assert.equal(modeIntentForLabel('Thinking'), 'thinking');
   assert.equal(modeIntentForLabel('Reasoning'), 'thinking');
+  assert.equal(modeIntentForLabel('Medium'), 'thinking');
   assert.equal(modeIntentForLabel('Fast'), 'instant');
   assert.equal(modeIntentForLabel('uploaded Thinking attached file'), null);
   assert.equal(modeIntentLabelLooksUsable('uploaded Thinking attached file', 'thinking'), false);
+  assert.equal(modeIntentLabelLooksUsable('Medium', 'thinking'), true);
+  assert.equal(modeIntentLabelLooksUsable('Pro Extended', 'extended-pro'), true);
+  assert.equal(modeIntentLabelLooksUsable('Pro Standard', 'extended-pro'), false);
 });
 
 test('chatgpt-ui-primitives: classifies high-confidence mode controls', () => {
@@ -453,9 +459,21 @@ test('chatgpt-ui-primitives: scores mode triggers with composer and prompt boost
     height: 32,
     y: 880
   });
+  const currentMedium = scoreModeTriggerCandidate({
+    label: 'Medium',
+    targetIntent: 'thinking',
+    modeRegion: true,
+    inComposer: true,
+    promptProximityBoost: 160,
+    area: 4_000,
+    width: 140,
+    height: 32,
+    y: 880
+  });
 
   assert.equal(targetInComposer > genericHeader, true);
   assert.equal(genericHeader > activeNonTarget, true);
+  assert.equal(currentMedium > 0, true);
 });
 
 test('chatgpt-ui-primitives: visible composer mode chip can confirm active mode', () => {
@@ -545,6 +563,28 @@ test('chatgpt-ui-primitives: rejects off-region mode triggers and scores mode op
       height: 36
     }),
     260
+  );
+  assert.equal(
+    scoreModeOptionCandidate({
+      label: 'Pro Extended',
+      targetIntent: 'extended-pro',
+      optionInsideMenu: true,
+      area: 7_200,
+      width: 200,
+      height: 36
+    }),
+    260
+  );
+  assert.equal(
+    scoreModeOptionCandidate({
+      label: 'Pro Standard',
+      targetIntent: 'extended-pro',
+      optionInsideMenu: true,
+      area: 7_200,
+      width: 200,
+      height: 36
+    }),
+    -1
   );
   assert.equal(
     scoreModeOptionCandidate({

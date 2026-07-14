@@ -9,6 +9,7 @@ import {
   CHATGPT_MODE_PICKER_PRIMITIVES_JS,
   CHATGPT_MODEL_INTENT_META,
   CHATGPT_MODEL_PICKER_PRIMITIVES_JS,
+  modeIntentForLabel,
   modeIntentLabelLooksUsable,
   modelIntentLabelLooksUsable,
   shouldTrackPendingModeTrigger,
@@ -69,18 +70,17 @@ function inferModeIntentFromFooterText(value) {
   const end = footerIndex >= 0 ? Math.min(text.length, footerIndex + 220) : text.length;
   const scope = text.slice(start, end);
   const candidates = [];
-  const collect = (intent, label, re) => {
-    for (const match of scope.matchAll(re)) {
-      candidates.push({
-        intent,
-        label: match[0] || label,
-        index: Number.isFinite(match.index) ? match.index : 0
-      });
-    }
-  };
-  collect('instant', 'Instant', /\binstant\b/gi);
-  collect('thinking', 'Thinking', /\bthinking\b|\breasoning\b/gi);
-  collect('extended-pro', 'Extended Pro', /\bextended\s*pro\b|\bpro\b/gi);
+  const modeLabelPattern = /\b(?:extended\s*pro|pro\s*extended|thinking|reasoning|medium|instant|fast)\b|\bpro\b(?!\s+standard\b)/gi;
+  for (const match of scope.matchAll(modeLabelPattern)) {
+    const label = match[0] || '';
+    const intent = modeIntentForLabel(label);
+    if (!intent) continue;
+    candidates.push({
+      intent,
+      label,
+      index: Number.isFinite(match.index) ? match.index : 0
+    });
+  }
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.index - a.index);
   const best = candidates[0];
