@@ -199,20 +199,23 @@ Give me 3 variations.
 
 The response includes local file paths. You can immediately reuse one of them in the next step.
 
-3. Reattach one of the returned paths in the next prompt:
+3. Reattach one of the returned paths to generate and save a variation in one call:
 
 ```json
 {
-  "tool": "agentify_query",
+  "tool": "agentify_image_gen",
   "arguments": {
     "key": "sprite-lab",
     "prompt": "Take the attached sprite and create a damaged version with one broken eye and darker metal.",
     "attachments": [
       "/ABS/PATH/FROM/PREVIOUS/STEP/sprite.png"
-    ]
+    ],
+    "maxImages": 3
   }
 }
 ```
+
+agentify_image_gen uploads every attachment before sending the image prompt, then saves the generated images automatically and returns their local paths. Relative attachment paths are resolved from the MCP server's working directory.
 
 4. If you want the folder in Finder/Explorer:
 
@@ -555,8 +558,8 @@ Use explicit tool calls (`agentify_query`, `agentify_read_page`, etc.) when you 
 - **Use ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok normally (manual):** write a plan/spec in the UI, then in your MCP client call `agentify_read_page` to pull the transcript into your workflow.
 - **Drive ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok from your MCP client:** call `agentify_ensure_ready`, then `agentify_query` with a `prompt`. Use a stable `key` per project to keep parallel jobs isolated.
 - **Parallel jobs:** create/ensure a tab per project with `agentify_tab_create(key: ...)`, then use that `key` for `agentify_query`, `agentify_read_page`, and `agentify_download_images`.
-- **Upload files:** pass local paths via `attachments` to `agentify_query` (best-effort; depends on the site UI).
-- **Generate/save/reuse artifacts:** ask for images/files via `agentify_query`, then call `agentify_save_artifacts` or `agentify_download_images`. Reuse the returned local paths in the next `attachments` array.
+- **Upload files:** pass local paths via `attachments` to `agentify_query` or `agentify_image_gen` (best-effort; depends on the site UI).
+- **Generate/save/reuse artifacts:** use `agentify_image_gen` with optional reference attachments to generate and save images in one call. For general prompts, call `agentify_query`, then `agentify_save_artifacts` or `agentify_download_images`; reuse returned paths in the next `attachments` array.
 - **Open the artifact folder quickly:** call `agentify_open_artifacts_folder` or click `Artifacts` in the Control Center.
 - **Use local inbox/watch folders:** call `agentify_open_watch_folder`, `agentify_add_watch_folder`, or manage them in the Control Center. Each watched folder has a one-click open button in the UI.
 - **Stuff folder context into a prompt:** pass `contextPaths` to `agentify_query`. Agentify will inline chunked text files into the prompt and auto-attach small binary/image files when useful.
