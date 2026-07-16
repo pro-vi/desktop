@@ -2,7 +2,7 @@
 title: Native reference attachments for image generation
 objective: Let callers generate and automatically save style-consistent images from local reference files in one MCP call.
 type: feat
-status: active
+status: completed
 date: 2026-07-15
 origin: .inbox/.read/2026-07-15-image-gen-reference-attachment.md
 ---
@@ -69,15 +69,15 @@ Relative MCP paths becoming absolute while direct HTTP rejects relative paths is
   - Modify: tests/mcp-server-names.test.mjs
   - Modify: tests/mcp-tool-profile-integration.test.mjs
   - Modify: tests/http-api.test.mjs
-- **Approach:** Add the optional attachment schema beside prompt, destructure it, normalize with the shared MCP helper, and replace only the hard-coded empty list. Scope source-contract assertions to the image-gen registration block, verify the schema through tools/list, and extend an existing image-query integration test to assert the absolute attachment list and image flag together.
+- **Approach:** Add the optional attachment schema beside prompt, destructure it, normalize with the shared MCP helper, and replace only the hard-coded empty list. Scope source-contract assertions to the image-gen registration block, verify the schema through tools/list, invoke the live MCP handler against a loopback HTTP contract server, and extend an existing image-query integration test to assert the absolute attachment list and image flag together.
 - **Patterns to follow:** mcp-server.mjs:94 and mcp-server.mjs:130 for schema and boundary resolution; tests/mcp-server-names.test.mjs:12 for registration-block scoping; tests/mcp-tool-profile-integration.test.mjs:12 for live tools/list inspection; tests/http-api.test.mjs:2866 for image-query integration.
 - **Test scenarios:**
   - *Happy path:* a valid absolute reference file is supplied with an image prompt → the controller receives that exact path with imageGeneration true → the request succeeds.
   - *Edge case:* attachments are omitted → the MCP handler forwards an empty resolved list and existing prompt-only behavior remains.
   - *Edge case:* a relative MCP path is supplied → it is resolved against MCP cwd before the HTTP request.
   - *Error path:* a missing or non-file attachment continues to fail through the existing context-packer validation before provider send.
-  - *Integration:* live MCP tools/list exposes attachments as an optional array whose items are strings.
-- **Verification:** The image-gen block contains its own schema, resolution, and forwarding contract; served schema and HTTP integration tests prove the boundary; the old hard-coded empty list is absent; existing artifact-save and output projection remain unchanged.
+  - *Integration:* live MCP tools/list exposes attachments as an optional string array, and a real MCP call resolves a relative file before forwarding it with imageGeneration enabled and preserving the artifact-save result.
+- **Verification:** The image-gen block contains its own schema, resolution, and forwarding contract; served-schema, live MCP call, and HTTP integration tests prove the boundary; the old hard-coded empty list is absent; existing artifact-save and output projection remain unchanged.
 
 ### U2. Document native reference-anchored generation
 
@@ -113,7 +113,7 @@ Relative MCP paths becoming absolute while direct HTTP rejects relative paths is
 - **Error propagation:** Existing missing-path, upload-rejected, upload-stalled, query, and artifact-save errors continue to propagate without translation changes.
 - **State lifecycle risks:** Attachments remain stored in logical request and materialized replay by /query. The separate post-query artifact request can still observe interleaving; this plan does not worsen or conceal that existing risk.
 - **API surface parity:** agentify_query, agentify_research, and agentify_image_gen all expose immediate-upload path lists; image-gen intentionally does not acquire bundle, context-path, prompt-prefix, model-intent, or async-query options.
-- **Integration coverage:** A tools/list assertion proves the public schema and an HTTP test proves attachment plus image-generation composition with a real temporary file.
+- **Integration coverage:** A tools/list assertion proves the public schema, a real MCP stdio call proves relative-path normalization and the two-request/result contract, and an HTTP test proves attachment plus image-generation composition with a real temporary file.
 - **Unchanged invariants:** Files upload before prompt send; query failure prevents artifact saving; successful query still performs image-only artifact saving; the return projection remains stable.
 
 ## Bug / requirement trace

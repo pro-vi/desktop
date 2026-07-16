@@ -138,7 +138,7 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
     pth: '/query',
     body: { prompt: 'hello from control center' }
   });
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await waitFor(() => releaseQuery);
 
   const st1 = await req({ port, token: 'secret', method: 'GET', pth: '/status' });
   assert.equal(st1.res.status, 200);
