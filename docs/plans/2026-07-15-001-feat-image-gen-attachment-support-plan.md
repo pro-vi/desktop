@@ -2,7 +2,7 @@
 title: Native reference attachments for image generation
 objective: Let callers generate and automatically save style-consistent images from local reference files in one MCP call.
 type: feat
-status: completed
+status: active
 date: 2026-07-15
 origin: .inbox/.read/2026-07-15-image-gen-reference-attachment.md
 ---
