@@ -11,6 +11,7 @@ test('mcp-server registers agentify_* tools only', async () => {
   const src = await fs.readFile(path.join(__dirname, '..', 'mcp-server.mjs'), 'utf8');
   const queryBlock = src.match(/registerTool\(\s*'agentify_query'[\s\S]*?\n\);/);
   const researchBlock = src.match(/registerTool\(\s*'agentify_research'[\s\S]*?\n\);/);
+  const imageGenBlock = src.match(/registerTool\(\s*'agentify_image_gen'[\s\S]*?\n\);/);
   const tabCreateBlock = src.match(/registerTool\(\s*'agentify_tab_create'[\s\S]*?\n\);/);
 
   assert.ok(src.includes("'agentify_query'"), 'expected agentify_query tool');
@@ -44,6 +45,11 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(queryBlock[0].includes('chatUrl,'), 'expected chatUrl forwarding on agentify_query');
   assert.ok(queryBlock[0].includes('modelIntent: z.string().optional().describe('), 'expected modelIntent on agentify_query');
   assert.ok(queryBlock[0].includes('modelIntent,'), 'expected modelIntent forwarding on agentify_query');
+  assert.ok(imageGenBlock, 'expected agentify_image_gen registration block');
+  assert.ok(imageGenBlock[0].includes('attachments: z.array(z.string()).optional().describe('), 'expected attachments on agentify_image_gen');
+  assert.ok(imageGenBlock[0].includes('const resolvedAttachments = resolveLocalPaths(attachments || [])'), 'expected image_gen to normalize attachments relative to MCP cwd');
+  assert.ok(imageGenBlock[0].includes('attachments: resolvedAttachments'), 'expected image_gen to forward resolved attachments');
+  assert.ok(!imageGenBlock[0].includes('attachments: []'), 'image_gen must not discard caller attachments');
   assert.ok(src.includes("body: { model, key, name, projectUrl, modeIntent, show: typeof show === 'boolean' ? show : undefined }"), 'expected modeIntent on tab_create');
   assert.ok(tabCreateBlock, 'expected agentify_tab_create registration block');
   assert.ok(!tabCreateBlock[0].includes('modelIntent: z.string().optional().describe('), 'tab_create should not expose sticky modelIntent');

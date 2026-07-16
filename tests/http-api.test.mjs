@@ -2863,8 +2863,10 @@ test('http-api: image-generation queries prefer the default image project and do
   assert.equal(persisted.shared.conversationUrl, normalConversationUrl);
 });
 
-test('http-api: image-generation queries without an explicit key use the dedicated default image key tab', async (t) => {
+test('http-api: image-generation queries without an explicit key use the dedicated default image key tab and forward attachments', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-image-default-key-'));
+  const referencePath = path.join(stateDir, 'style-reference.png');
+  await fs.writeFile(referencePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]));
   const imageProjectUrl = 'https://chatgpt.com/g/g-p-image/project';
   let currentUrlByTab = {
     t0: 'https://chatgpt.com/',
@@ -2883,8 +2885,8 @@ test('http-api: image-generation queries without an explicit key use the dedicat
       },
       ensureReady: async () => ({ ok: true }),
       getUrl: async () => currentUrlByTab.t0,
-      query: async ({ prompt, imageGeneration }) => {
-        queryCalls.push({ tabId: 't0', prompt, imageGeneration, urlBeforeSend: currentUrlByTab.t0 });
+      query: async ({ prompt, attachments, imageGeneration }) => {
+        queryCalls.push({ tabId: 't0', prompt, attachments, imageGeneration, urlBeforeSend: currentUrlByTab.t0 });
         return { text: 'default', codeBlocks: [], meta: {} };
       }
     },
@@ -2895,8 +2897,8 @@ test('http-api: image-generation queries without an explicit key use the dedicat
       },
       ensureReady: async () => ({ ok: true }),
       getUrl: async () => currentUrlByTab['t-image'],
-      query: async ({ prompt, imageGeneration }) => {
-        queryCalls.push({ tabId: 't-image', prompt, imageGeneration, urlBeforeSend: currentUrlByTab['t-image'] });
+      query: async ({ prompt, attachments, imageGeneration }) => {
+        queryCalls.push({ tabId: 't-image', prompt, attachments, imageGeneration, urlBeforeSend: currentUrlByTab['t-image'] });
         currentUrlByTab['t-image'] = 'https://chatgpt.com/g/g-p-image/c/thread-image';
         return { text: 'image ok', codeBlocks: [], meta: {} };
       }
@@ -2949,13 +2951,14 @@ test('http-api: image-generation queries without an explicit key use the dedicat
     token: 'secret',
     method: 'POST',
     pth: '/query',
-    body: { prompt: 'make an image', imageGeneration: true }
+    body: { prompt: 'make an image', attachments: [referencePath], imageGeneration: true }
   });
 
   assert.equal(r.res.status, 200);
   assert.equal(r.data.tabId, 't-image');
   assert.equal(ensureTabCalls[0]?.key, 'image-lab');
   assert.equal(queryCalls[0]?.tabId, 't-image');
+  assert.deepEqual(queryCalls[0]?.attachments, [referencePath]);
   assert.equal(queryCalls[0]?.imageGeneration, true);
   assert.equal(queryCalls[0]?.urlBeforeSend, imageProjectUrl);
   assert.equal(tabsList.find((item) => item.id === 't0')?.projectUrl, null);

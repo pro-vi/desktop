@@ -9,7 +9,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const repoDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const serverPath = path.join(repoDir, 'mcp-server.mjs');
 
-async function listedTools(profile) {
+async function listedToolDefinitions(profile) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath, '--tool-profile', profile],
@@ -19,10 +19,14 @@ async function listedTools(profile) {
   try {
     await client.connect(transport);
     const result = await client.listTools();
-    return result.tools.map((tool) => tool.name);
+    return result.tools;
   } finally {
     await client.close();
   }
+}
+
+async function listedTools(profile) {
+  return (await listedToolDefinitions(profile)).map((tool) => tool.name);
 }
 
 test('mcp server tools/list exposes only the selected core profile', async () => {
@@ -40,4 +44,14 @@ test('mcp server tools/list composes profiles without duplicate tools', async ()
   assert.ok(tools.includes('agentify_query'));
   assert.ok(tools.includes('agentify_navigate'));
   assert.equal(tools.includes('agentify_shutdown'), false);
+});
+
+test('mcp server tools/list exposes optional image-generation attachments', async () => {
+  const tools = await listedToolDefinitions('core');
+  const imageGen = tools.find((tool) => tool.name === 'agentify_image_gen');
+
+  assert.ok(imageGen, 'expected agentify_image_gen in the core profile');
+  assert.equal(imageGen.inputSchema?.properties?.attachments?.type, 'array');
+  assert.equal(imageGen.inputSchema?.properties?.attachments?.items?.type, 'string');
+  assert.equal(imageGen.inputSchema?.required?.includes('attachments') || false, false);
 });

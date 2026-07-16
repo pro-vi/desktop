@@ -544,11 +544,13 @@ registerTool(
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Useful for routing image requests to a separate Instant/Thinking project.'),
       modeIntent: z.string().optional().describe('ChatGPT mode intent for image creation. Defaults to the configured image intent when omitted.'),
       prompt: z.string().describe('Prompt to send to ChatGPT for image generation.'),
+      attachments: z.array(z.string()).optional().describe('Local file paths to upload before sending the prompt.'),
       timeoutMs: z.number().optional().describe('Maximum time to wait for completion.'),
       maxImages: z.number().optional().describe('Maximum images to download.')
     }
   },
-  async ({ model, tabId, key, projectUrl, modeIntent, prompt, timeoutMs, maxImages }) => {
+  async ({ model, tabId, key, projectUrl, modeIntent, prompt, attachments, timeoutMs, maxImages }) => {
+    const resolvedAttachments = resolveLocalPaths(attachments || []);
     const conn = await getConn();
     const q = await requestJson({
       ...conn,
@@ -563,7 +565,7 @@ registerTool(
         modeIntent,
         imageGeneration: true,
         prompt,
-        attachments: [],
+        attachments: resolvedAttachments,
         timeoutMs: timeoutMs || 10 * 60_000
       }
     });
