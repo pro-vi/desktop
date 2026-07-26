@@ -17,7 +17,8 @@ import {
 import { ChatGPTController } from './chatgpt-controller.mjs';
 import {
   createProviderCompatibilityBridge,
-  loadChatGptCompatibilityProfile
+  loadChatGptCompatibilityProfile,
+  serializeChatGptCompatibilityStatus
 } from './chatgpt-compatibility.mjs';
 import { createCompatibilityStore } from './compatibility-store.mjs';
 import { startHttpApi } from './http-api.mjs';
@@ -148,6 +149,7 @@ async function main() {
     )
   });
   await compatibilityStore.load();
+  const getCompatibilityStatus = () => serializeChatGptCompatibilityStatus(compatibilityStore.getSnapshot());
   const chromeExecutablePath = resolveChromeExecutablePath({ settings });
   const chromeDebugPort = resolveChromeDebugPort({ settings });
   const chromeProfileMode = resolveChromeProfileMode({ settings });
@@ -212,6 +214,7 @@ async function main() {
       if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:runsChanged');
     } catch {}
   };
+  compatibilityStore.subscribe(() => emitTabsChanged());
   browserBackend = await createBrowserBackend({
     kind: browserBackendKind,
     stateDir,
@@ -363,6 +366,7 @@ async function main() {
       stateDir,
       browserBackend: browserBackendKind,
       browser: browserState,
+      compatibility: getCompatibilityStatus(),
       runtime: server?.getRuntimeState?.() || { inflightQueries: 0, providerSlots: { max: settings.maxInflightQueries || 2, activeLeases: [], queued: [] }, activeQueries: [] }
     };
   });
@@ -687,6 +691,7 @@ async function main() {
         onRunsChanged: async () => {
           emitRunsChanged();
         },
+        getCompatibilityStatus,
         getStatus: async ({ tabId }) => {
           const controller = tabId ? tabs.getControllerById(tabId) : tabs.getControllerById(defaultTabId);
           const url = await controller.getUrl().catch(() => '');

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { URL } from 'node:url';
 import crypto from 'node:crypto';
 import { writeToken, readProjects, writeProjects } from './state.mjs';
+import { parseChatGptCompatibilityStatus } from './chatgpt-compatibility.mjs';
 import {
   normalizeChatGptModelIntent,
   normalizeChatGptModeIntent,
@@ -754,6 +755,7 @@ export function startHttpApi({
   onOpenWatchFolder,
   onScanWatchFolder,
   getStatus,
+  getCompatibilityStatus = () => null,
   getSettings,
   onRuntimeChanged,
   onRunsChanged
@@ -2523,8 +2525,15 @@ export function startHttpApi({
           ? await resolveTab({ tabs, defaultTabId, body: statusBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: false, vendors })
           : defaultTabId;
         const st = await getStatus({ tabId });
+        let compatibility;
+        try {
+          compatibility = parseChatGptCompatibilityStatus(await getCompatibilityStatus());
+        } catch {
+          compatibility = parseChatGptCompatibilityStatus(null);
+        }
         return sendJson(res, 200, {
           ...st,
+          compatibility,
           activeQuery: activeQueries.get(tabId) || null,
           runtime: runtimeSnapshot()
         });

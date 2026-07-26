@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { readState, readToken } from './state.mjs';
+import { parseChatGptCompatibilityStatus } from './chatgpt-compatibility.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +43,13 @@ async function validateConn({ conn, fetchImpl }) {
   if (statusData?.error === 'unauthorized') return { ok: false, reason: 'unauthorized' };
   if (statusData?.ok !== true) return { ok: false, reason: 'unexpected_status_payload' };
   return { ok: true, serverId: healthData?.serverId || null };
+}
+
+export function normalizeDesktopStatus(data = {}) {
+  return {
+    ...(data && typeof data === 'object' && !Array.isArray(data) ? data : {}),
+    compatibility: parseChatGptCompatibilityStatus(data?.compatibility)
+  };
 }
 
 export async function requestJson({ baseUrl, token, method, path: pth, body, fetchImpl = fetch, signal }) {

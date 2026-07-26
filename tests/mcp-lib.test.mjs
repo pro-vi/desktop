@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 
 import { ensureToken, writeState } from '../state.mjs';
-import { ensureDesktopRunning, requestJson } from '../mcp-lib.mjs';
+import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from '../mcp-lib.mjs';
 
 async function tempDir() {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-desktop-test-'));
@@ -57,6 +57,12 @@ test('mcp-lib: requestJson throws with status and body', async () => {
       return true;
     }
   );
+});
+
+test('mcp-lib: status normalization fails unknown compatibility variants closed', () => {
+  const normalized = normalizeDesktopStatus({ ok: true, compatibility: { schemaVersion: 999, verdict: 'ok' } });
+  assert.equal(normalized.compatibility.verdict, 'incompatible');
+  assert.equal(normalized.compatibility.apparatus.verdict, 'incomplete');
 });
 
 test('mcp-lib: ensureDesktopRunning uses existing connection when serverId matches', async () => {

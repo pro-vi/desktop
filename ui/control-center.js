@@ -158,8 +158,46 @@ function defaultState() {
     stateDir: '',
     browserBackend: 'electron',
     browser: null,
+    compatibility: null,
     runtime: { inflightQueries: 0, providerSlots: { max: 2, activeLeases: [], queued: [] }, activeQueries: [], lastOutcomes: [] }
   };
+}
+
+function renderCompatibilityStatus(status) {
+  const known = new Set(['observed-healthy', 'observed-degraded', 'drift', 'incomplete', 'unobserved', 'stale', 'incompatible']);
+  const verdict = known.has(status?.verdict) ? status.verdict : 'incompatible';
+  const labels = {
+    'observed-healthy': 'Observed cohort healthy',
+    'observed-degraded': 'Observed cohort degraded',
+    drift: 'Observed compatibility drift',
+    incomplete: 'Compatibility measurement incomplete',
+    unobserved: 'Compatibility unobserved',
+    stale: 'Compatibility evidence stale',
+    incompatible: 'Incompatible compatibility status'
+  };
+  const verdictNode = el('compatibilityVerdict');
+  verdictNode.textContent = labels[verdict];
+  verdictNode.className = `compatibilityVerdict ${verdict === 'observed-healthy' ? 'ok' : verdict === 'incompatible' || verdict === 'drift' ? 'fail' : 'warn'}`;
+  const observed = Number.isSafeInteger(status?.coverage?.observed) ? status.coverage.observed : 0;
+  const total = Number.isSafeInteger(status?.coverage?.total) ? status.coverage.total : 0;
+  const schemaVersion = Number.isSafeInteger(status?.schemaVersion) ? status.schemaVersion : '?';
+  const contractHash = /^[a-f0-9]{64}$/.test(status?.contractHash || '') ? status.contractHash.slice(0, 12) : 'unknown';
+  const apparatus = ['ok', 'drift', 'incomplete'].includes(status?.apparatus?.verdict) ? status.apparatus.verdict : 'incomplete';
+  const staleLabel = status?.staleness?.status === 'current'
+    ? 'current local evidence'
+    : status?.staleness?.status === 'cold' ? 'no exercised evidence'
+      : status?.staleness?.status === 'stale-map' ? 'new map awaiting observation'
+        : status?.staleness?.status === 'stale' ? 'local evidence is stale' : 'staleness unknown';
+  el('compatibilitySummary').textContent = `Observed coverage ${observed}/${total} • apparatus ${apparatus} • map ${contractHash} • schema v${schemaVersion} • ${staleLabel}. This reports only this installation’s exercised cohort.`;
+  const list = el('compatibilityCapabilities');
+  list.innerHTML = '';
+  for (const capability of Array.isArray(status?.capabilities) ? status.capabilities : []) {
+    const badge = document.createElement('span');
+    const badgeClass = capability.status === 'ok' ? 'ok' : capability.status === 'fail' ? 'warn' : capability.status === 'degraded' ? 'info' : 'dim';
+    badge.className = `badge ${badgeClass}`;
+    badge.textContent = `${capability.id}: ${capability.status}`;
+    list.appendChild(badge);
+  }
 }
 
 function defaultSettings() {
@@ -226,6 +264,7 @@ async function refresh() {
     )) || { runs: [] };
     const watchFoldersData = (await callApi('listWatchFolders', undefined, { fallback: { folders: [] } })) || { folders: [] };
     lastState = { ...defaultState(), ...state };
+    renderCompatibilityStatus(lastState.compatibility);
 
     const vendorSelect = el('vendorSelect');
     const prev = String(vendorSelect.value || '').trim();

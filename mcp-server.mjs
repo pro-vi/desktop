@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { defaultStateDir } from './state.mjs';
-import { ensureDesktopRunning, requestJson } from './mcp-lib.mjs';
+import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from './mcp-lib.mjs';
 import { waitForRun } from './run-waiter.mjs';
 import { resolveMcpToolProfile } from './mcp-tool-profile.mjs';
 
@@ -331,7 +331,8 @@ registerTool(
     if (model) qs.set('model', model);
     const path = qs.size ? `/status?${qs.toString()}` : '/status';
     const data = await requestJson({ ...conn, method: 'GET', path });
-    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }], structuredContent: data };
+    const status = normalizeDesktopStatus(data);
+    return { content: [{ type: 'text', text: JSON.stringify(status, null, 2) }], structuredContent: status };
   }
 );
 

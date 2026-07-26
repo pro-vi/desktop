@@ -11,6 +11,7 @@ test('preload bridges expose the durable run IPC surface in both CJS and ESM bui
   const preloadCjs = await fs.readFile(path.join(__dirname, '..', 'ui', 'preload.cjs'), 'utf8');
   const preloadMjs = await fs.readFile(path.join(__dirname, '..', 'ui', 'preload.mjs'), 'utf8');
   const requiredSnippets = [
+    'getState:',
     'getRuns:',
     'openRun:',
     'retryRun:',

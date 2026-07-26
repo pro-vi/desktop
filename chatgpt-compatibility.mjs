@@ -14,6 +14,16 @@ export const CHATGPT_TERMINAL_MODES = Object.freeze([
 ]);
 export const CHATGPT_ANCHOR_STATUSES = Object.freeze(['ok', 'degraded', 'fail', 'skip']);
 export const CHATGPT_APPARATUS_VERDICTS = Object.freeze(['ok', 'drift', 'incomplete']);
+export const CHATGPT_COMPATIBILITY_STATUS_SCHEMA_VERSION = 1;
+export const CHATGPT_COMPATIBILITY_STATUS_VERDICTS = Object.freeze([
+  'observed-healthy',
+  'observed-degraded',
+  'drift',
+  'incomplete',
+  'unobserved',
+  'stale',
+  'incompatible'
+]);
 
 const ANCHOR_PRIMITIVE_IDS = Object.freeze([
   'editable-composer',
@@ -226,6 +236,138 @@ function canonicalJson(value) {
       .join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+const STATUS_STALENESS = Object.freeze(['cold', 'current', 'stale', 'stale-map', 'unknown']);
+const DEFAULT_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
+function incompatibleStatus(reasonCode = 'projection-incompatible') {
+  return deepFreeze({
+    schemaVersion: CHATGPT_COMPATIBILITY_STATUS_SCHEMA_VERSION,
+    contractHash: null,
+    cohort: 'observed',
+    verdict: 'incompatible',
+    apparatus: { verdict: 'incomplete', reasonCode },
+    coverage: { observed: 0, total: 0 },
+    staleness: { status: 'unknown', lastObservedAt: null, staleAfterMs: DEFAULT_STALE_AFTER_MS },
+    capabilities: []
+  });
+}
+
+function parseStatusStrict(input) {
+  if (!isRecord(input)) throw new Error('status-not-object');
+  const rootKeys = ['schemaVersion', 'contractHash', 'cohort', 'verdict', 'apparatus', 'coverage', 'staleness', 'capabilities'];
+  if (Object.keys(input).length !== rootKeys.length || rootKeys.some((key) => !Object.hasOwn(input, key))) {
+    throw new Error('status-fields');
+  }
+  if (input.schemaVersion !== CHATGPT_COMPATIBILITY_STATUS_SCHEMA_VERSION || input.cohort !== 'observed') {
+    throw new Error('status-version');
+  }
+  if (!CHATGPT_COMPATIBILITY_STATUS_VERDICTS.includes(input.verdict)) throw new Error('status-verdict');
+  const incompatible = input.verdict === 'incompatible';
+  if (!(incompatible && input.contractHash === null) && !/^[a-f0-9]{64}$/.test(input.contractHash)) {
+    throw new Error('status-hash');
+  }
+  if (!isRecord(input.apparatus) || Object.keys(input.apparatus).length !== 2 ||
+    !CHATGPT_APPARATUS_VERDICTS.includes(input.apparatus.verdict) ||
+    !ID_PATTERN.test(input.apparatus.reasonCode)) throw new Error('status-apparatus');
+  if (!isRecord(input.coverage) || Object.keys(input.coverage).length !== 2 ||
+    !Number.isSafeInteger(input.coverage.observed) || input.coverage.observed < 0 ||
+    !Number.isSafeInteger(input.coverage.total) || input.coverage.total < input.coverage.observed) {
+    throw new Error('status-coverage');
+  }
+  if (!isRecord(input.staleness) || Object.keys(input.staleness).length !== 3 ||
+    !STATUS_STALENESS.includes(input.staleness.status) ||
+    !(input.staleness.lastObservedAt === null || (Number.isSafeInteger(input.staleness.lastObservedAt) && input.staleness.lastObservedAt > 0)) ||
+    !Number.isSafeInteger(input.staleness.staleAfterMs) || input.staleness.staleAfterMs <= 0) {
+    throw new Error('status-staleness');
+  }
+  if (!Array.isArray(input.capabilities) || input.capabilities.length !== input.coverage.total) {
+    throw new Error('status-capabilities');
+  }
+  const seen = new Set();
+  for (const capability of input.capabilities) {
+    if (!isRecord(capability) || Object.keys(capability).length !== 4 ||
+      !ID_PATTERN.test(capability.id) || seen.has(capability.id) ||
+      !CHATGPT_ANCHOR_STATUSES.includes(capability.status) ||
+      !ID_PATTERN.test(capability.reasonCode) ||
+      !(capability.lastObservedAt === null || (Number.isSafeInteger(capability.lastObservedAt) && capability.lastObservedAt > 0))) {
+      throw new Error('status-capability');
+    }
+    seen.add(capability.id);
+  }
+  const observed = input.capabilities.filter(({ status }) => status !== 'skip').length;
+  if (observed !== input.coverage.observed) throw new Error('status-coverage-mismatch');
+  const hasFailure = input.capabilities.some(({ status }) => status === 'fail');
+  const hasDegraded = input.capabilities.some(({ status }) => status === 'degraded');
+  if (input.verdict === 'incompatible' && (
+    input.apparatus.verdict !== 'incomplete' || input.staleness.status !== 'unknown' ||
+    input.coverage.observed !== 0 || input.coverage.total !== 0 || input.capabilities.length !== 0
+  )) throw new Error('status-incompatible-mismatch');
+  if (input.verdict === 'unobserved' && input.coverage.observed !== 0) throw new Error('status-unobserved-mismatch');
+  if (input.verdict === 'observed-healthy' && (
+    input.apparatus.verdict !== 'ok' || input.coverage.observed === 0 || hasFailure || hasDegraded
+  )) throw new Error('status-healthy-mismatch');
+  if (input.verdict === 'observed-degraded' && (!hasDegraded || hasFailure)) throw new Error('status-degraded-mismatch');
+  if (input.verdict === 'drift' && input.apparatus.verdict !== 'drift' && !hasFailure) throw new Error('status-drift-mismatch');
+  if (input.verdict === 'incomplete' && input.apparatus.verdict !== 'incomplete') throw new Error('status-incomplete-mismatch');
+  if (input.verdict === 'stale' && !['stale', 'stale-map'].includes(input.staleness.status)) throw new Error('status-stale-mismatch');
+  return deepFreeze(structuredClone(input));
+}
+
+export function parseChatGptCompatibilityStatus(input) {
+  try {
+    return parseStatusStrict(input);
+  } catch {
+    return incompatibleStatus();
+  }
+}
+
+export function serializeChatGptCompatibilityStatus(state, {
+  now = Date.now(),
+  staleAfterMs = DEFAULT_STALE_AFTER_MS
+} = {}) {
+  try {
+    if (!isRecord(state) || !/^[a-f0-9]{64}$/.test(state.contractHash) || !isRecord(state.apparatus) ||
+      !isRecord(state.coverage) || !isRecord(state.capabilities)) throw new Error('invalid-state');
+    const capabilities = Object.entries(state.capabilities).map(([id, capability]) => ({
+      id,
+      status: capability.status,
+      reasonCode: capability.reasonCode,
+      lastObservedAt: capability.lastObservedAt
+    }));
+    const lastObservedAt = capabilities.reduce(
+      (latest, capability) => Math.max(latest, Number(capability.lastObservedAt || 0)),
+      0
+    ) || null;
+    const hasPriorMap = Array.isArray(state.priorMaps) && state.priorMaps.length > 0;
+    const stalenessStatus = hasPriorMap && state.coverage.observed === 0
+      ? 'stale-map'
+      : lastObservedAt === null ? 'cold'
+        : now - lastObservedAt > staleAfterMs ? 'stale' : 'current';
+    const hasFailure = capabilities.some(({ status }) => status === 'fail');
+    const hasDegraded = capabilities.some(({ status }) => status === 'degraded');
+    const coldReason = ['no-observations', 'new-map-unobserved'].includes(state.apparatus.reasonCode);
+    const verdict = stalenessStatus === 'stale-map'
+      ? 'stale'
+      : state.coverage.observed === 0 && coldReason ? 'unobserved'
+        : state.apparatus.verdict === 'incomplete' ? 'incomplete'
+          : state.apparatus.verdict === 'drift' || hasFailure ? 'drift'
+            : stalenessStatus === 'stale' ? 'stale'
+              : hasDegraded ? 'observed-degraded' : 'observed-healthy';
+    return parseStatusStrict({
+      schemaVersion: CHATGPT_COMPATIBILITY_STATUS_SCHEMA_VERSION,
+      contractHash: state.contractHash,
+      cohort: 'observed',
+      verdict,
+      apparatus: { verdict: state.apparatus.verdict, reasonCode: state.apparatus.reasonCode },
+      coverage: { observed: state.coverage.observed, total: state.coverage.total },
+      staleness: { status: stalenessStatus, lastObservedAt, staleAfterMs },
+      capabilities
+    });
+  } catch {
+    return incompatibleStatus();
+  }
 }
 
 export function hashChatGptCompatibilityMap(map) {

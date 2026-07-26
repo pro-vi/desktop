@@ -118,6 +118,12 @@ body {
 }
 
 .cardTitle { font-weight: 700; margin-bottom: 10px; }
+.compatibilityVerdict { font-size: 14px; font-weight: 650; }
+.compatibilityVerdict.ok { color: #bbf7d0; }
+.compatibilityVerdict.warn { color: #fde68a; }
+.compatibilityVerdict.fail { color: #fecaca; }
+.compatibilityCapabilities { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.compatibilityCapabilities .badge { margin-left: 0; }
 
 .grid {
   display: grid;

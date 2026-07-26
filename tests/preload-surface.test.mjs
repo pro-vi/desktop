@@ -11,6 +11,7 @@ for (const preloadFile of ['preload.cjs', 'preload.mjs']) {
   test(`preload surface: ${preloadFile} does not expose unsupported orchestrator APIs`, async () => {
     const src = await fs.readFile(path.join(__dirname, '..', 'ui', preloadFile), 'utf8');
     assert.ok(src.includes('createTab:'), 'expected desktop tab API');
+    assert.ok(src.includes("ipcRenderer.invoke('agentify:getState')"), 'expected compatibility-bearing state IPC');
     assert.ok(!src.includes('getOrchestrators:'), 'should not expose orchestrator APIs in preload');
     assert.ok(!src.includes('startOrchestrator:'), 'should not expose orchestrator APIs in preload');
     assert.ok(!src.includes('stopOrchestrator:'), 'should not expose orchestrator APIs in preload');
