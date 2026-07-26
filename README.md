@@ -601,12 +601,28 @@ Agentify Desktop includes a built-in governor to reduce accidental high-rate aut
 
 You can adjust these limits in the Control Center after acknowledging the disclaimer.
 
+## ChatGPT compatibility status
+
+Agentify observes its declared ChatGPT UI contract only while carrying out an operation you requested. The Control Center, authenticated `/status`, and `agentify_status` report the **observed cohort** for this installation: map hash, exercised coverage, staleness, apparatus health, and capability results. Unobserved, stale, and incomplete are not healthy. This is not a claim that the map represents the globally latest ChatGPT UI.
+
+The observer is passive: it adds no prompt, navigation, export, retry, background scan, or account action. An **Active canary** and automated selector repair are intentionally deferred. Receipt-backed query/research completion and saved artifacts remain authoritative; a DOM match alone cannot certify completion.
+
+### Updating the ChatGPT UI contract
+
+1. Edit `chatgpt-compatibility.json`. Keep canonical branches first, legacy branches explicit, and every capability dependency anchored or exempted. Do not edit `selectors.json` as a second ChatGPT authority.
+2. Update the relevant checked-in fixture under `tests/fixtures/chatgpt-compatibility/`, then run the map, resolver, policy, terminal, and status compatibility tests. A fixture proves resolver semantics; it does not prove current production coverage.
+3. Restart both Agentify Desktop and the MCP server. They are separate long-lived processes and do not hot-reload the contract or status schema.
+4. Exercise only the ordinary operation you already intended to perform. Inspect compatibility status afterward. A new map starts unobserved; a legacy/operator-override branch is degraded until the checked-in canonical contract is deliberately updated and reviewed.
+5. Keep repair manual. Never promote an observed selector automatically, and never use a compatibility check to bypass a login, challenge, rate limit, access restriction, or protective measure.
+
+Account-risk boundary: this project does not guarantee account safety or immunity from suspension. OpenAI's current Terms of Use prohibit automatically or programmatically extracting data or output and prohibit circumventing restrictions or protective measures; they also permit suspension or termination for policy breaches or risky use. Review the current [Terms of Use](https://openai.com/policies/terms-of-use/) and [account deactivation guidance](https://help.openai.com/en/articles/10562188) before operating browser automation. Passive compatibility observation reduces extra traffic; it does not make automation compliant or ban-safe.
+
 ## Not Supported Right Now
 The experimental orchestrator / single-chat emulator is intentionally hidden from the desktop UI and is not supported right now.
 The supported product surface is the local browser-control + MCP workflow described above.
 
 ## Limitations / robustness notes
-- **File upload selectors:** `input[type=file]` selection is best-effort; if ChatGPT changes the upload flow, update `selectors.json` or `~/.agentify-desktop/selectors.override.json`.
+- **ChatGPT UI changes:** follow the structured contract workflow above. `~/.agentify-desktop/selectors.override.json` remains a visible degraded legacy branch, not a silent repair or second authority.
 - **Perplexity selectors:** Perplexity support is best-effort and may require selector overrides in `~/.agentify-desktop/selectors.override.json` if UI changes.
 - **Gemini selectors:** Gemini support is best-effort and may require selector overrides in `~/.agentify-desktop/selectors.override.json` if UI changes.
 - **Completion detection:** waiting for “stop generating” to disappear + text stability works well, but can mis-detect on very long outputs or intermittent streaming pauses.

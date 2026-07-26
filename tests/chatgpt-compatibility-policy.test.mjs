@@ -15,6 +15,11 @@ import { createCompatibilityStore } from '../compatibility-store.mjs';
 const profile = await loadChatGptCompatibilityProfile();
 const selectors = JSON.parse(await readFile(new URL('../selectors.json', import.meta.url), 'utf8'));
 const controllerSource = await readFile(new URL('../chatgpt-controller.mjs', import.meta.url), 'utf8');
+const readmeSource = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+const compatibilityAdrSource = await readFile(
+  new URL('../docs/adr/0004-use-passive-chatgpt-compatibility-observation.md', import.meta.url),
+  'utf8'
+);
 
 function resolvedRaw(anchorId = 'prompt-textarea') {
   const anchor = profile.anchors.find(({ id }) => id === anchorId);
@@ -142,4 +147,26 @@ function unownedSelectors(source) {
 test('compatibility policy sentinel: every static controller DOM dependency is map-owned or explicitly exempt', () => {
   assert.deepEqual(unownedSelectors(controllerSource), []);
   assert.deepEqual(unownedSelectors(`${controllerSource}\ndocument.querySelector('#unregistered-sentinel')`), ['#unregistered-sentinel']);
+});
+
+function unsafeCompatibilityClaims(source) {
+  const claim = /(?:guarantees?|certifies?|ensures?).{0,40}(?:globally latest|ban[- ]safe|ban immunity|account safety|immunity from suspension)/i;
+  const latest = /(?:is|stays|remains).{0,20}(?:the )?globally latest (?:ChatGPT )?(?:UI|map)/i;
+  return String(source).split(/\n/).filter((line) =>
+    (claim.test(line) || latest.test(line)) &&
+    !/(?:does not|do not|cannot|never|not a claim|no guarantee)/i.test(line)
+  );
+}
+
+test('compatibility policy sentinel: operator contract rejects globally-latest and account-safety claims', () => {
+  const docs = `${readmeSource}\n${compatibilityAdrSource}`;
+  assert.deepEqual(unsafeCompatibilityClaims(docs), []);
+  assert.deepEqual(
+    unsafeCompatibilityClaims(`${docs}\nAgentify guarantees account safety and a globally latest ChatGPT UI.`),
+    ['Agentify guarantees account safety and a globally latest ChatGPT UI.']
+  );
+  assert.match(readmeSource, /observed cohort/);
+  assert.match(readmeSource, /Active canary/);
+  assert.match(readmeSource, /Restart both Agentify Desktop and the MCP server/i);
+  assert.match(readmeSource, /automatically or programmatically extracting data or output/i);
 });
