@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 import { parseChatGptEntryTarget } from './chatgpt-location.mjs';
+import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
 import {
   CHATGPT_ANY_MODE_PATTERN,
   CHATGPT_ANY_MODEL_PATTERN,
@@ -278,7 +280,8 @@ export class ChatGPTController {
     vendorId = null,
     vendorName = null,
     uiContract = null,
-    onCompatibilityObservation = null
+    onCompatibilityObservation = null,
+    compatibilityBackend = 'electron'
   }) {
     this.page = page;
     this.selectors = selectors;
@@ -287,6 +290,7 @@ export class ChatGPTController {
     this.uiContract = uiContract;
     this.onCompatibilityObservation =
       typeof onCompatibilityObservation === 'function' ? onCompatibilityObservation : null;
+    this.compatibilityBackend = compatibilityBackend === 'chrome-cdp' ? 'chrome-cdp' : 'electron';
     this.onBlocked = onBlocked;
     this.onUnblocked = onUnblocked;
     this.stateDir = stateDir;
@@ -306,8 +310,102 @@ export class ChatGPTController {
     ) {
       return { accepted: false, reason: 'not-chatgpt' };
     }
-    await this.onCompatibilityObservation(observation);
-    return { accepted: true };
+    try {
+      const result = await this.onCompatibilityObservation(observation);
+      return { accepted: result?.accepted !== false, result: result || null };
+    } catch {
+      return { accepted: false, reason: 'observation-sink-failed' };
+    }
+  }
+
+  async runCompatibilityCapability(capabilityId, operation, {
+    anchorId = null,
+    postcondition = () => true
+  } = {}) {
+    if (typeof operation !== 'function') throw new Error('compatibility_operation_required');
+    const contract = this.uiContract;
+    if (
+      this.vendorId !== 'chatgpt' ||
+      contract?.kind !== 'chatgpt' ||
+      !this.onCompatibilityObservation
+    ) {
+      return await operation();
+    }
+    const capability = contract.profile.capabilities.find(({ id }) => id === capabilityId);
+    if (!capability) throw new Error(`unknown_chatgpt_capability:${capabilityId}`);
+    const selectedAnchorId = anchorId || capability.anchorIds[0];
+    const attemptId = crypto.randomUUID();
+    const common = () => ({
+      schemaVersion: 1,
+      observationId: crypto.randomUUID(),
+      attemptId,
+      observedAt: Date.now(),
+      contractHash: contract.profile.contractHash,
+      vendorId: 'chatgpt',
+      backend: this.compatibilityBackend
+    });
+    const resolution = await evaluateChatGptAnchor({
+      page: this.page,
+      uiContract: contract,
+      anchorId: selectedAnchorId
+    });
+    const emitResolution = async () => {
+      if (resolution.kind === 'apparatus') {
+        return await this.recordCompatibilityObservation({
+          ...common(),
+          kind: 'apparatus',
+          stage: resolution.stage,
+          verdict: 'incomplete',
+          reasonCode: resolution.reasonCode
+        });
+      }
+      if (resolution.status === 'resolved') {
+        return await this.recordCompatibilityObservation({
+          ...common(),
+          capabilityId,
+          kind: 'resolution',
+          anchorId: resolution.anchorId,
+          branchId: resolution.branchId,
+          branchKind: resolution.branchKind,
+          branchSource: resolution.branchSource,
+          selectorHash: resolution.selectorHash,
+          rolloutSignature: resolution.rolloutSignature
+        });
+      }
+      return null;
+    };
+    const emitCapability = async (status, reasonCode) =>
+      await this.recordCompatibilityObservation({
+        ...common(),
+        capabilityId,
+        kind: 'capability',
+        postconditionId: capability.postconditionId,
+        status,
+        reasonCode,
+        rolloutSignature: resolution.rolloutSignature || contract.profile.contractHash
+      });
+
+    try {
+      const result = await operation();
+      const behaviorPassed = !!(await postcondition(result));
+      const resolutionStatus = resolution.kind === 'resolution' ? resolution.healthStatus : null;
+      const status = !behaviorPassed || resolutionStatus === 'fail'
+        ? 'fail'
+        : resolutionStatus === 'degraded' ? 'degraded' : 'ok';
+      const reasonCode = !behaviorPassed
+        ? 'postcondition-failed'
+        : resolutionStatus === 'fail' ? 'anchor-postcondition-failed'
+          : resolutionStatus === 'degraded' ? 'legacy-branch' : 'postcondition-satisfied';
+      if (resolution.kind !== 'apparatus') await emitResolution();
+      await emitCapability(status, reasonCode);
+      if (resolution.kind === 'apparatus') await emitResolution();
+      return result;
+    } catch (error) {
+      if (resolution.kind !== 'apparatus') await emitResolution();
+      await emitCapability('fail', 'operation-failed');
+      if (resolution.kind === 'apparatus') await emitResolution();
+      throw error;
+    }
   }
 
   async runExclusive(fn) {
@@ -640,7 +738,17 @@ export class ChatGPTController {
     return last;
   }
 
-  async #applyModelIntent({ modelIntent, timeoutMs = 20_000 } = {}) {
+  async #applyModelIntent(options = {}) {
+    const requested = normalizeChatGptModelIntent(options?.modelIntent, { fallback: null });
+    if (!requested) return await this.#applyModelIntentImpl(options);
+    return await this.runCompatibilityCapability(
+      'mode-model',
+      async () => await this.#applyModelIntentImpl(options),
+      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true }
+    );
+  }
+
+  async #applyModelIntentImpl({ modelIntent, timeoutMs = 20_000 } = {}) {
     const normalizedIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
     if (!normalizedIntent) return { active: true, reason: 'model_intent_not_requested', targetIntent: null };
 
@@ -1223,7 +1331,17 @@ export class ChatGPTController {
     throw err;
   }
 
-  async #applyModeIntent({ modeIntent, timeoutMs = 20_000 } = {}) {
+  async #applyModeIntent(options = {}) {
+    const requested = normalizeChatGptModeIntent(options?.modeIntent, { fallback: null });
+    if (!requested) return await this.#applyModeIntentImpl(options);
+    return await this.runCompatibilityCapability(
+      'mode-model',
+      async () => await this.#applyModeIntentImpl(options),
+      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true }
+    );
+  }
+
+  async #applyModeIntentImpl({ modeIntent, timeoutMs = 20_000 } = {}) {
     const normalizedIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
     if (!normalizedIntent) return { active: true, reason: 'mode_intent_not_requested', targetIntent: null };
 
@@ -1737,7 +1855,15 @@ export class ChatGPTController {
     throw err;
   }
 
-  async ensureReady({ timeoutMs = 10 * 60_000 } = {}) {
+  async ensureReady(options = {}) {
+    return await this.runCompatibilityCapability(
+      'readiness',
+      async () => await this.#ensureReadyImpl(options),
+      { anchorId: 'prompt-textarea', postcondition: (result) => result?.promptVisible === true }
+    );
+  }
+
+  async #ensureReadyImpl({ timeoutMs = 10 * 60_000 } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_ready', blocked: false, blockedKind: null, blockedTitle: null });
     const st = await this.detectChallenge().catch(() => null);
     if (st?.blocked) {
@@ -1867,7 +1993,15 @@ export class ChatGPTController {
     await this.page.mouseUp(x, y, { button: 'left', clickCount: 1 });
   }
 
-  async #focusPrompt({ phase = null, clickPrompt = true } = {}) {
+  async #focusPrompt(options = {}) {
+    return await this.runCompatibilityCapability(
+      'composer',
+      async () => await this.#focusPromptImpl(options),
+      { anchorId: 'prompt-textarea', postcondition: (result) => result?.ok === true }
+    );
+  }
+
+  async #focusPromptImpl({ phase = null, clickPrompt = true } = {}) {
     if (phase) await this.#emitProgress({ phase });
     const sel = JSON.stringify(this.selectors.promptTextarea);
     const ok = await this.#eval(`(() => {
@@ -2039,6 +2173,14 @@ export class ChatGPTController {
   }
 
   async #clickSend() {
+    return await this.runCompatibilityCapability(
+      'submit',
+      async () => await this.#clickSendImpl(),
+      { anchorId: 'send-button', postcondition: (result) => result?.acknowledged === true }
+    );
+  }
+
+  async #clickSendImpl() {
     await this.#emitProgress({ phase: 'sending_prompt' });
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const stopSel = JSON.stringify(this.selectors.stopButton);
@@ -2547,6 +2689,15 @@ export class ChatGPTController {
   }
 
   async #attachFiles(files) {
+    if (!files?.length) return await this.#attachFilesImpl(files);
+    return await this.runCompatibilityCapability(
+      'attachment',
+      async () => await this.#attachFilesImpl(files),
+      { anchorId: 'composer-menu-button', postcondition: () => true }
+    );
+  }
+
+  async #attachFilesImpl(files) {
     if (!files?.length) return;
     await this.#emitProgress({ phase: 'uploading_files' });
     const absFiles = files.map((p) => path.resolve(p));
@@ -2889,7 +3040,15 @@ export class ChatGPTController {
     throw err;
   }
 
-  async #waitForAssistantStable({
+  async #waitForAssistantStable(options = {}) {
+    return await this.runCompatibilityCapability(
+      'response',
+      async () => await this.#waitForAssistantStableImpl(options),
+      { anchorId: 'assistant-message', postcondition: (result) => typeof result?.text === 'string' && result.text.length > 0 }
+    );
+  }
+
+  async #waitForAssistantStableImpl({
     timeoutMs = 5 * 60_000,
     stableMs = 1500,
     pollMs = 400,
@@ -3215,7 +3374,15 @@ export class ChatGPTController {
     }
   }
 
-  async #activateResearchMode({ timeoutMs = 20_000 } = {}) {
+  async #activateResearchMode(options = {}) {
+    return await this.runCompatibilityCapability(
+      'research',
+      async () => await this.#activateResearchModeImpl(options),
+      { anchorId: 'research-mode-button', postcondition: (result) => result?.active === true }
+    );
+  }
+
+  async #activateResearchModeImpl({ timeoutMs = 20_000 } = {}) {
     await this.#emitProgress({ phase: 'activating_research_mode' });
     const menuSel = JSON.stringify(this.selectors.researchModeMenu || '');
     const activeSel = JSON.stringify(this.selectors.researchModeActive || '');
@@ -3378,7 +3545,15 @@ export class ChatGPTController {
     ]);
   }
 
-  async #exportResearchMarkdown({ outDir, timeoutMs = 15_000, maxFiles = 6 } = {}) {
+  async #exportResearchMarkdown(options = {}) {
+    return await this.runCompatibilityCapability(
+      'file',
+      async () => await this.#exportResearchMarkdownImpl(options),
+      { anchorId: 'research-export-button', postcondition: (result) => Array.isArray(result?.files) && result.files.length > 0 }
+    );
+  }
+
+  async #exportResearchMarkdownImpl({ outDir, timeoutMs = 15_000, maxFiles = 6 } = {}) {
     await this.#emitProgress({ phase: 'exporting_output' });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const buttonSel = JSON.stringify(this.selectors.researchExportButton || '');
@@ -3675,7 +3850,7 @@ export class ChatGPTController {
       }
     }
 
-    const domItems = await this.getLastAssistantDownloads({ maxFiles }).catch(() => []);
+    const domItems = await this.#getLastAssistantDownloadsImpl({ maxFiles }).catch(() => []);
     const domFiles = await this.#saveDownloadItems({ items: domItems, outDir, linkMode: 'export' }).catch(() => []);
     const files = [];
     const seenPaths = new Set();
@@ -3829,7 +4004,15 @@ export class ChatGPTController {
     });
   }
 
-  async getLastAssistantImages({ maxImages = 6 } = {}) {
+  async getLastAssistantImages(options = {}) {
+    return await this.runCompatibilityCapability(
+      'image',
+      async () => await this.#getLastAssistantImagesImpl(options),
+      { anchorId: 'assistant-message', postcondition: (result) => Array.isArray(result) && result.length > 0 }
+    );
+  }
+
+  async #getLastAssistantImagesImpl({ maxImages = 6 } = {}) {
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const out = await this.#eval(`(async () => {
       const nodes = Array.from(document.querySelectorAll(${assistantSel}));
@@ -3977,7 +4160,15 @@ export class ChatGPTController {
     return saved;
   }
 
-  async getLastAssistantDownloads({ maxFiles = 6 } = {}) {
+  async getLastAssistantDownloads(options = {}) {
+    return await this.runCompatibilityCapability(
+      'file',
+      async () => await this.#getLastAssistantDownloadsImpl(options),
+      { anchorId: 'assistant-message', postcondition: (result) => Array.isArray(result) && result.length > 0 }
+    );
+  }
+
+  async #getLastAssistantDownloadsImpl({ maxFiles = 6 } = {}) {
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const out = await this.#eval(`(async () => {
       const nodes = Array.from(document.querySelectorAll(${assistantSel}));

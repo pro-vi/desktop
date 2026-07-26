@@ -19,6 +19,7 @@ import {
   createProviderCompatibilityBridge,
   loadChatGptCompatibilityProfile
 } from './chatgpt-compatibility.mjs';
+import { createCompatibilityStore } from './compatibility-store.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { TabManager } from './tab-manager.mjs';
 import { defaultStateDir, ensureToken, readSettings, writeSettings, defaultSettings, writeState } from './state.mjs';
@@ -139,6 +140,11 @@ async function main() {
   const vendors = await loadVendors();
   let settings = await readSettings(stateDir);
   const browserBackendKind = resolveBrowserBackend({ settings });
+  const compatibilityStore = createCompatibilityStore(stateDir, {
+    contractHash: chatGptCompatibilityProfile.contractHash,
+    capabilityIds: chatGptCompatibilityProfile.capabilities.map(({ id }) => id)
+  });
+  await compatibilityStore.load();
   const chromeExecutablePath = resolveChromeExecutablePath({ settings });
   const chromeDebugPort = resolveChromeDebugPort({ settings });
   const chromeProfileMode = resolveChromeProfileMode({ settings });
@@ -240,14 +246,19 @@ async function main() {
         vendorName,
         selectors,
         selectorOverrides,
-        profile: chatGptCompatibilityProfile
+        profile: chatGptCompatibilityProfile,
+        onCompatibilityObservation: async (observation) => await compatibilityStore.record(observation)
       });
+      const controllerSelectors = compatibilityBridge.uiContract.kind === 'chatgpt'
+        ? compatibilityBridge.uiContract.legacySelectors
+        : selectors;
       const controller = new ChatGPTController({
         page,
-        selectors,
+        selectors: controllerSelectors,
         vendorId,
         vendorName,
         ...compatibilityBridge,
+        compatibilityBackend: browserBackendKind === 'chrome-cdp' ? 'chrome-cdp' : 'electron',
         stateDir,
         onBlocked: async (st) => {
           await tabs.needsAttention(tabId, st);

@@ -6,7 +6,8 @@ import { ChatGPTController } from '../chatgpt-controller.mjs';
 import { TabManager } from '../tab-manager.mjs';
 import {
   createProviderCompatibilityBridge,
-  loadChatGptCompatibilityProfile
+  loadChatGptCompatibilityProfile,
+  projectChatGptLegacySelectors
 } from '../chatgpt-compatibility.mjs';
 
 const selectors = JSON.parse(await readFile(new URL('../selectors.json', import.meta.url), 'utf8'));
@@ -124,4 +125,11 @@ test('provider isolation: flat overrides preserve selector behavior and expose d
   assert.equal(chatgptBridge.uiContract.degraded, true);
   assert.equal(claudeBridge.uiContract.selectors.promptTextarea, '#operator-composer');
   assert.equal('operatorOverrides' in claudeBridge.uiContract, false);
+});
+
+test('provider isolation: ChatGPT legacy projection is derived from the structured authority', () => {
+  assert.deepEqual(projectChatGptLegacySelectors(profile), selectors);
+  const changed = structuredClone(profile);
+  changed.anchors[0].branches[0].selector = '#profile-owned-composer';
+  assert.equal(projectChatGptLegacySelectors(changed).promptTextarea.startsWith('#profile-owned-composer'), true);
 });

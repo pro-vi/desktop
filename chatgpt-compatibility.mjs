@@ -196,14 +196,17 @@ function parseCapability(value, index) {
 
 function parseExemption(value, index) {
   const exemption = assertRecord(value, `exemption:${index}`);
-  assertExactKeys(exemption, ['id', 'capabilityId', 'kind', 'dependency', 'reason'], `exemption:${index}`);
+  assertExactKeys(exemption, ['id', 'capabilityId', 'kind', 'dependency', 'reason', 'selector'], `exemption:${index}`);
   const id = assertId(exemption.id, `exemption:${index}:id`);
   return {
     id,
     capabilityId: assertId(exemption.capabilityId, `exemption:${id}:capabilityId`),
     kind: assertEnum(exemption.kind, EXEMPTION_KINDS, `exemption:${id}:kind`),
     dependency: assertId(exemption.dependency, `exemption:${id}:dependency`),
-    reason: assertNonEmptyString(exemption.reason, `exemption:${id}:reason`).trim()
+    reason: assertNonEmptyString(exemption.reason, `exemption:${id}:reason`).trim(),
+    selector: exemption.selector === null
+      ? null
+      : assertNonEmptyString(exemption.selector, `exemption:${id}:selector`).trim()
   };
 }
 
@@ -342,6 +345,23 @@ function operatorOverridesForProfile(profile, selectorOverrides) {
   return overrides;
 }
 
+export function projectChatGptLegacySelectors(profile, selectorOverrides = {}) {
+  if (!profile || profile.vendorId !== 'chatgpt' || !Array.isArray(profile.anchors)) {
+    throw invalid('profile:chatgpt_profile_required');
+  }
+  const projected = Object.fromEntries(
+    profile.anchors.map((anchor) => [
+      anchor.legacySelectorKey,
+      anchor.branches.map(({ selector }) => selector).join(', ')
+    ])
+  );
+  for (const [key, value] of Object.entries(selectorOverrides)) {
+    if (!Object.hasOwn(projected, key)) throw invalid(`selector_overrides:unknown_key:${key}`);
+    projected[key] = assertNonEmptyString(value, `selector_overrides:${key}`).trim();
+  }
+  return deepFreeze(projected);
+}
+
 export function createProviderCompatibilityBridge({
   vendorId = null,
   vendorName = null,
@@ -367,7 +387,7 @@ export function createProviderCompatibilityBridge({
       vendorId,
       vendorName: vendorName || null,
       profile,
-      legacySelectors: copySelectorRecord(selectors),
+      legacySelectors: projectChatGptLegacySelectors(profile, selectorOverrides),
       operatorOverrides,
       provenance: operatorOverrides.length ? 'operator-override' : 'contract',
       degraded: operatorOverrides.length > 0

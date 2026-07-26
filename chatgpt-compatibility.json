@@ -1456,14 +1456,344 @@
       "capabilityId": "attachment",
       "kind": "dependency",
       "dependency": "file-input-transfer",
-      "reason": "browser-native file selection is intentionally outside DOM selector resolution"
+      "reason": "browser-native file selection is intentionally outside DOM selector resolution",
+      "selector": null
     },
     {
       "id": "response-temporal-stability",
       "capabilityId": "response",
       "kind": "dependency",
       "dependency": "stable-response-window",
-      "reason": "non-DOM temporal stability is evaluated over sanitized response descriptors"
+      "reason": "non-DOM temporal stability is evaluated over sanitized response descriptors",
+      "selector": null
+    },
+    {
+      "id": "controller-dom-001",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-001",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "#root"
+    },
+    {
+      "id": "controller-dom-002",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-002",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "*"
+    },
+    {
+      "id": "controller-dom-003",
+      "capabilityId": "attachment",
+      "kind": "dependency",
+      "dependency": "static-selector-003",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[aria-label*=\"Remove\" i], [aria-label*=\"Delete\" i], [data-testid*=\"attachment\"] [role=\"button\"], [data-testid*=\"file\"] button"
+    },
+    {
+      "id": "controller-dom-004",
+      "capabilityId": "attachment",
+      "kind": "dependency",
+      "dependency": "static-selector-004",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[aria-label*=\"remove\" i], [aria-label*=\"delete\" i], [data-testid*=\"attachment\" i] button, [data-testid*=\"file\" i] button"
+    },
+    {
+      "id": "controller-dom-005",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-005",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[aria-pressed=\"true\"], [aria-checked=\"true\"], [aria-selected=\"true\"], [aria-current]:not([aria-current=\"false\"]), [data-state=\"active\"], [data-state=\"on\"]"
+    },
+    {
+      "id": "controller-dom-006",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-006",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[aria-pressed=\"true\"], [aria-checked=\"true\"], [data-state=\"active\"], [data-state=\"on\"], [aria-selected=\"true\"]"
+    },
+    {
+      "id": "controller-dom-007",
+      "capabilityId": "response",
+      "kind": "dependency",
+      "dependency": "static-selector-007",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[class*=\"think\"], [data-testid*=\"think\"], [aria-label*=\"think\"], [class*=\"research\"], [data-testid*=\"research\"], [aria-label*=\"research\"], [class*=\"search\"], [data-testid*=\"search\"], [aria-label*=\"search\"], [class*=\"source\"], [data-testid*=\"source\"], [aria-label*=\"source\"], [class*=\"clarif\"], [data-testid*=\"clarif\"], [aria-label*=\"clarif\"], .sr-only, [role=\"status\"], [aria-live]"
+    },
+    {
+      "id": "controller-dom-008",
+      "capabilityId": "attachment",
+      "kind": "dependency",
+      "dependency": "static-selector-008",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[data-testid*=\"attachment\" i], [data-testid*=\"file\" i], [data-testid*=\"upload\" i], [role=\"progressbar\"], progress"
+    },
+    {
+      "id": "controller-dom-009",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-009",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[data-testid*=\"composer\" i], [data-testid*=\"prompt\" i], [data-testid*=\"chat-input\" i], [aria-label*=\"message\" i], [aria-label*=\"prompt\" i]"
+    },
+    {
+      "id": "controller-dom-010",
+      "capabilityId": "submit",
+      "kind": "dependency",
+      "dependency": "static-selector-010",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[data-testid*=\"voice\" i], [data-testid*=\"mic\" i], [data-testid*=\"audio\" i], [aria-label*=\"voice\" i], [aria-label*=\"microphone\" i], [aria-label*=\"audio\" i]"
+    },
+    {
+      "id": "controller-dom-011",
+      "capabilityId": "submit",
+      "kind": "dependency",
+      "dependency": "static-selector-011",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[data-testid=\"send-button\"], [aria-label=\"Send prompt\"], [aria-label=\"Send\"]"
+    },
+    {
+      "id": "controller-dom-012",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-012",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[role=\"button\"], button, [tabindex]"
+    },
+    {
+      "id": "controller-dom-013",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-013",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[role=\"dialog\"], [role=\"alertdialog\"], [data-testid*=\"modal\"]"
+    },
+    {
+      "id": "controller-dom-014",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-014",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[role=\"dialog\"], [role=\"alertdialog\"], [data-testid*=\"modal\"], [data-radix-dialog-content]"
+    },
+    {
+      "id": "controller-dom-015",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-015",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[role=\"menu\"], [role=\"listbox\"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal]"
+    },
+    {
+      "id": "controller-dom-016",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-016",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[role=\"menu\"], [role=\"listbox\"], [data-radix-menu-content], [data-radix-select-content], [data-radix-popper-content-wrapper], [data-headlessui-state], [data-floating-ui-portal], [data-slot=\"popover-content\"], [data-slot=\"dropdown-menu-content\"], [popover], [role=\"dialog\"], [role=\"alertdialog\"]"
+    },
+    {
+      "id": "controller-dom-017",
+      "capabilityId": "attachment",
+      "kind": "dependency",
+      "dependency": "static-selector-017",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "[role=\"status\"], [aria-live], [data-testid*=\"upload\" i], [aria-label*=\"upload\" i], [class*=\"upload\" i], [class*=\"progress\" i]"
+    },
+    {
+      "id": "controller-dom-018",
+      "capabilityId": "file",
+      "kind": "dependency",
+      "dependency": "static-selector-018",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "a[href], a[download]"
+    },
+    {
+      "id": "controller-dom-019",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-019",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"]"
+    },
+    {
+      "id": "controller-dom-020",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-020",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"tab\"], [role=\"switch\"], [role=\"radio\"], [aria-checked], [data-state]"
+    },
+    {
+      "id": "controller-dom-021",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-021",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"tab\"], [role=\"switch\"], [role=\"radio\"], [aria-checked], [data-state], label, li, div, span"
+    },
+    {
+      "id": "controller-dom-022",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-022",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"menuitem\"], [role=\"option\"], [role=\"tab\"]"
+    },
+    {
+      "id": "controller-dom-023",
+      "capabilityId": "file",
+      "kind": "dependency",
+      "dependency": "static-selector-023",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"menuitem\"], [role=\"option\"], a[href], a[download]"
+    },
+    {
+      "id": "controller-dom-024",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-024",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"tab\"]"
+    },
+    {
+      "id": "controller-dom-025",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-025",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"tab\"], [role=\"switch\"], [aria-haspopup], [aria-expanded], [data-testid*=\"model\" i], [data-testid*=\"mode\" i], summary, [tabindex=\"0\"]"
+    },
+    {
+      "id": "controller-dom-026",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-026",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], [role=\"tab\"], [role=\"switch\"], [aria-label], [title], [data-testid]"
+    },
+    {
+      "id": "controller-dom-027",
+      "capabilityId": "file",
+      "kind": "dependency",
+      "dependency": "static-selector-027",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, [role=\"button\"], a[href], a[download]"
+    },
+    {
+      "id": "controller-dom-028",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-028",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, a"
+    },
+    {
+      "id": "controller-dom-029",
+      "capabilityId": "mode-model",
+      "kind": "dependency",
+      "dependency": "static-selector-029",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, a, [role=\"button\"], [role=\"link\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"tab\"], [role=\"switch\"], [role=\"radio\"], [aria-checked], [data-state]"
+    },
+    {
+      "id": "controller-dom-030",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-030",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "button, a, input, textarea, [role=\"button\"], [aria-label], [placeholder]"
+    },
+    {
+      "id": "controller-dom-031",
+      "capabilityId": "readiness",
+      "kind": "dependency",
+      "dependency": "static-selector-031",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "iframe"
+    },
+    {
+      "id": "controller-dom-032",
+      "capabilityId": "readiness",
+      "kind": "dependency",
+      "dependency": "static-selector-032",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "iframe[src*=\"arkose\" i], iframe[src*=\"arkoselabs\" i]"
+    },
+    {
+      "id": "controller-dom-033",
+      "capabilityId": "readiness",
+      "kind": "dependency",
+      "dependency": "static-selector-033",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "iframe[src*=\"turnstile\" i]"
+    },
+    {
+      "id": "controller-dom-034",
+      "capabilityId": "image",
+      "kind": "dependency",
+      "dependency": "static-selector-034",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "img, canvas"
+    },
+    {
+      "id": "controller-dom-035",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-035",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "input"
+    },
+    {
+      "id": "controller-dom-036",
+      "capabilityId": "attachment",
+      "kind": "dependency",
+      "dependency": "static-selector-036",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "input[type=\"file\"]"
+    },
+    {
+      "id": "controller-dom-037",
+      "capabilityId": "readiness",
+      "kind": "dependency",
+      "dependency": "static-selector-037",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "input[type=\"password\"], input[name=\"password\"], input[autocomplete=\"current-password\"]"
+    },
+    {
+      "id": "controller-dom-038",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-038",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "main textarea, main [role=\"textbox\"], main [contenteditable=\"true\"], textarea, [role=\"textbox\"], [contenteditable=\"true\"]"
+    },
+    {
+      "id": "controller-dom-039",
+      "capabilityId": "response",
+      "kind": "dependency",
+      "dependency": "static-selector-039",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "pre code"
+    },
+    {
+      "id": "controller-dom-040",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-040",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "textarea"
+    },
+    {
+      "id": "controller-dom-041",
+      "capabilityId": "composer",
+      "kind": "dependency",
+      "dependency": "static-selector-041",
+      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+      "selector": "textarea, input"
     }
   ]
 }
