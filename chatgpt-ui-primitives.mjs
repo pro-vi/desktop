@@ -186,6 +186,7 @@ export function scoreModeTriggerCandidate(candidate = {}) {
     !!candidate.targetMatches || (targetIntent ? modeIntentLabelLooksUsable(label, targetIntent) : false);
   const modeKeyword =
     !!candidate.modeKeyword || /\bmode\b|\bmodel\b|\breason\b|\bthink\b/.test(label);
+  const currentIntelligenceTier = /^(?:high|extra high)(?:\s+(?:high|extra high))*$/.test(label);
   const boostsFromComposer = !intent || intent === targetIntent;
 
   let score = -1;
@@ -197,6 +198,15 @@ export function scoreModeTriggerCandidate(candidate = {}) {
     score = targetMatches ? 175 : 145;
   } else if (modeKeyword) {
     score = 120;
+  } else if (
+    currentIntelligenceTier &&
+    candidate.modeRegion &&
+    (candidate.inComposer || Math.max(0, Number(candidate.promptProximityBoost) || 0) >= 80)
+  ) {
+    // Current ChatGPT intelligence tiers can leave the picker parked on High
+    // or Extra High. They are valid compact triggers, but neither confirms one
+    // of Agentify's supported target intents by itself.
+    score = 80;
   }
 
   if (score >= 0 && candidate.hasDataTestId) score += 10;

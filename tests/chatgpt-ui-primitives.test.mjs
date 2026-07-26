@@ -470,10 +470,33 @@ test('chatgpt-ui-primitives: scores mode triggers with composer and prompt boost
     height: 32,
     y: 880
   });
+  const currentHigh = scoreModeTriggerCandidate({
+    label: 'High',
+    targetIntent: 'extended-pro',
+    modeRegion: true,
+    inComposer: true,
+    promptProximityBoost: 160,
+    area: 2_400,
+    width: 75,
+    height: 32,
+    y: 880
+  });
+  const unrelatedHigh = scoreModeTriggerCandidate({
+    label: 'High',
+    targetIntent: 'extended-pro',
+    modeRegion: false,
+    inComposer: false,
+    area: 2_400,
+    width: 75,
+    height: 32,
+    y: 240
+  });
 
   assert.equal(targetInComposer > genericHeader, true);
   assert.equal(genericHeader > activeNonTarget, true);
   assert.equal(currentMedium > 0, true);
+  assert.equal(currentHigh > 0, true);
+  assert.equal(unrelatedHigh, -1);
 });
 
 test('chatgpt-ui-primitives: visible composer mode chip can confirm active mode', () => {
