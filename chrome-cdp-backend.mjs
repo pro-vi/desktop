@@ -45,6 +45,20 @@ function keyDescriptor(key) {
   };
 }
 
+export function unwrapChromeCdpEvaluationResult(response) {
+  if (response?.exceptionDetails) {
+    const error = new Error('chrome_cdp_evaluation_exception');
+    error.code = 'chrome_cdp_evaluation_exception';
+    throw error;
+  }
+  if (!response?.result || typeof response.result !== 'object') {
+    const error = new Error('chrome_cdp_evaluation_malformed');
+    error.code = 'chrome_cdp_evaluation_malformed';
+    throw error;
+  }
+  return response.result.value;
+}
+
 async function pathExists(filePath) {
   try {
     await fs.access(filePath);
@@ -367,7 +381,7 @@ class ChromeCdpPageAdapter {
       },
       this.sessionId
     );
-    return result?.result?.value;
+    return unwrapChromeCdpEvaluationResult(result);
   }
 
   async evaluateDeepResearch(js) {
@@ -381,7 +395,7 @@ class ChromeCdpPageAdapter {
         },
         childSessionId
       );
-      return result?.result?.value;
+      return unwrapChromeCdpEvaluationResult(result);
     });
   }
 

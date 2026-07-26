@@ -1,0 +1,14 @@
+{
+  "anchorId": "prompt-textarea",
+  "nodes": [
+    {
+      "selectors": ["rich-textarea .ql-editor[contenteditable=\"true\"]"],
+      "tagName": "div",
+      "visible": true,
+      "enabled": true,
+      "contentEditable": true,
+      "attributes": { "class": "ql-editor", "contenteditable": "true" }
+    }
+  ],
+  "expected": { "status": "resolved", "branchKind": "legacy", "postconditionStatus": "ok" }
+}

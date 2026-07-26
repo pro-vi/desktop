@@ -1,0 +1,8 @@
+{
+  "anchorId": "prompt-textarea",
+  "nodes": [
+    { "selectors": ["#prompt-textarea"], "tagName": "textarea", "visible": false, "enabled": true, "attributes": { "id": "prompt-textarea" } },
+    { "selectors": ["rich-textarea .ql-editor[contenteditable=\"true\"]"], "tagName": "div", "visible": true, "enabled": true, "contentEditable": true, "attributes": { "contenteditable": "true" } }
+  ],
+  "expected": { "status": "resolved", "branchKind": "canonical", "postconditionStatus": "fail", "reasonCode": "anchor-hidden" }
+}

@@ -1,0 +1,7 @@
+{
+  "anchorId": "prompt-textarea",
+  "nodes": [
+    { "selectors": ["#prompt-textarea"], "tagName": "div", "visible": true, "enabled": true, "attributes": { "id": "prompt-textarea" } }
+  ],
+  "expected": { "status": "resolved", "branchKind": "canonical", "postconditionStatus": "fail", "reasonCode": "wrong-node" }
+}

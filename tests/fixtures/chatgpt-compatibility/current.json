@@ -131,5 +131,18 @@
   "exemptionIds": [
     "attachment-native-file-picker",
     "response-temporal-stability"
-  ]
+  ],
+  "resolverFixture": {
+    "anchorId": "prompt-textarea",
+    "nodes": [
+      {
+        "selectors": ["#prompt-textarea"],
+        "tagName": "textarea",
+        "visible": true,
+        "enabled": true,
+        "attributes": { "id": "prompt-textarea", "aria-label": "Message ChatGPT" }
+      }
+    ],
+    "expected": { "status": "resolved", "branchKind": "canonical", "postconditionStatus": "ok" }
+  }
 }

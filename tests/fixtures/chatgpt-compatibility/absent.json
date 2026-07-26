@@ -1,0 +1,5 @@
+{
+  "anchorId": "prompt-textarea",
+  "nodes": [],
+  "expected": { "status": "absent", "branchKind": null, "postconditionStatus": "fail", "reasonCode": "anchor-absent" }
+}

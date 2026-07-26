@@ -1,0 +1,7 @@
+{
+  "type": "chatgpt-anchor-resolution",
+  "schemaVersion": 1,
+  "ok": true,
+  "anchorId": "prompt-textarea",
+  "branch": { "id": "prompt-textarea-canonical", "kind": "canonical" }
+}
