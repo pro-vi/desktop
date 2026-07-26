@@ -94,3 +94,26 @@ test('tab-manager: createTab closes session if controller creation fails', async
   assert.equal(closeCalls, 1);
   assert.deepEqual(manager.listTabs(), []);
 });
+
+test('tab-manager: controller factory receives vendor identity byte-for-byte and preserves codomain', async () => {
+  const calls = [];
+  const controller = { kind: 'controller-codomain' };
+  const manager = new TabManager({
+    browserBackend: stubBrowserBackend(),
+    createController: async (input) => {
+      calls.push(input);
+      return controller;
+    }
+  });
+
+  const tabId = await manager.createTab({
+    key: 'vendor-aware',
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT Preview'
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].vendorId, 'chatgpt');
+  assert.equal(calls[0].vendorName, 'ChatGPT Preview');
+  assert.equal(manager.getControllerById(tabId), controller);
+});

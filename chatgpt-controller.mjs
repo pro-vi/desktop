@@ -269,9 +269,24 @@ class Mutex {
 }
 
 export class ChatGPTController {
-  constructor({ page, selectors, onBlocked, onUnblocked, stateDir }) {
+  constructor({
+    page,
+    selectors,
+    onBlocked,
+    onUnblocked,
+    stateDir,
+    vendorId = null,
+    vendorName = null,
+    uiContract = null,
+    onCompatibilityObservation = null
+  }) {
     this.page = page;
     this.selectors = selectors;
+    this.vendorId = vendorId;
+    this.vendorName = vendorName;
+    this.uiContract = uiContract;
+    this.onCompatibilityObservation =
+      typeof onCompatibilityObservation === 'function' ? onCompatibilityObservation : null;
     this.onBlocked = onBlocked;
     this.onUnblocked = onUnblocked;
     this.stateDir = stateDir;
@@ -281,6 +296,18 @@ export class ChatGPTController {
     this.serverId = null;
     this.mouse = { x: 30, y: 30 };
     this.currentRun = null;
+  }
+
+  async recordCompatibilityObservation(observation) {
+    if (
+      this.vendorId !== 'chatgpt' ||
+      this.uiContract?.kind !== 'chatgpt' ||
+      !this.onCompatibilityObservation
+    ) {
+      return { accepted: false, reason: 'not-chatgpt' };
+    }
+    await this.onCompatibilityObservation(observation);
+    return { accepted: true };
   }
 
   async runExclusive(fn) {

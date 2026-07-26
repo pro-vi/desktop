@@ -295,3 +295,84 @@ export async function loadChatGptCompatibilityProfile(url = CHATGPT_COMPATIBILIT
   }
   return createChatGptCompatibilityProfile(raw);
 }
+
+function copySelectorRecord(selectors) {
+  if (!isRecord(selectors)) throw invalid('selectors:expected_object');
+  return Object.fromEntries(
+    Object.entries(selectors).map(([key, value]) => [
+      assertNonEmptyString(key, 'selectors:key'),
+      assertNonEmptyString(value, `selectors:${key}`).trim()
+    ])
+  );
+}
+
+export function createLegacyUiContract({ vendorId = null, vendorName = null, selectors }) {
+  return deepFreeze({
+    kind: 'legacy',
+    vendorId: vendorId || null,
+    vendorName: vendorName || null,
+    selectors: copySelectorRecord(selectors)
+  });
+}
+
+function operatorOverridesForProfile(profile, selectorOverrides) {
+  if (!isRecord(selectorOverrides)) throw invalid('selector_overrides:expected_object');
+  const anchorBySelectorKey = new Map(
+    profile.anchors.map((anchor) => [anchor.legacySelectorKey, anchor.id])
+  );
+  const overrides = [];
+  for (const [selectorKey, rawSelector] of Object.entries(selectorOverrides)) {
+    const anchorId = anchorBySelectorKey.get(selectorKey);
+    if (!anchorId) throw invalid(`selector_overrides:unknown_key:${selectorKey}`);
+    const selectors = assertNonEmptyString(rawSelector, `selector_overrides:${selectorKey}`)
+      .split(',')
+      .map((selector) => selector.trim())
+      .filter(Boolean);
+    if (selectors.length === 0) throw invalid(`selector_overrides:${selectorKey}:empty`);
+    for (const selector of selectors) {
+      overrides.push({
+        anchorId,
+        selectorKey,
+        selector,
+        kind: 'legacy',
+        source: 'operator-override'
+      });
+    }
+  }
+  return overrides;
+}
+
+export function createProviderCompatibilityBridge({
+  vendorId = null,
+  vendorName = null,
+  selectors,
+  selectorOverrides = {},
+  profile,
+  onCompatibilityObservation = null
+}) {
+  const isChatGpt = vendorId === 'chatgpt';
+  if (!isChatGpt) {
+    return deepFreeze({
+      uiContract: createLegacyUiContract({ vendorId, vendorName, selectors }),
+      onCompatibilityObservation: null
+    });
+  }
+  if (!profile || profile.vendorId !== 'chatgpt' || !profile.contractHash) {
+    throw invalid('profile:chatgpt_profile_required');
+  }
+  const operatorOverrides = operatorOverridesForProfile(profile, selectorOverrides);
+  return deepFreeze({
+    uiContract: {
+      kind: 'chatgpt',
+      vendorId,
+      vendorName: vendorName || null,
+      profile,
+      legacySelectors: copySelectorRecord(selectors),
+      operatorOverrides,
+      provenance: operatorOverrides.length ? 'operator-override' : 'contract',
+      degraded: operatorOverrides.length > 0
+    },
+    onCompatibilityObservation:
+      typeof onCompatibilityObservation === 'function' ? onCompatibilityObservation : null
+  });
+}

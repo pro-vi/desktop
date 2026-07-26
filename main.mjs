@@ -15,6 +15,10 @@ import {
   resolveChromeProfileName
 } from './browser-backend.mjs';
 import { ChatGPTController } from './chatgpt-controller.mjs';
+import {
+  createProviderCompatibilityBridge,
+  loadChatGptCompatibilityProfile
+} from './chatgpt-compatibility.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { TabManager } from './tab-manager.mjs';
 import { defaultStateDir, ensureToken, readSettings, writeSettings, defaultSettings, writeState } from './state.mjs';
@@ -59,6 +63,7 @@ function resolveMaxTabs(settings) {
 async function loadSelectors(stateDir) {
   const defaults = JSON.parse(await fs.readFile(path.join(__dirname, 'selectors.json'), 'utf8'));
   const overridePath = path.join(stateDir, 'selectors.override.json');
+  const selectorOverrides = {};
   try {
     const override = JSON.parse(await fs.readFile(overridePath, 'utf8'));
     if (override && typeof override === 'object') {
@@ -68,10 +73,10 @@ async function loadSelectors(stateDir) {
         if (typeof v !== 'string' || !v.trim()) continue;
         cleaned[k] = v.trim();
       }
-      return { ...defaults, ...cleaned };
+      Object.assign(selectorOverrides, cleaned);
     }
   } catch {}
-  return defaults;
+  return { selectors: { ...defaults, ...selectorOverrides }, selectorOverrides };
 }
 
 async function loadVendors() {
@@ -129,7 +134,8 @@ async function main() {
   await app.whenReady();
 
   const token = await ensureToken(stateDir);
-  const selectors = await loadSelectors(stateDir);
+  const { selectors, selectorOverrides } = await loadSelectors(stateDir);
+  const chatGptCompatibilityProfile = await loadChatGptCompatibilityProfile();
   const vendors = await loadVendors();
   let settings = await readSettings(stateDir);
   const browserBackendKind = resolveBrowserBackend({ settings });
@@ -228,10 +234,20 @@ async function main() {
     maxTabs: resolveMaxTabs(settings),
     onNeedsAttention,
     onChanged: emitTabsChanged,
-    createController: async ({ tabId, page }) => {
+    createController: async ({ tabId, page, vendorId, vendorName }) => {
+      const compatibilityBridge = createProviderCompatibilityBridge({
+        vendorId,
+        vendorName,
+        selectors,
+        selectorOverrides,
+        profile: chatGptCompatibilityProfile
+      });
       const controller = new ChatGPTController({
         page,
         selectors,
+        vendorId,
+        vendorName,
+        ...compatibilityBridge,
         stateDir,
         onBlocked: async (st) => {
           await tabs.needsAttention(tabId, st);

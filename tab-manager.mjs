@@ -97,7 +97,13 @@ export class TabManager {
       });
       let controller = null;
       try {
-        controller = await this.createController({ tabId: id, page: session.page, session });
+        controller = await this.createController({
+          tabId: id,
+          page: session.page,
+          session,
+          vendorId,
+          vendorName
+        });
       } catch (error) {
         try {
           await session?.close?.();
