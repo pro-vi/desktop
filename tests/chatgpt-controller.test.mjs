@@ -2728,6 +2728,44 @@ test('chatgpt-controller: export-mode downloads ignore cited markdown links with
   assert.equal(saved[0].source, 'blob:report');
 });
 
+test('chatgpt-controller: image downloads deduplicate normalized source URLs and retain alt metadata', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-image-dedupe-'));
+  t.after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+  });
+
+  const controller = new ChatGPTController({
+    page: {},
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    },
+    stateDir: outDir
+  });
+
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+  controller.getLastAssistantImages = async () => ([
+    {
+      src: 'https://CHATGPT.com:443/backend-api/estuary/content?id=file_123#thumbnail',
+      alt: '',
+      dataUrl
+    },
+    {
+      src: 'https://chatgpt.com/backend-api/estuary/content?id=file_123',
+      alt: 'Generated landscape',
+      dataUrl
+    }
+  ]);
+
+  const saved = await controller.downloadLastAssistantImages({ maxImages: 6, outDir });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].source, 'https://chatgpt.com/backend-api/estuary/content?id=file_123');
+  assert.equal(saved[0].alt, 'Generated landscape');
+  assert.equal((await fs.readdir(outDir)).length, 1);
+});
+
 test('chatgpt-controller: generic file download escalates to research export when no links are present', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-export-generic-'));
   t.after(async () => {

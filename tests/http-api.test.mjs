@@ -4816,6 +4816,7 @@ test('http-api: fire-and-forget query queues for provider slot and can be stoppe
 
   releaseQ1();
   const q1Res = await q1;
+  assert.equal(stopped.data.activeQuery?.stopRequested, true);
   assert.equal(q1Res.res.status, 200);
   const q1Run = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${q1Res.data.runId}.json`), 'utf8'));
   assert.equal(q1Run.providerSlot.status, 'released');
@@ -4884,6 +4885,7 @@ test('http-api: fire-and-forget query stopped before provider-slot admission nev
   assert.equal(stopCalls, 0);
 
   releaseAdmission();
+  assert.equal(stopped.data.activeQuery?.stopRequested, true);
   const stoppedRun = await waitFor(async () => {
     const raw = JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${started.data.runId}.json`), 'utf8'));
     return raw.finishedAt ? raw : null;

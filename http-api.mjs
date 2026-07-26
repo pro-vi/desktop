@@ -2019,9 +2019,10 @@ export function startHttpApi({
     const cancelled = providerSlots.cancelQueued(id, { reason });
     if (!cancelled.cancelled) return null;
     const active = activeQueryByRunId(id);
+    let stoppedActive = active;
     const stoppedAt = Date.now();
     if (active?.tabId) {
-      patchActiveQuery(active.tabId, { stopRequested: true, stopRequestedAt: stoppedAt });
+      stoppedActive = patchActiveQuery(active.tabId, { stopRequested: true, stopRequestedAt: stoppedAt }) || active;
       setLastOutcome(active.tabId, {
         status: 'stopped',
         label: 'Stopped',
@@ -2043,7 +2044,7 @@ export function startHttpApi({
       finishedAt: stoppedAt,
       durationMs: Math.max(0, stoppedAt - Number(active?.startedAt || stoppedAt))
     });
-    return { cancelled, active };
+    return { cancelled, active: stoppedActive };
   };
 
   const stopPendingProviderRun = async ({ runId, reason = 'user_stop' } = {}) => {
@@ -2058,8 +2059,9 @@ export function startHttpApi({
     const stoppedAt = Date.now();
     preProviderStops.set(id, { reason, stoppedAt });
     const tabId = active?.tabId || durable?.tabId || null;
+    let stoppedActive = active;
     if (tabId) {
-      patchActiveQuery(tabId, { stopRequested: true, stopRequestedAt: stoppedAt });
+      stoppedActive = patchActiveQuery(tabId, { stopRequested: true, stopRequestedAt: stoppedAt }) || active;
       setLastOutcome(tabId, {
         status: 'stopped',
         label: 'Stopped',
@@ -2081,7 +2083,7 @@ export function startHttpApi({
       finishedAt: stoppedAt,
       durationMs: Math.max(0, stoppedAt - Number(active?.startedAt || durable?.startedAt || stoppedAt))
     });
-    return { active, run: durable, stoppedAt };
+    return { active: stoppedActive, run: durable, stoppedAt };
   };
 
   const getRunRecordOrThrow = (runId) => {

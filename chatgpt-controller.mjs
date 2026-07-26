@@ -3881,7 +3881,38 @@ export class ChatGPTController {
   }
 
   async downloadLastAssistantImages({ maxImages = 6, outDir = path.join(this.stateDir, 'downloads') } = {}) {
-    const imgs = await this.getLastAssistantImages({ maxImages });
+    const collectedImages = await this.getLastAssistantImages({ maxImages });
+    const imgs = [];
+    const imageIndexBySource = new Map();
+    for (const image of collectedImages) {
+      const rawSource = String(image?.src || '').trim();
+      let sourceKey = rawSource;
+      if (/^https?:\/\//i.test(rawSource)) {
+        try {
+          const normalizedSource = new URL(rawSource);
+          normalizedSource.hash = '';
+          sourceKey = normalizedSource.href;
+        } catch {}
+      }
+      if (!sourceKey || !imageIndexBySource.has(sourceKey)) {
+        if (sourceKey) imageIndexBySource.set(sourceKey, imgs.length);
+        imgs.push(image);
+        continue;
+      }
+
+      const existingIndex = imageIndexBySource.get(sourceKey);
+      const existing = imgs[existingIndex];
+      const candidateHasAlt = !!String(image?.alt || '').trim();
+      const existingHasAlt = !!String(existing?.alt || '').trim();
+      if (candidateHasAlt && !existingHasAlt) {
+        imgs[existingIndex] = {
+          ...image,
+          ...(image.dataUrl || !existing?.dataUrl ? {} : { dataUrl: existing.dataUrl })
+        };
+      } else if (!existing?.dataUrl && image?.dataUrl) {
+        imgs[existingIndex] = { ...existing, dataUrl: image.dataUrl };
+      }
+    }
     await fs.mkdir(outDir, { recursive: true });
     const saved = [];
 
