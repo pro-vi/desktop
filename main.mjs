@@ -142,7 +142,10 @@ async function main() {
   const browserBackendKind = resolveBrowserBackend({ settings });
   const compatibilityStore = createCompatibilityStore(stateDir, {
     contractHash: chatGptCompatibilityProfile.contractHash,
-    capabilityIds: chatGptCompatibilityProfile.capabilities.map(({ id }) => id)
+    capabilityIds: chatGptCompatibilityProfile.capabilities.map(({ id }) => id),
+    capabilityModes: Object.fromEntries(
+      chatGptCompatibilityProfile.capabilities.map(({ id, terminalMode }) => [id, terminalMode])
+    )
   });
   await compatibilityStore.load();
   const chromeExecutablePath = resolveChromeExecutablePath({ settings });

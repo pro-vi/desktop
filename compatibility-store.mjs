@@ -127,6 +127,7 @@ function parseStoredState(value) {
 export function createCompatibilityStore(stateDir, {
   contractHash,
   capabilityIds,
+  capabilityModes = {},
   historyLimit = 100,
   priorMapLimit = 2,
   writeFile = defaultWriteFile,
@@ -194,7 +195,16 @@ export function createCompatibilityStore(stateDir, {
       if (base.recentObservationIds.includes(observation.observationId)) {
         return { accepted: true, duplicate: true, state: snapshot() };
       }
-      const candidate = reduceChatGptCompatibilityObservation(base, observation);
+      if (observation.kind === 'terminal') {
+        const rows = base.recentObservations.filter((row) => row.capabilityId === observation.capabilityId);
+        const latestMechanism = [...rows].reverse().find((row) => row.kind === 'capability');
+        const alreadyFinalized = rows.some((row) => row.kind === 'terminal' && row.attemptId === observation.attemptId);
+        if (!latestMechanism || latestMechanism.attemptId !== observation.attemptId || alreadyFinalized ||
+          (capabilityModes[observation.capabilityId] && capabilityModes[observation.capabilityId] !== observation.mode)) {
+          return { accepted: false, reason: 'stale-terminal', state: snapshot() };
+        }
+      }
+      const candidate = reduceChatGptCompatibilityObservation(base, observation, { capabilityModes });
       candidate.revision = base.revision + 1;
       try {
         await writeFile(filePath, `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600 });

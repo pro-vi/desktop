@@ -1633,6 +1633,15 @@ export function startHttpApi({
     };
   };
 
+  const finalizeCompatibilityTerminal = async (controller, capabilityId, terminal) => {
+    if (typeof controller?.finalizeCompatibilityTerminal !== 'function') return { accepted: false, reason: 'unsupported' };
+    try {
+      return await controller.finalizeCompatibilityTerminal(capabilityId, terminal);
+    } catch {
+      return { accepted: false, reason: 'observation-sink-failed' };
+    }
+  };
+
   const executeResearchFlow = async ({
     op,
     tabId,
@@ -1646,22 +1655,28 @@ export function startHttpApi({
     projectUrl = null,
     effectiveKey = null
   } = {}) => {
-    const result = await runExclusive(controller, async () => {
-      await ensureRunLocation({
-        controller,
-        tabId,
-        timeoutMs,
-        conversationUrl: existingConversationUrl,
-        projectUrl
+    let result;
+    try {
+      result = await runExclusive(controller, async () => {
+        await ensureRunLocation({
+          controller,
+          tabId,
+          timeoutMs,
+          conversationUrl: existingConversationUrl,
+          projectUrl
+        });
+        return await controller.research({
+          prompt,
+          attachments,
+          timeoutMs,
+          outDir,
+          onProgress: (patch) => patchActiveQuery(tabId, patch)
+        });
       });
-      return await controller.research({
-        prompt,
-        attachments,
-        timeoutMs,
-        outDir,
-        onProgress: (patch) => patchActiveQuery(tabId, patch)
-      });
-    });
+    } catch (error) {
+      await finalizeCompatibilityTerminal(controller, 'research', { mode: 'receipt-backed', status: 'failed' });
+      throw error;
+    }
     const conversationUrl = typeof controller.getUrl === 'function'
       ? await controller.getUrl().catch(() => existingConversationUrl || null)
       : existingConversationUrl || null;
@@ -1677,6 +1692,7 @@ export function startHttpApi({
         researchOutput: result?.research || null
       });
     } catch (error) {
+      await finalizeCompatibilityTerminal(controller, 'research', { mode: 'receipt-backed', status: 'failed' });
       if (String(error?.message || '') === 'research_output_incomplete') {
         error.data = {
           ...(error?.data && typeof error.data === 'object' ? error.data : {}),
@@ -1695,7 +1711,14 @@ export function startHttpApi({
     researchMeta.activation.conversationUrl = conversationUrl || researchMeta.activation.conversationUrl || null;
     researchMeta.outputManifest = outputManifest;
     await patchRunRecord(op.id, { researchMeta });
-    const completionReceipt = await completionReceiptForManifest({ kind: 'research-report', outputManifest, conversationUrl });
+    let completionReceipt;
+    try {
+      completionReceipt = await completionReceiptForManifest({ kind: 'research-report', outputManifest, conversationUrl });
+    } catch (error) {
+      await finalizeCompatibilityTerminal(controller, 'research', { mode: 'receipt-backed', status: 'failed' });
+      throw error;
+    }
+    await finalizeCompatibilityTerminal(controller, 'research', { mode: 'receipt-backed', status: 'satisfied' });
     const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest, completionReceipt });
     setLastOutcome(tabId, outcome);
     await durableRunFinalizeFromOutcome(op.id, outcome);
@@ -2399,17 +2422,25 @@ export function startHttpApi({
         if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
           persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: originalProjectUrl });
         }
-        const outputManifest = await finalizeQueryOutputs({
-          runId: op.id,
-          tabId,
-          tabMeta,
-          result,
-          conversationUrl,
-          modeIntent: originalModeIntent,
-          modelIntent: originalModelIntent,
-          activeQuery
-        });
-        const completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
+        let outputManifest;
+        let completionReceipt;
+        try {
+          outputManifest = await finalizeQueryOutputs({
+            runId: op.id,
+            tabId,
+            tabMeta,
+            result,
+            conversationUrl,
+            modeIntent: originalModeIntent,
+            modelIntent: originalModelIntent,
+            activeQuery
+          });
+          completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
+        } catch (error) {
+          await finalizeCompatibilityTerminal(controller, 'response', { mode: 'receipt-backed', status: 'failed' });
+          throw error;
+        }
+        await finalizeCompatibilityTerminal(controller, 'response', { mode: 'receipt-backed', status: 'satisfied' });
         const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest, completionReceipt });
         const resultWithMeta = {
           ...result,
@@ -3113,17 +3144,25 @@ export function startHttpApi({
                   sourceUrl: entryTarget?.chatUrl || null
                 });
               }
-              const outputManifest = await finalizeQueryOutputs({
-                runId: op.id,
-                tabId,
-                tabMeta,
-                result,
-                conversationUrl,
-                modeIntent,
-                modelIntent,
-                activeQuery
-              });
-              const completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
+              let outputManifest;
+              let completionReceipt;
+              try {
+                outputManifest = await finalizeQueryOutputs({
+                  runId: op.id,
+                  tabId,
+                  tabMeta,
+                  result,
+                  conversationUrl,
+                  modeIntent,
+                  modelIntent,
+                  activeQuery
+                });
+                completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
+              } catch (error) {
+                await finalizeCompatibilityTerminal(controller, 'response', { mode: 'receipt-backed', status: 'failed' });
+                throw error;
+              }
+              await finalizeCompatibilityTerminal(controller, 'response', { mode: 'receipt-backed', status: 'satisfied' });
               const outcome = successOutcomeForResult({ result, op, conversationUrl, outputManifest, completionReceipt });
               const resultWithMeta = {
                 ...result,
@@ -3543,9 +3582,19 @@ export function startHttpApi({
         const maxImages = positiveIntOr(body.maxImages, 6, 50);
         const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
         const controller = tabs.getControllerById(tabId);
-        const saved = await runExclusive(controller, async () =>
-          saveArtifactsForTab({ stateDir, tabs, tabId, controller, mode: 'images', maxImages })
-        );
+        let saved;
+        try {
+          saved = await runExclusive(controller, async () =>
+            saveArtifactsForTab({ stateDir, tabs, tabId, controller, mode: 'images', maxImages })
+          );
+        } catch (error) {
+          await finalizeCompatibilityTerminal(controller, 'image', { mode: 'artifact-backed', status: 'failed' });
+          throw error;
+        }
+        const imageCount = saved.items.filter((item) => item?.kind === 'image').length;
+        await finalizeCompatibilityTerminal(controller, 'image', {
+          mode: 'artifact-backed', status: imageCount > 0 ? 'satisfied' : 'failed', artifactCount: imageCount
+        });
         return sendJson(res, 200, { ok: true, tabId, files: saved.items, dir: saved.dir });
       }
 
@@ -3564,9 +3613,23 @@ export function startHttpApi({
           vendors
         });
         const controller = tabs.getControllerById(tabId);
-        const saved = await runExclusive(controller, async () =>
-          saveArtifactsForTab({ stateDir, tabs, tabId, controller, mode, maxImages, maxFiles })
-        );
+        let saved;
+        try {
+          saved = await runExclusive(controller, async () =>
+            saveArtifactsForTab({ stateDir, tabs, tabId, controller, mode, maxImages, maxFiles })
+          );
+        } catch (error) {
+          if (mode === 'images' || mode === 'all') {
+            await finalizeCompatibilityTerminal(controller, 'image', { mode: 'artifact-backed', status: 'failed' });
+          }
+          throw error;
+        }
+        if (mode === 'images' || mode === 'all') {
+          const imageCount = saved.items.filter((item) => item?.kind === 'image').length;
+          await finalizeCompatibilityTerminal(controller, 'image', {
+            mode: 'artifact-backed', status: imageCount > 0 ? 'satisfied' : 'failed', artifactCount: imageCount
+          });
+        }
         return sendJson(res, 200, { ok: true, tabId, artifacts: saved.items, dir: saved.dir });
       }
 

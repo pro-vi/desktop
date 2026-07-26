@@ -300,6 +300,7 @@ export class ChatGPTController {
     this.serverId = null;
     this.mouse = { x: 30, y: 30 };
     this.currentRun = null;
+    this.compatibilityTerminalAttempts = new Map();
   }
 
   async recordCompatibilityObservation(observation) {
@@ -318,9 +319,38 @@ export class ChatGPTController {
     }
   }
 
+  async finalizeCompatibilityTerminal(capabilityId, {
+    attemptId = null,
+    mode = null,
+    status = 'satisfied',
+    artifactCount = 0
+  } = {}) {
+    const pending = this.compatibilityTerminalAttempts.get(capabilityId);
+    if (!pending || (attemptId && pending.attemptId !== attemptId) || (mode && pending.mode !== mode)) {
+      return { accepted: false, reason: 'stale-terminal' };
+    }
+    const result = await this.recordCompatibilityObservation({
+      schemaVersion: 1,
+      observationId: crypto.randomUUID(),
+      attemptId: pending.attemptId,
+      observedAt: Date.now(),
+      contractHash: this.uiContract.profile.contractHash,
+      vendorId: 'chatgpt',
+      backend: this.compatibilityBackend,
+      capabilityId,
+      kind: 'terminal',
+      mode: pending.mode,
+      status,
+      artifactCount
+    });
+    if (result.accepted) this.compatibilityTerminalAttempts.delete(capabilityId);
+    return result;
+  }
+
   async runCompatibilityCapability(capabilityId, operation, {
     anchorId = null,
-    postcondition = () => true
+    postcondition = () => true,
+    authoritativeTerminal = false
   } = {}) {
     if (typeof operation !== 'function') throw new Error('compatibility_operation_required');
     const contract = this.uiContract;
@@ -384,6 +414,15 @@ export class ChatGPTController {
         reasonCode,
         rolloutSignature: resolution.rolloutSignature || contract.profile.contractHash
       });
+    const emitTerminal = async (status) =>
+      await this.recordCompatibilityObservation({
+        ...common(),
+        capabilityId,
+        kind: 'terminal',
+        mode: capability.terminalMode,
+        status,
+        artifactCount: 0
+      });
 
     try {
       const result = await operation();
@@ -399,11 +438,19 @@ export class ChatGPTController {
       if (resolution.kind !== 'apparatus') await emitResolution();
       await emitCapability(status, reasonCode);
       if (resolution.kind === 'apparatus') await emitResolution();
+      if (authoritativeTerminal) await emitTerminal(behaviorPassed ? 'satisfied' : 'failed');
+      if (capability.terminalMode === 'receipt-backed' || capability.terminalMode === 'artifact-backed') {
+        this.compatibilityTerminalAttempts.set(capabilityId, { attemptId, mode: capability.terminalMode });
+      }
       return result;
     } catch (error) {
       if (resolution.kind !== 'apparatus') await emitResolution();
       await emitCapability('fail', 'operation-failed');
       if (resolution.kind === 'apparatus') await emitResolution();
+      if (authoritativeTerminal) await emitTerminal('failed');
+      if (capability.terminalMode === 'receipt-backed' || capability.terminalMode === 'artifact-backed') {
+        this.compatibilityTerminalAttempts.set(capabilityId, { attemptId, mode: capability.terminalMode });
+      }
       throw error;
     }
   }
@@ -744,7 +791,7 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'mode-model',
       async () => await this.#applyModelIntentImpl(options),
-      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true }
+      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true, authoritativeTerminal: true }
     );
   }
 
@@ -1337,7 +1384,7 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'mode-model',
       async () => await this.#applyModeIntentImpl(options),
-      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true }
+      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true, authoritativeTerminal: true }
     );
   }
 
@@ -1859,7 +1906,7 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'readiness',
       async () => await this.#ensureReadyImpl(options),
-      { anchorId: 'prompt-textarea', postcondition: (result) => result?.promptVisible === true }
+      { anchorId: 'prompt-textarea', postcondition: (result) => result?.promptVisible === true, authoritativeTerminal: true }
     );
   }
 
@@ -1997,7 +2044,7 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'composer',
       async () => await this.#focusPromptImpl(options),
-      { anchorId: 'prompt-textarea', postcondition: (result) => result?.ok === true }
+      { anchorId: 'prompt-textarea', postcondition: (result) => result?.ok === true, authoritativeTerminal: true }
     );
   }
 
@@ -2176,7 +2223,7 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'submit',
       async () => await this.#clickSendImpl(),
-      { anchorId: 'send-button', postcondition: (result) => result?.acknowledged === true }
+      { anchorId: 'send-button', postcondition: (result) => result?.acknowledged === true, authoritativeTerminal: true }
     );
   }
 
@@ -2693,7 +2740,7 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'attachment',
       async () => await this.#attachFilesImpl(files),
-      { anchorId: 'composer-menu-button', postcondition: () => true }
+      { anchorId: 'composer-menu-button', postcondition: () => true, authoritativeTerminal: true }
     );
   }
 
@@ -3549,7 +3596,11 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'file',
       async () => await this.#exportResearchMarkdownImpl(options),
-      { anchorId: 'research-export-button', postcondition: (result) => Array.isArray(result?.files) && result.files.length > 0 }
+      {
+        anchorId: 'research-export-button',
+        postcondition: (result) => Array.isArray(result?.files) && result.files.length > 0,
+        authoritativeTerminal: true
+      }
     );
   }
 
@@ -4008,7 +4059,10 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'image',
       async () => await this.#getLastAssistantImagesImpl(options),
-      { anchorId: 'assistant-message', postcondition: (result) => Array.isArray(result) && result.length > 0 }
+      {
+        anchorId: 'assistant-message',
+        postcondition: (result) => Array.isArray(result) && result.length > 0
+      }
     );
   }
 
@@ -4164,7 +4218,11 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'file',
       async () => await this.#getLastAssistantDownloadsImpl(options),
-      { anchorId: 'assistant-message', postcondition: (result) => Array.isArray(result) && result.length > 0 }
+      {
+        anchorId: 'assistant-message',
+        postcondition: (result) => Array.isArray(result) && result.length > 0,
+        authoritativeTerminal: true
+      }
     );
   }
 

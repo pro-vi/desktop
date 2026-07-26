@@ -69,8 +69,30 @@ function appendBounded(items, item, limit) {
   return [...items, item].slice(-limit);
 }
 
-export function reduceChatGptCompatibilityObservation(inputState, observation) {
+function applyCapabilityStatus(current, observation, sequence) {
+  current.status = observation.status;
+  current.reasonCode = observation.reasonCode;
+  current.lastSequence = sequence;
+  current.lastObservedAt = observation.observedAt;
+  current.rolloutSignature = observation.rolloutSignature;
+  if (observation.status === 'fail') {
+    current.failureStreak += 1;
+    current.degradedStreak = 0;
+  } else if (observation.status === 'degraded') {
+    current.failureStreak = 0;
+    current.degradedStreak += 1;
+  } else {
+    current.failureStreak = 0;
+    current.degradedStreak = 0;
+  }
+}
+
+export function reduceChatGptCompatibilityObservation(inputState, observation, { capabilityModes = {} } = {}) {
   const state = clone(inputState);
+  const terminalMechanism = observation.kind === 'terminal'
+    ? [...state.recentObservations].reverse().find((row) =>
+      row.kind === 'capability' && row.capabilityId === observation.capabilityId && row.attemptId === observation.attemptId)
+    : null;
   state.sequence += 1;
   const row = { ...clone(observation), sequence: state.sequence };
   state.recentObservations = appendBounded(state.recentObservations, row, state.limits.history);
@@ -84,25 +106,42 @@ export function reduceChatGptCompatibilityObservation(inputState, observation) {
     const current = state.capabilities[observation.capabilityId];
     if (!current) throw new Error(`unknown_chatgpt_capability:${observation.capabilityId}`);
     if (observation.status !== 'skip') {
-      current.status = observation.status;
-      current.reasonCode = observation.reasonCode;
-      current.lastSequence = state.sequence;
-      current.lastObservedAt = observation.observedAt;
-      current.rolloutSignature = observation.rolloutSignature;
-      if (observation.status === 'fail') {
-        current.failureStreak += 1;
-        current.degradedStreak = 0;
-      } else if (observation.status === 'degraded') {
+      const mode = capabilityModes[observation.capabilityId];
+      if (mode === 'receipt-backed' || mode === 'artifact-backed') {
+        current.status = 'skip';
+        current.reasonCode = 'terminal-pending';
+        current.lastSequence = state.sequence;
+        current.lastObservedAt = observation.observedAt;
+        current.rolloutSignature = observation.rolloutSignature;
         current.failureStreak = 0;
-        current.degradedStreak += 1;
+        current.degradedStreak = 0;
       } else {
-        current.failureStreak = 0;
-        current.degradedStreak = 0;
+        applyCapabilityStatus(current, observation, state.sequence);
       }
     } else if (current.status === 'skip') {
       current.reasonCode = observation.reasonCode;
       current.lastSequence = state.sequence;
       current.lastObservedAt = observation.observedAt;
+    }
+    state.apparatus = apparatusForCapabilities(state.capabilities);
+  } else if (observation.kind === 'terminal') {
+    const current = state.capabilities[observation.capabilityId];
+    if (!current) throw new Error(`unknown_chatgpt_capability:${observation.capabilityId}`);
+    if (observation.status === 'satisfied' && terminalMechanism) {
+      applyCapabilityStatus(current, terminalMechanism, state.sequence);
+      current.lastObservedAt = observation.observedAt;
+    } else if (observation.status === 'failed') {
+      applyCapabilityStatus(current, {
+        status: 'fail', reasonCode: 'terminal-failed', observedAt: observation.observedAt,
+        rolloutSignature: terminalMechanism?.rolloutSignature || current.rolloutSignature
+      }, state.sequence);
+    } else {
+      current.status = 'skip';
+      current.reasonCode = 'not-applicable';
+      current.lastSequence = state.sequence;
+      current.lastObservedAt = observation.observedAt;
+      current.failureStreak = 0;
+      current.degradedStreak = 0;
     }
     state.apparatus = apparatusForCapabilities(state.capabilities);
   } else if (observation.kind === 'apparatus') {
