@@ -1,0 +1,1469 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "2026-07-26",
+  "capturedAt": "2026-07-26T00:00:00.000Z",
+  "vendorId": "chatgpt",
+  "capabilities": [
+    {
+      "id": "readiness",
+      "anchorIds": [
+        "prompt-textarea",
+        "send-button",
+        "stop-button"
+      ],
+      "preconditionId": "always",
+      "postconditionId": "interface-ready",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "composer",
+      "anchorIds": [
+        "composer-root",
+        "prompt-textarea"
+      ],
+      "preconditionId": "always",
+      "postconditionId": "composer-editable",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "submit",
+      "anchorIds": [
+        "prompt-textarea",
+        "send-button",
+        "stop-button"
+      ],
+      "preconditionId": "always",
+      "postconditionId": "submit-acknowledged",
+      "terminalMode": "dispatch"
+    },
+    {
+      "id": "attachment",
+      "anchorIds": [
+        "composer-root",
+        "composer-menu-button",
+        "composer-menu",
+        "composer-menu-item",
+        "prompt-textarea"
+      ],
+      "preconditionId": "when-attachment-requested",
+      "postconditionId": "attachment-accepted",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "mode-model",
+      "anchorIds": [
+        "prompt-textarea",
+        "chat-mode-button",
+        "chat-mode-menu",
+        "chat-mode-option",
+        "chat-mode-active"
+      ],
+      "preconditionId": "when-mode-or-model-requested",
+      "postconditionId": "mode-model-confirmed",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "response",
+      "anchorIds": [
+        "assistant-message",
+        "stop-button",
+        "send-button"
+      ],
+      "preconditionId": "after-submit",
+      "postconditionId": "stable-response",
+      "terminalMode": "receipt-backed"
+    },
+    {
+      "id": "research",
+      "anchorIds": [
+        "composer-menu-button",
+        "composer-menu",
+        "composer-menu-item",
+        "research-mode-button",
+        "research-mode-menu",
+        "research-mode-option",
+        "research-mode-active",
+        "assistant-message"
+      ],
+      "preconditionId": "when-research-requested",
+      "postconditionId": "research-completed",
+      "terminalMode": "receipt-backed"
+    },
+    {
+      "id": "image",
+      "anchorIds": [
+        "assistant-message"
+      ],
+      "preconditionId": "when-image-requested",
+      "postconditionId": "image-artifacts-saved",
+      "terminalMode": "artifact-backed"
+    },
+    {
+      "id": "file",
+      "anchorIds": [
+        "assistant-message",
+        "research-export-button",
+        "research-export-menu",
+        "research-export-markdown-option"
+      ],
+      "preconditionId": "when-file-export-requested",
+      "postconditionId": "file-exported",
+      "terminalMode": "predicate"
+    }
+  ],
+  "anchors": [
+    {
+      "id": "prompt-textarea",
+      "legacySelectorKey": "promptTextarea",
+      "primitiveId": "editable-composer",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "prompt-textarea-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "#prompt-textarea"
+        },
+        {
+          "id": "prompt-textarea-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "rich-textarea .ql-editor[contenteditable=\"true\"]"
+        },
+        {
+          "id": "prompt-textarea-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "div.ql-editor[contenteditable=\"true\"]"
+        },
+        {
+          "id": "prompt-textarea-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "div.ProseMirror[contenteditable=\"true\"]"
+        },
+        {
+          "id": "prompt-textarea-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "div[contenteditable=\"true\"][aria-label*=\"prompt\" i]"
+        },
+        {
+          "id": "prompt-textarea-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "div[contenteditable=\"true\"][aria-label*=\"message\" i]"
+        },
+        {
+          "id": "prompt-textarea-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "textarea[aria-label*=\"prompt\" i]"
+        },
+        {
+          "id": "prompt-textarea-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "textarea[placeholder*=\"ask\" i]"
+        },
+        {
+          "id": "prompt-textarea-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "textarea[placeholder*=\"ask grok\" i]"
+        },
+        {
+          "id": "prompt-textarea-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "textarea[placeholder*=\"message\" i]"
+        },
+        {
+          "id": "prompt-textarea-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"textbox\"][contenteditable=\"true\"]"
+        },
+        {
+          "id": "prompt-textarea-legacy-11",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "main textarea"
+        },
+        {
+          "id": "prompt-textarea-legacy-12",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "main [role=\"textbox\"]"
+        },
+        {
+          "id": "prompt-textarea-legacy-13",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "main [contenteditable=\"true\"]"
+        }
+      ]
+    },
+    {
+      "id": "send-button",
+      "legacySelectorKey": "sendButton",
+      "primitiveId": "action-control",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "send-button-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[data-testid=\"send-button\"]"
+        },
+        {
+          "id": "send-button-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"send\" i]"
+        },
+        {
+          "id": "send-button-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"submit\" i]"
+        },
+        {
+          "id": "send-button-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label=\"Send prompt\"]"
+        },
+        {
+          "id": "send-button-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label=\"Send\"]"
+        },
+        {
+          "id": "send-button-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"send message\" i]"
+        },
+        {
+          "id": "send-button-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"submit\" i]"
+        },
+        {
+          "id": "send-button-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"run\" i]"
+        },
+        {
+          "id": "send-button-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"run\" i]"
+        },
+        {
+          "id": "send-button-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[type=\"submit\"]"
+        },
+        {
+          "id": "send-button-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"send\" i]"
+        },
+        {
+          "id": "send-button-legacy-11",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"run\" i]"
+        }
+      ]
+    },
+    {
+      "id": "stop-button",
+      "legacySelectorKey": "stopButton",
+      "primitiveId": "action-control",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "stop-button-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[data-testid=\"stop-button\"]"
+        },
+        {
+          "id": "stop-button-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"stop\" i]"
+        },
+        {
+          "id": "stop-button-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label=\"Stop generating\"]"
+        },
+        {
+          "id": "stop-button-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label=\"Stop\"]"
+        },
+        {
+          "id": "stop-button-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"stop response\" i]"
+        },
+        {
+          "id": "stop-button-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"cancel\" i]"
+        }
+      ]
+    },
+    {
+      "id": "assistant-message",
+      "legacySelectorKey": "assistantMessage",
+      "primitiveId": "assistant-output",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "assistant-message-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[data-message-author-role=\"assistant\"]"
+        },
+        {
+          "id": "assistant-message-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "model-response"
+        },
+        {
+          "id": "assistant-message-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": ".model-response-text"
+        },
+        {
+          "id": "assistant-message-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-test-id=\"model-response\"]"
+        },
+        {
+          "id": "assistant-message-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-response-author=\"model\"]"
+        },
+        {
+          "id": "assistant-message-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "article[data-testid*=\"answer\" i]"
+        },
+        {
+          "id": "assistant-message-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-testid*=\"assistant\" i]"
+        },
+        {
+          "id": "assistant-message-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-testid=\"chat-message\"]"
+        },
+        {
+          "id": "assistant-message-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-is-assistant=\"true\"]"
+        }
+      ]
+    },
+    {
+      "id": "composer-root",
+      "legacySelectorKey": "composerRoot",
+      "primitiveId": "container-surface",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "composer-root-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "form"
+        },
+        {
+          "id": "composer-root-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "main"
+        }
+      ]
+    },
+    {
+      "id": "composer-menu-button",
+      "legacySelectorKey": "composerMenuButton",
+      "primitiveId": "action-control",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "composer-menu-button-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[data-testid=\"composer-plus-btn\"]"
+        },
+        {
+          "id": "composer-menu-button-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button#composer-plus-btn"
+        },
+        {
+          "id": "composer-menu-button-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"files and more\" i]"
+        },
+        {
+          "id": "composer-menu-button-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"files and more\" i]"
+        }
+      ]
+    },
+    {
+      "id": "composer-menu",
+      "legacySelectorKey": "composerMenu",
+      "primitiveId": "menu-surface",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "composer-menu-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[role=\"menu\"]"
+        },
+        {
+          "id": "composer-menu-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"listbox\"]"
+        },
+        {
+          "id": "composer-menu-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-menu-content]"
+        },
+        {
+          "id": "composer-menu-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-select-content]"
+        },
+        {
+          "id": "composer-menu-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-popper-content-wrapper]"
+        },
+        {
+          "id": "composer-menu-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-headlessui-state]"
+        },
+        {
+          "id": "composer-menu-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-floating-ui-portal]"
+        },
+        {
+          "id": "composer-menu-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-slot=\"popover-content\"]"
+        },
+        {
+          "id": "composer-menu-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-slot=\"dropdown-menu-content\"]"
+        },
+        {
+          "id": "composer-menu-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[popover]"
+        }
+      ]
+    },
+    {
+      "id": "composer-menu-item",
+      "legacySelectorKey": "composerMenuItem",
+      "primitiveId": "menu-option",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "composer-menu-item-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[role=\"menuitem\"]"
+        },
+        {
+          "id": "composer-menu-item-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"option\"]"
+        },
+        {
+          "id": "composer-menu-item-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-collection-item]"
+        }
+      ]
+    },
+    {
+      "id": "chat-mode-button",
+      "legacySelectorKey": "chatModeButton",
+      "primitiveId": "action-control",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "chat-mode-button-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"model\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"mode\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-11",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][data-testid*=\"model\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-12",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][data-testid*=\"mode\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-13",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-haspopup][data-testid*=\"model\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-14",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-haspopup][data-testid*=\"mode\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-15",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"tab\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-16",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"tab\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-17",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"tab\"][aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-18",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"switch\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-19",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"switch\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-button-legacy-20",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"switch\"][aria-label*=\"pro\" i]"
+        }
+      ]
+    },
+    {
+      "id": "chat-mode-menu",
+      "legacySelectorKey": "chatModeMenu",
+      "primitiveId": "menu-surface",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "chat-mode-menu-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[role=\"menu\"]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"listbox\"]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-menu-content]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-select-content]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-popper-content-wrapper]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-headlessui-state]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-floating-ui-portal]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-slot=\"popover-content\"]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-slot=\"dropdown-menu-content\"]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[popover]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"dialog\"]"
+        },
+        {
+          "id": "chat-mode-menu-legacy-11",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"alertdialog\"]"
+        }
+      ]
+    },
+    {
+      "id": "chat-mode-option",
+      "legacySelectorKey": "chatModeOption",
+      "primitiveId": "menu-option",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "chat-mode-option-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"extended pro\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"extended pro\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"extended pro\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"menuitem\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"menuitem\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-11",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"menuitem\"][aria-label*=\"extended pro\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-12",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"option\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-13",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"option\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-14",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"option\"][aria-label*=\"extended pro\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-15",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"tab\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-16",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"tab\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-option-legacy-17",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"tab\"][aria-label*=\"extended pro\" i]"
+        }
+      ]
+    },
+    {
+      "id": "chat-mode-active",
+      "legacySelectorKey": "chatModeActive",
+      "primitiveId": "active-state",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "chat-mode-active-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[aria-pressed=\"true\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-pressed=\"true\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-pressed=\"true\"][aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-checked=\"true\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-checked=\"true\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-checked=\"true\"][aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-selected=\"true\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-selected=\"true\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-selected=\"true\"][aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"active\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"active\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-11",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"active\"][aria-label*=\"pro\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-12",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"on\"][aria-label*=\"thinking\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-13",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"on\"][aria-label*=\"instant\" i]"
+        },
+        {
+          "id": "chat-mode-active-legacy-14",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"on\"][aria-label*=\"pro\" i]"
+        }
+      ]
+    },
+    {
+      "id": "research-mode-button",
+      "legacySelectorKey": "researchModeButton",
+      "primitiveId": "action-control",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-mode-button-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[aria-label*=\"research\" i]"
+        },
+        {
+          "id": "research-mode-button-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"research\" i]"
+        },
+        {
+          "id": "research-mode-button-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"tool\" i]"
+        },
+        {
+          "id": "research-mode-button-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[data-testid*=\"research\" i]"
+        },
+        {
+          "id": "research-mode-button-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"research\" i]"
+        },
+        {
+          "id": "research-mode-button-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"tools\" i]"
+        }
+      ]
+    },
+    {
+      "id": "research-mode-menu",
+      "legacySelectorKey": "researchModeMenu",
+      "primitiveId": "menu-surface",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-mode-menu-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[role=\"menu\"]"
+        },
+        {
+          "id": "research-mode-menu-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"listbox\"]"
+        },
+        {
+          "id": "research-mode-menu-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-menu-content]"
+        },
+        {
+          "id": "research-mode-menu-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-popper-content-wrapper]"
+        },
+        {
+          "id": "research-mode-menu-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-headlessui-state]"
+        }
+      ]
+    },
+    {
+      "id": "research-mode-option",
+      "legacySelectorKey": "researchModeOption",
+      "primitiveId": "menu-option",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-mode-option-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-option-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-option-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"menuitem\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-option-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"option\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-option-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-testid*=\"deep-research\" i]"
+        }
+      ]
+    },
+    {
+      "id": "research-mode-active",
+      "legacySelectorKey": "researchModeActive",
+      "primitiveId": "active-state",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-mode-active-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[aria-pressed=\"true\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-active-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-checked=\"true\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-active-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[aria-selected=\"true\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-active-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"active\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-active-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-state=\"on\"][aria-label*=\"deep research\" i]"
+        }
+      ]
+    },
+    {
+      "id": "research-export-button",
+      "legacySelectorKey": "researchExportButton",
+      "primitiveId": "action-control",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-export-button-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[aria-label=\"Export\"][aria-haspopup=\"menu\"]"
+        },
+        {
+          "id": "research-export-button-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"export\" i][aria-haspopup=\"menu\"]"
+        },
+        {
+          "id": "research-export-button-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"export\" i][aria-expanded]"
+        },
+        {
+          "id": "research-export-button-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"export\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"export\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[aria-label*=\"download\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "button[title*=\"download\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-07",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"export\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-08",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"download\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-09",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-testid*=\"export\" i]"
+        },
+        {
+          "id": "research-export-button-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-testid*=\"download\" i]"
+        }
+      ]
+    },
+    {
+      "id": "research-export-menu",
+      "legacySelectorKey": "researchExportMenu",
+      "primitiveId": "menu-surface",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-export-menu-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "[role=\"menu\"]"
+        },
+        {
+          "id": "research-export-menu-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"listbox\"]"
+        },
+        {
+          "id": "research-export-menu-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-menu-content]"
+        },
+        {
+          "id": "research-export-menu-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-radix-popper-content-wrapper]"
+        },
+        {
+          "id": "research-export-menu-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-headlessui-state]"
+        }
+      ]
+    },
+    {
+      "id": "research-export-markdown-option",
+      "legacySelectorKey": "researchExportMarkdownOption",
+      "primitiveId": "menu-option",
+      "capture": {
+        "descriptorFields": [
+          "tagName",
+          "role",
+          "ariaLabel",
+          "dataTestId",
+          "visible",
+          "enabled"
+        ]
+      },
+      "branches": [
+        {
+          "id": "research-export-markdown-option-canonical",
+          "kind": "canonical",
+          "source": "contract",
+          "selector": "button[aria-label*=\"markdown\" i]"
+        },
+        {
+          "id": "research-export-markdown-option-legacy-01",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"button\"][aria-label*=\"markdown\" i]"
+        },
+        {
+          "id": "research-export-markdown-option-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"menuitem\"][aria-label*=\"markdown\" i]"
+        },
+        {
+          "id": "research-export-markdown-option-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[role=\"option\"][aria-label*=\"markdown\" i]"
+        },
+        {
+          "id": "research-export-markdown-option-legacy-04",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "a[download$=\".md\" i]"
+        },
+        {
+          "id": "research-export-markdown-option-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-testid*=\"markdown\" i]"
+        }
+      ]
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "attachment-native-file-picker",
+      "capabilityId": "attachment",
+      "kind": "dependency",
+      "dependency": "file-input-transfer",
+      "reason": "browser-native file selection is intentionally outside DOM selector resolution"
+    },
+    {
+      "id": "response-temporal-stability",
+      "capabilityId": "response",
+      "kind": "dependency",
+      "dependency": "stable-response-window",
+      "reason": "non-DOM temporal stability is evaluated over sanitized response descriptors"
+    }
+  ]
+}

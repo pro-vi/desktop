@@ -1,0 +1,135 @@
+{
+  "capabilities": [
+    {
+      "id": "readiness",
+      "anchorIds": [
+        "prompt-textarea",
+        "send-button",
+        "stop-button"
+      ],
+      "preconditionId": "always",
+      "postconditionId": "interface-ready",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "composer",
+      "anchorIds": [
+        "composer-root",
+        "prompt-textarea"
+      ],
+      "preconditionId": "always",
+      "postconditionId": "composer-editable",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "submit",
+      "anchorIds": [
+        "prompt-textarea",
+        "send-button",
+        "stop-button"
+      ],
+      "preconditionId": "always",
+      "postconditionId": "submit-acknowledged",
+      "terminalMode": "dispatch"
+    },
+    {
+      "id": "attachment",
+      "anchorIds": [
+        "composer-root",
+        "composer-menu-button",
+        "composer-menu",
+        "composer-menu-item",
+        "prompt-textarea"
+      ],
+      "preconditionId": "when-attachment-requested",
+      "postconditionId": "attachment-accepted",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "mode-model",
+      "anchorIds": [
+        "prompt-textarea",
+        "chat-mode-button",
+        "chat-mode-menu",
+        "chat-mode-option",
+        "chat-mode-active"
+      ],
+      "preconditionId": "when-mode-or-model-requested",
+      "postconditionId": "mode-model-confirmed",
+      "terminalMode": "predicate"
+    },
+    {
+      "id": "response",
+      "anchorIds": [
+        "assistant-message",
+        "stop-button",
+        "send-button"
+      ],
+      "preconditionId": "after-submit",
+      "postconditionId": "stable-response",
+      "terminalMode": "receipt-backed"
+    },
+    {
+      "id": "research",
+      "anchorIds": [
+        "composer-menu-button",
+        "composer-menu",
+        "composer-menu-item",
+        "research-mode-button",
+        "research-mode-menu",
+        "research-mode-option",
+        "research-mode-active",
+        "assistant-message"
+      ],
+      "preconditionId": "when-research-requested",
+      "postconditionId": "research-completed",
+      "terminalMode": "receipt-backed"
+    },
+    {
+      "id": "image",
+      "anchorIds": [
+        "assistant-message"
+      ],
+      "preconditionId": "when-image-requested",
+      "postconditionId": "image-artifacts-saved",
+      "terminalMode": "artifact-backed"
+    },
+    {
+      "id": "file",
+      "anchorIds": [
+        "assistant-message",
+        "research-export-button",
+        "research-export-menu",
+        "research-export-markdown-option"
+      ],
+      "preconditionId": "when-file-export-requested",
+      "postconditionId": "file-exported",
+      "terminalMode": "predicate"
+    }
+  ],
+  "anchorIds": [
+    "prompt-textarea",
+    "send-button",
+    "stop-button",
+    "assistant-message",
+    "composer-root",
+    "composer-menu-button",
+    "composer-menu",
+    "composer-menu-item",
+    "chat-mode-button",
+    "chat-mode-menu",
+    "chat-mode-option",
+    "chat-mode-active",
+    "research-mode-button",
+    "research-mode-menu",
+    "research-mode-option",
+    "research-mode-active",
+    "research-export-button",
+    "research-export-menu",
+    "research-export-markdown-option"
+  ],
+  "exemptionIds": [
+    "attachment-native-file-picker",
+    "response-temporal-stability"
+  ]
+}
