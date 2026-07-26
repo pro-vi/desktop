@@ -18,6 +18,8 @@ function trimOrNull(value) {
 export function normalizeChatGptModeIntent(value, { fallback = DEFAULT_CHAT_MODE_INTENT } = {}) {
   const raw = String(value || '').trim().toLowerCase();
   const normalized = raw.replace(/[^a-z0-9]+/g, '');
+  // Explicit opt-out: send without touching the mode picker (no fallback).
+  if (normalized === 'none' || normalized === 'off' || normalized === 'skip') return null;
   if (normalized === 'extendedpro' || normalized === 'pro' || normalized === 'extended') return 'extended-pro';
   if (normalized === 'thinking' || normalized === 'reasoning') return 'thinking';
   if (normalized === 'instant' || normalized === 'fast') return 'instant';

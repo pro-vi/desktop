@@ -1,0 +1,79 @@
+[
+  {
+    "claim_id": "C-001",
+    "claim": "The current ChatGPT Deep Research product still produces citation-bearing fullscreen reports and supports downloads in Markdown, Word, and PDF.",
+    "status": "supported",
+    "supporting_sources": [
+      "web:help-openai-com-en-articles-10500283-deep-research-in-chatgpt"
+    ],
+    "contradicting_sources": [],
+    "confidence": "high"
+  },
+  {
+    "claim_id": "C-002",
+    "claim": "The ChatGPT model/mode surface has changed recently: OpenAI's June 2026 release notes use Pro Standard and Pro Extended labels, and GPT-5.2 ChatGPT conversations moved forward to GPT-5.5.",
+    "status": "supported",
+    "supporting_sources": [
+      "web:help-openai-com-en-articles-6825453-chatgpt-release-notes"
+    ],
+    "contradicting_sources": [],
+    "confidence": "high"
+  },
+  {
+    "claim_id": "C-003",
+    "claim": "Agentify's ChatGPT Deep Research path is implemented and locally tested: it exposes an async MCP tool, activates Deep Research through UI controls, waits with research-specific long-running patterns, and exports Markdown reports.",
+    "status": "supported",
+    "supporting_sources": [
+      "manual:users-provi-development-setup-agentify-desktop-chatgpt-controller-mjs",
+      "manual:users-provi-development-setup-agentify-desktop-selectors-json",
+      "manual:users-provi-development-setup-agentify-desktop-tests-chatgpt-controller-test-mjs"
+    ],
+    "contradicting_sources": [],
+    "confidence": "high"
+  },
+  {
+    "claim_id": "C-004",
+    "claim": "Agentify is not fully up to date with current ChatGPT naming: selection can likely recognize Pro Extended because labels beginning with Pro map to extended-pro, but selectors, display labels, docs, and one thinking-banner regex still preserve older Extended Pro assumptions.",
+    "status": "supported",
+    "supporting_sources": [
+      "web:help-openai-com-en-articles-6825453-chatgpt-release-notes",
+      "manual:users-provi-development-setup-agentify-desktop-chatgpt-ui-primitives-mjs",
+      "manual:users-provi-development-setup-agentify-desktop-chatgpt-controller-mjs",
+      "manual:users-provi-development-setup-agentify-desktop-selectors-json"
+    ],
+    "contradicting_sources": [],
+    "confidence": "medium"
+  },
+  {
+    "claim_id": "C-005",
+    "claim": "Community sentiment on ChatGPT/GPT Pro for deep research-style work is mixed: some users praise GPT-5.5/ChatGPT for broad exploration and thorough deep research reports, while others report confusing Pro limits, inconsistent quality, or prefer Claude for specific professional work.",
+    "status": "mixed",
+    "supporting_sources": [
+      "reddit:1u80b7p",
+      "reddit:1uj1tie",
+      "reddit:1uhs7wg",
+      "reddit:1tkhp7a",
+      "reddit:1ubsntk",
+      "reddit:1ulyll7"
+    ],
+    "contradicting_sources": [],
+    "confidence": "medium"
+  },
+  {
+    "claim_id": "C-006",
+    "claim": "Given reliable Extended Pro access, a full Deep Research automation rebuild is not the best use of effort; the worthwhile work is a small compatibility hardening pass plus a live smoke test if Agentify keeps exposing agentify_research.",
+    "status": "supported",
+    "supporting_sources": [
+      "web:help-openai-com-en-articles-10500283-deep-research-in-chatgpt",
+      "web:help-openai-com-en-articles-6825453-chatgpt-release-notes",
+      "manual:users-provi-development-setup-agentify-desktop-chatgpt-controller-mjs",
+      "manual:users-provi-development-setup-agentify-desktop-chatgpt-ui-primitives-mjs",
+      "reddit:1u80b7p",
+      "reddit:1uj1tie",
+      "reddit:1tkhp7a",
+      "reddit:1ubsntk"
+    ],
+    "contradicting_sources": [],
+    "confidence": "medium"
+  }
+]

@@ -1,0 +1,35 @@
+[
+  {
+    "name": "web",
+    "health": "degraded",
+    "authority_tier": "mixed",
+    "preferred_method": "external web_search or CLI-recorded search results",
+    "fallback_method": "manual URL recording",
+    "omission_policy": "Report budget exhaustion or unavailable search summaries."
+  },
+  {
+    "name": "hn_algolia",
+    "health": "healthy",
+    "authority_tier": "community",
+    "preferred_method": "https://hn.algolia.com/api/v1/search and /items/<id>",
+    "fallback_method": "site:news.ycombinator.com/item search through external web search",
+    "omission_policy": "Report query set and fetched item IDs.",
+    "checked_at": "2026-07-04T05:19:49.821Z"
+  },
+  {
+    "name": "reddit",
+    "health": "healthy",
+    "authority_tier": "community",
+    "preferred_method": "Reddit OAuth via oauth.reddit.com when configured; anonymous public JSON/RSS fallback",
+    "fallback_method": "external site:reddit.com search result recording",
+    "omission_policy": "Report degraded lane on 403, empty fallback, parse failure, or comment-fetch failure.",
+    "checked_at": "2026-07-04T05:19:50.602Z"
+  },
+  {
+    "name": "manual",
+    "health": "healthy",
+    "authority_tier": "mixed",
+    "preferred_method": "explicit source URL recording",
+    "omission_policy": "Report manually supplied sources as user-provided leads."
+  }
+]

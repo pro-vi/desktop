@@ -18,6 +18,13 @@ test('chatgpt-mode-intent: normalizes supported aliases', () => {
   assert.equal(normalizeChatGptModeIntent('unknown', { fallback: null }), null);
 });
 
+test('chatgpt-mode-intent: none is an explicit opt-out that skips fallback', () => {
+  assert.equal(normalizeChatGptModeIntent('none', { fallback: 'thinking' }), null);
+  assert.equal(normalizeChatGptModeIntent(' None ', { fallback: 'extended-pro' }), null);
+  assert.equal(normalizeChatGptModeIntent('off', { fallback: 'thinking' }), null);
+  assert.equal(resolveChatGptImageProfile({ modeIntent: 'none', settings: { defaultImageModeIntent: 'thinking' } }).modeIntent, null);
+});
+
 test('chatgpt-mode-intent: normalizes supported model aliases', () => {
   assert.equal(normalizeChatGptModelIntent('gpt 5.5 pro'), 'gpt-5.5-pro');
   assert.equal(normalizeChatGptModelIntent('5.5'), 'gpt-5.5-pro');

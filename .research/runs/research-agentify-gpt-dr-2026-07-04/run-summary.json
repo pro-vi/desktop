@@ -1,0 +1,83 @@
+{
+  "run_id": "research-agentify-gpt-dr-2026-07-04",
+  "topic": "Is Agentify Desktop's ChatGPT Deep Research path still up to date, and if stale is it worth fixing when Extended Pro access is reliable?",
+  "created_at": "2026-07-04T05:19:35.080Z",
+  "completed_at": "2026-07-04T05:28:34.925Z",
+  "validation_status": "pass",
+  "lanes": [
+    {
+      "name": "web",
+      "health": "degraded",
+      "authority_tier": "mixed",
+      "preferred_method": "external web_search or CLI-recorded search results",
+      "fallback_method": "manual URL recording",
+      "omission_policy": "Report budget exhaustion or unavailable search summaries."
+    },
+    {
+      "name": "hn_algolia",
+      "health": "healthy",
+      "authority_tier": "community",
+      "preferred_method": "https://hn.algolia.com/api/v1/search and /items/<id>",
+      "fallback_method": "site:news.ycombinator.com/item search through external web search",
+      "omission_policy": "Report query set and fetched item IDs.",
+      "checked_at": "2026-07-04T05:19:49.821Z"
+    },
+    {
+      "name": "reddit",
+      "health": "healthy",
+      "authority_tier": "community",
+      "preferred_method": "Reddit OAuth via oauth.reddit.com when configured; anonymous public JSON/RSS fallback",
+      "fallback_method": "external site:reddit.com search result recording",
+      "omission_policy": "Report degraded lane on 403, empty fallback, parse failure, or comment-fetch failure.",
+      "checked_at": "2026-07-04T05:19:50.602Z"
+    },
+    {
+      "name": "manual",
+      "health": "healthy",
+      "authority_tier": "mixed",
+      "preferred_method": "explicit source URL recording",
+      "omission_policy": "Report manually supplied sources as user-provided leads."
+    }
+  ],
+  "source_counts_by_lane": {
+    "reddit": 6,
+    "hn_algolia": 2,
+    "web": 4,
+    "manual": 4
+  },
+  "source_counts_by_tier": {
+    "community": 8,
+    "mixed": 8
+  },
+  "claim_counts_by_status": {
+    "supported": 5,
+    "mixed": 1
+  },
+  "artifact_paths": [
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/hn-item-45364393.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/hn-item-46966770.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/reddit-oauth-thread-reddit-1tkhp7a-0.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/reddit-oauth-thread-reddit-1u80b7p-0.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/reddit-oauth-thread-reddit-1ubsntk-0.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/reddit-oauth-thread-reddit-1uhs7wg-0.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/reddit-oauth-thread-reddit-1uj1tie-0.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/data/reddit-oauth-thread-reddit-1ulyll7-0.json",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/agentify-local-code-capture-1.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/agentify-local-code-capture-2.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/agentify-local-code-capture-3.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/agentify-local-code-capture-4.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/openai-chatgpt-release-notes-capture-1.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/openai-chatgpt-release-notes-capture-2.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/openai-deep-research-help-capture-1.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/openai-gpt-5-2-capture-1.md",
+    ".research/runs/research-agentify-gpt-dr-2026-07-04/incoming/openai-introducing-deep-research-capture-1.md"
+  ],
+  "acquisition_counts_by_status": {
+    "downloaded": 8
+  },
+  "acquisition_counts_by_method": {
+    "manual_ingest": 8
+  },
+  "unresolved_acquisitions": [],
+  "unresolved_threads": []
+}

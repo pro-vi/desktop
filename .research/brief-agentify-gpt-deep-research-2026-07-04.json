@@ -1,0 +1,27 @@
+{
+  "question": "Is Agentify Desktop's ChatGPT Deep Research path still up to date, and if stale is it worth fixing when Extended Pro access is reliable?",
+  "scope": "Assess the local Agentify Desktop ChatGPT Deep Research implementation against current public ChatGPT/OpenAI Deep Research behavior and current user sentiment. Compare practical value versus the already-working Extended Pro mode path. Focus on whether to invest in fixing/maintaining the Deep Research automation path, not on implementing changes in this run.",
+  "freshness": "12 months",
+  "source_preferences": [
+    "Official OpenAI/ChatGPT docs, release notes, help center, or product pages for product behavior and availability claims",
+    "Agentify Desktop local source and tests for implementation claims",
+    "Reddit and Hacker News for community sentiment, complaints, and practical usage reports only"
+  ],
+  "exclusions": [
+    "Do not cite community comments as factual authority without official corroboration",
+    "Do not rely on private ChatGPT UI state unless verified locally",
+    "Do not spend X/Twitter quota"
+  ],
+  "budget": {
+    "description": "One focused sweep: local code review plus official web facts plus Reddit/HN sentiment.",
+    "max_external_queries": 10
+  },
+  "output_contract": [
+    "Direct recommendation",
+    "Current local path state",
+    "Current product assumptions",
+    "People-say summary",
+    "Whether fixing is worth it",
+    "Caveats and validation/coverage notes"
+  ]
+}

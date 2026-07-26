@@ -1,0 +1,34 @@
+[
+  {
+    "url": "https://help.openai.com/en/articles/10500283-deep-research-in-chatgpt",
+    "title": "Deep research in ChatGPT",
+    "snippet": "OpenAI Help Center says completed Deep Research opens in a fullscreen report view with table of contents, sources used, activity history, and downloads in Markdown, Word, and PDF.",
+    "lane": "web",
+    "query": "ChatGPT Deep Research OpenAI help center download formats fullscreen report",
+    "retrieval_method": "external_web_search"
+  },
+  {
+    "url": "https://help.openai.com/en/articles/6825453-chatgpt-release-notes",
+    "title": "ChatGPT Release Notes",
+    "snippet": "OpenAI Help Center release notes include Deep Research changes such as export to PDF for Plus/Pro/Team, connectors, and the March 26 2026 removal of legacy deep research mode.",
+    "lane": "web",
+    "query": "ChatGPT release notes Deep Research legacy mode export PDF connectors",
+    "retrieval_method": "external_web_search"
+  },
+  {
+    "url": "https://openai.com/index/introducing-deep-research/",
+    "title": "Introducing deep research",
+    "snippet": "OpenAI's launch post describes Deep Research as an agentic ChatGPT capability that conducts multi-step internet research over tens of minutes for complex tasks.",
+    "lane": "web",
+    "query": "OpenAI introducing deep research ChatGPT agentic capability",
+    "retrieval_method": "external_web_search"
+  },
+  {
+    "url": "https://openai.com/index/introducing-gpt-5-2/",
+    "title": "Introducing GPT-5.2",
+    "snippet": "OpenAI says GPT-5.2 Instant, Thinking, and Pro rolled out in ChatGPT starting with paid plans; GPT-5.2 Thinking and Pro target deeper, more reliable complex work.",
+    "lane": "web",
+    "query": "OpenAI GPT-5.2 Thinking Pro ChatGPT availability complex work",
+    "retrieval_method": "external_web_search"
+  }
+]

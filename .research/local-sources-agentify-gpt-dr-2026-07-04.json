@@ -1,0 +1,34 @@
+[
+  {
+    "url": "file:///Users/provi/Development/_setup/agentify-desktop/chatgpt-controller.mjs",
+    "title": "Agentify ChatGPT controller",
+    "snippet": "Implements Deep Research activation, long wait, and Markdown export flow; also contains thinking-state detection for long ChatGPT generations.",
+    "lane": "manual",
+    "query": "Agentify ChatGPT Deep Research controller implementation",
+    "retrieval_method": "local_code_review"
+  },
+  {
+    "url": "file:///Users/provi/Development/_setup/agentify-desktop/chatgpt-ui-primitives.mjs",
+    "title": "Agentify ChatGPT UI primitives",
+    "snippet": "Maps ChatGPT mode/model labels to Agentify intents. Extended Pro intent accepts labels beginning with Pro, which covers Pro Extended selection, but metadata still names the intent Extended Pro.",
+    "lane": "manual",
+    "query": "Agentify ChatGPT mode label mapping Pro Extended",
+    "retrieval_method": "local_code_review"
+  },
+  {
+    "url": "file:///Users/provi/Development/_setup/agentify-desktop/selectors.json",
+    "title": "Agentify selectors",
+    "snippet": "Selector registry includes ChatGPT research mode controls, Deep Research option detection, and export/download/Markdown controls.",
+    "lane": "manual",
+    "query": "Agentify Deep Research selectors",
+    "retrieval_method": "local_code_review"
+  },
+  {
+    "url": "file:///Users/provi/Development/_setup/agentify-desktop/tests/chatgpt-controller.test.mjs",
+    "title": "Agentify ChatGPT controller tests",
+    "snippet": "Tests include Deep Research activation failure, mutex behavior, report opening/export, nested report controls, nested text fallback, and Markdown download hook.",
+    "lane": "manual",
+    "query": "Agentify Deep Research controller tests",
+    "retrieval_method": "local_code_review"
+  }
+]

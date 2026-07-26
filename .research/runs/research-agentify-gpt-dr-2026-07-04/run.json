@@ -1,0 +1,9 @@
+{
+  "run_id": "research-agentify-gpt-dr-2026-07-04",
+  "topic": "Is Agentify Desktop's ChatGPT Deep Research path still up to date, and if stale is it worth fixing when Extended Pro access is reliable?",
+  "created_at": "2026-07-04T05:19:35.080Z",
+  "root_dir": "/Users/provi/Development/_setup/agentify-desktop",
+  "artifact_dir": ".research/runs/research-agentify-gpt-dr-2026-07-04",
+  "status": "finalized",
+  "finalized_at": "2026-07-04T05:28:34.925Z"
+}
