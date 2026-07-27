@@ -534,6 +534,254 @@ export class ChatGPTController {
     return text;
   }
 
+  async readConversationText({ maxChars = 200_000 } = {}) {
+    const cap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
+    const captured = await this.#eval(`(async () => {
+      const cap = ${cap};
+      const messageSelector = '[data-message-author-role]';
+      const clean = (value) => String(value || '')
+        .replace(/\\u0000/g, '')
+        .replace(/\\s+\\n/g, '\\n')
+        .trim();
+      const displayRole = (role) => role === 'assistant' ? 'Assistant' : role === 'user' ? 'User' : role;
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const settle = async () => await wait(120);
+      const readMessages = () => Array.from(document.querySelectorAll(messageSelector))
+        .map((node) => {
+          const role = clean(node.getAttribute('data-message-author-role')).toLowerCase() || 'unknown';
+          const text = clean(node.innerText) || clean(node.textContent);
+          const owner = node.closest('[data-message-id]');
+          const messageId = clean(
+            node.getAttribute('data-message-id') ||
+            owner?.getAttribute('data-message-id') ||
+            node.getAttribute('data-testid') ||
+            owner?.getAttribute('data-testid')
+          );
+          return {
+            role,
+            text,
+            identity: messageId ? 'id:' + messageId : 'text:' + role + '\\u0000' + text
+          };
+        })
+        .filter((message) => message.text);
+      const messageNodes = () => Array.from(document.querySelectorAll(messageSelector));
+      const findScroller = () => {
+        const firstMessage = messageNodes()[0] || null;
+        const candidates = [];
+        const seen = new Set();
+        const add = (node) => {
+          if (!node || seen.has(node)) return;
+          seen.add(node);
+          candidates.push(node);
+        };
+        for (let node = firstMessage; node && node !== document.documentElement; node = node.parentElement) add(node);
+        add(document.querySelector('main'));
+        add(document.scrollingElement);
+        add(document.documentElement);
+        add(document.body);
+        const ranked = candidates
+          .filter((node) => Number.isFinite(node.scrollHeight) && Number.isFinite(node.clientHeight) && node.clientHeight > 32)
+          .map((node) => {
+            const overflow = node.scrollHeight - node.clientHeight;
+            const containsMessage = !!firstMessage && node.contains(firstMessage);
+            const messageCount = node.querySelectorAll?.(messageSelector).length || 0;
+            const overflowY = String(getComputedStyle(node).overflowY || '').toLowerCase();
+            const isDocumentScroller = node === document.scrollingElement || node === document.documentElement || node === document.body;
+            const acceptsVerticalScroll = isDocumentScroller || /auto|scroll|overlay/.test(overflowY);
+            return {
+              node,
+              overflow,
+              score: (overflow > 8 && acceptsVerticalScroll ? 1_000_000 : 0) + (containsMessage ? 10_000 : 0) + (messageCount * 100) + Math.min(node.clientHeight, 2_000) * 1_000 + Math.max(0, overflow)
+            };
+          })
+          .sort((left, right) => right.score - left.score);
+        const movable = ranked.find(({ node, overflow }) => {
+          if (overflow <= 1) return false;
+          const previousTop = node.scrollTop;
+          node.scrollTop = Math.min(previousTop + 1, Math.max(0, node.scrollHeight - node.clientHeight));
+          const moved = node.scrollTop !== previousTop;
+          node.scrollTop = previousTop;
+          return moved;
+        });
+        if (movable) return movable.node;
+
+        const windowScroller = {
+          get scrollTop() {
+            return Math.max(window.scrollY || 0, document.documentElement.scrollTop || 0, document.body?.scrollTop || 0);
+          },
+          set scrollTop(value) {
+            window.scrollTo(0, Math.max(0, Number(value) || 0));
+          },
+          get scrollHeight() {
+            return Math.max(document.documentElement.scrollHeight || 0, document.body?.scrollHeight || 0);
+          },
+          get clientHeight() {
+            return Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+          }
+        };
+        if (windowScroller.scrollHeight - windowScroller.clientHeight > 1) {
+          const previousTop = windowScroller.scrollTop;
+          windowScroller.scrollTop = Math.min(previousTop + 1, windowScroller.scrollHeight - windowScroller.clientHeight);
+          const moved = windowScroller.scrollTop !== previousTop;
+          windowScroller.scrollTop = previousTop;
+          if (moved) return windowScroller;
+        }
+        return ranked.every(({ overflow }) => overflow <= 1) ? ranked[0]?.node || null : null;
+      };
+      const transcript = [];
+      const seenMessages = new Set();
+      const capture = ({ prepend = false } = {}) => {
+        const fresh = [];
+        for (const message of readMessages()) {
+          if (seenMessages.has(message.identity)) continue;
+          seenMessages.add(message.identity);
+          fresh.push(message);
+        }
+        if (prepend) transcript.unshift(...fresh);
+        else transcript.push(...fresh);
+        return fresh.length;
+      };
+      const initialMessages = readMessages();
+      if (!initialMessages.length) {
+        return {
+          text: '',
+          complete: false,
+          truncated: true,
+          reason: 'conversation_messages_not_found',
+          messageCount: 0,
+          scrollPasses: 0
+        };
+      }
+      const scroller = findScroller();
+      if (!scroller) {
+        capture();
+        let complete = false;
+        let reason = 'conversation_scroller_not_found';
+        let scrollPasses = 0;
+        let stillPasses = 0;
+        for (; scrollPasses < 200; scrollPasses += 1) {
+          const firstMessage = messageNodes()[0];
+          if (!firstMessage) {
+            reason = 'conversation_messages_not_found';
+            break;
+          }
+          const beforeTop = firstMessage.getBoundingClientRect().top;
+          firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
+          await settle();
+          const freshCount = capture({ prepend: true });
+          const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
+          const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
+          if (freshCount > 0) {
+            stillPasses = 0;
+            continue;
+          }
+          if (!moved) {
+            complete = true;
+            reason = null;
+            break;
+          }
+          stillPasses += 1;
+          if (stillPasses >= 3) {
+            reason = 'conversation_scroll_stalled';
+            break;
+          }
+        }
+        if (scrollPasses >= 200) reason = 'conversation_scroll_limit_reached';
+        const fullText = transcript
+          .map((message) => displayRole(message.role) + '\\n' + message.text)
+          .join('\\n\\n');
+        if (fullText.length > cap) {
+          complete = false;
+          reason = 'max_chars';
+        }
+        return {
+          text: fullText.slice(0, cap),
+          complete,
+          truncated: !complete,
+          reason,
+          messageCount: transcript.length,
+          scrollPasses
+        };
+      }
+
+      const originalTop = scroller.scrollTop;
+      let complete = true;
+      let reason = null;
+      let scrollPasses = 0;
+      const captureStartedAt = performance.now();
+      try {
+        scroller.scrollTop = 0;
+        await settle();
+        capture();
+
+        const maxPasses = 200;
+        for (; scrollPasses < maxPasses; scrollPasses += 1) {
+          if (performance.now() - captureStartedAt >= 45_000) {
+            complete = false;
+            reason = 'conversation_capture_timeout';
+            break;
+          }
+          const top = scroller.scrollTop;
+          const maximum = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+          if (top >= maximum - 1) {
+            await settle();
+            capture();
+            break;
+          }
+          const step = Math.max(240, Math.floor(scroller.clientHeight * 0.8));
+          scroller.scrollTop = Math.min(maximum, top + step);
+          await settle();
+          capture();
+          if (scroller.scrollTop <= top && scroller.scrollHeight - scroller.clientHeight > top + 1) {
+            complete = false;
+            reason = 'conversation_scroll_stalled';
+            break;
+          }
+        }
+        if (scrollPasses >= maxPasses) {
+          complete = false;
+          reason = 'conversation_scroll_limit_reached';
+        }
+      } finally {
+        scroller.scrollTop = originalTop;
+      }
+
+      const fullText = transcript
+        .map((message) => displayRole(message.role) + '\\n' + message.text)
+        .join('\\n\\n');
+      if (fullText.length > cap) {
+        complete = false;
+        reason = 'max_chars';
+      }
+      return {
+        text: fullText.slice(0, cap),
+        complete,
+        truncated: !complete,
+        reason,
+        messageCount: transcript.length,
+        scrollPasses
+      };
+    })()`);
+    if (!captured || typeof captured !== 'object') {
+      return {
+        text: '',
+        complete: false,
+        truncated: true,
+        reason: 'conversation_capture_invalid',
+        messageCount: 0,
+        scrollPasses: 0
+      };
+    }
+    return {
+      text: String(captured.text || ''),
+      complete: captured.complete === true,
+      truncated: captured.truncated === true,
+      reason: captured.reason ? String(captured.reason) : null,
+      messageCount: Math.max(0, Number(captured.messageCount) || 0),
+      scrollPasses: Math.max(0, Number(captured.scrollPasses) || 0)
+    };
+  }
+
   async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {
     const normalizedIntent = String(intent || '').trim().toLowerCase();
     if (!normalizedIntent) return null;

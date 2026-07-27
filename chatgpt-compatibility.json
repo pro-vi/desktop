@@ -1787,13 +1787,21 @@
       "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
       "selector": "textarea"
     },
-    {
-      "id": "controller-dom-041",
-      "capabilityId": "composer",
-      "kind": "dependency",
-      "dependency": "static-selector-041",
-      "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
-      "selector": "textarea, input"
-    }
-  ]
+  {
+    "id": "controller-dom-041",
+    "capabilityId": "composer",
+    "kind": "dependency",
+    "dependency": "static-selector-041",
+    "reason": "provider-visible behavioral postcondition candidate selector retained as an explicit controller exemption",
+    "selector": "textarea, input"
+  },
+  {
+    "id": "controller-dom-042",
+    "capabilityId": "response",
+    "kind": "dependency",
+    "dependency": "static-selector-042",
+    "reason": "provider-visible conversation transcript capture uses a stable message identifier for virtualized-turn de-duplication",
+    "selector": "[data-message-id]"
+  }
+]
 }

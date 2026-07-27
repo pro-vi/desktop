@@ -250,6 +250,34 @@ registerTool(
 );
 
 registerTool(
+  'agentify_read_conversation',
+  {
+    description:
+      'Read the complete ChatGPT conversation in the active tab. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript.',
+    inputSchema: {
+      model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT for complete conversation capture.'),
+      tabId: z.string().optional().describe('Tab/session id to use.'),
+      key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
+      maxChars: z.number().optional().describe('Maximum transcript characters to return.')
+    }
+  },
+  async ({ model, tabId, key, maxChars }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/read-conversation',
+      body: { model, tabId, key, maxChars: maxChars || 200_000 }
+    });
+    return {
+      content: [{ type: 'text', text: data.text || '' }],
+      structuredContent: data,
+      isError: data.complete === false && data.reason !== 'max_chars'
+    };
+  }
+);
+
+registerTool(
   'agentify_navigate',
   {
     description: 'Navigate the Agentify Desktop browser window to a URL (local UI automation).',

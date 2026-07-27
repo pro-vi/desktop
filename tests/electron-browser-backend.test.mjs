@@ -12,12 +12,16 @@ class MockBrowserWindow {
     this.closed = false;
     this.minimized = false;
     this.debuggerAttached = false;
+    this.backgroundThrottling = null;
     this.listeners = new Map();
     this.webContentsListeners = new Map();
     this.sessionListeners = new Map();
     this.webContents = {
       isDestroyed: () => this.destroyed,
       setUserAgent: () => {},
+      setBackgroundThrottling: (enabled) => {
+        this.backgroundThrottling = enabled;
+      },
       insertText: async () => {},
       executeJavaScript: async () => null,
       getURL: () => 'https://chatgpt.com/',
@@ -158,6 +162,24 @@ test('electron-browser-backend: createSession destroys window if loadURL fails',
     /load_failed/
   );
   assert.equal(createdWindow?.destroyed, true);
+});
+
+test('electron-browser-backend: createSession keeps managed tabs responsive while unfocused', async () => {
+  let createdWindow = null;
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      createdWindow = this;
+    }
+
+    async loadURL() {
+      return true;
+    }
+  }
+
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  await backend.createSession({ url: 'https://chatgpt.com/', show: false });
+  assert.equal(createdWindow?.backgroundThrottling, false);
 });
 
 test('electron-browser-backend: dispose closes tracked windows', async () => {

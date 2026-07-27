@@ -2606,6 +2606,65 @@ test('http-api: operations run through controller.runExclusive when available', 
   assert.deepEqual(calls, ['navigate', 'ensureReady', 'query', 'readPageText', 'downloadLastAssistantImages']);
 });
 
+test('http-api: read-conversation exposes complete transcript capture through the exclusive controller', async (t) => {
+  let inExclusive = false;
+  let received = null;
+  const controller = {
+    runExclusive: async (fn) => {
+      inExclusive = true;
+      try {
+        return await fn();
+      } finally {
+        inExclusive = false;
+      }
+    },
+    readConversationText: async (args) => {
+      assert.equal(inExclusive, true);
+      received = args;
+      return {
+        text: 'User\nOne\n\nAssistant\nTwo',
+        complete: true,
+        truncated: false,
+        reason: null,
+        messageCount: 2,
+        scrollPasses: 3
+      };
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: '/tmp',
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { maxChars: 500 }
+  });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(received, { maxChars: 500 });
+  assert.equal(data.ok, true);
+  assert.equal(data.tabId, 't0');
+  assert.equal(data.complete, true);
+  assert.equal(data.text, 'User\nOne\n\nAssistant\nTwo');
+});
+
 test('http-api: query packs context paths before forwarding to controller', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-context-'));
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');

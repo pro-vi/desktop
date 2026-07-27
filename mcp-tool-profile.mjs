@@ -2,6 +2,7 @@ const CORE_TOOLS = [
   'agentify_query',
   'agentify_research',
   'agentify_read_page',
+  'agentify_read_conversation',
   'agentify_status',
   'agentify_stop_query',
   'agentify_list_runs',
@@ -14,6 +15,7 @@ export const MCP_TOOL_PROFILES = Object.freeze({
   core: Object.freeze(CORE_TOOLS),
   browser: Object.freeze([
     'agentify_read_page',
+    'agentify_read_conversation',
     'agentify_navigate',
     'agentify_ensure_ready',
     'agentify_show',

@@ -552,10 +552,10 @@ Prompt:
 Prompt:
 "Open key `incident-prod-api`, send `./incident/error.log` and `./incident/dashboard.png`, and produce: likely root cause, 30-minute hotfix plan, rollback, and validation checklist."
 
-Use explicit tool calls (`agentify_query`, `agentify_read_page`, etc.) when you need deterministic/reproducible runs or when debugging tool selection.
+Use explicit tool calls (`agentify_query`, `agentify_read_page`, `agentify_read_conversation`, etc.) when you need deterministic/reproducible runs or when debugging tool selection.
 
 ## How to use (practical)
-- **Use ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok normally (manual):** write a plan/spec in the UI, then in your MCP client call `agentify_read_page` to pull the transcript into your workflow.
+- **Use ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok normally (manual):** write a plan/spec in the UI, then in your MCP client call `agentify_read_page` to pull the visible page text into your workflow. For a complete long ChatGPT thread, call `agentify_read_conversation`; it scrolls through virtualized turns and reports whether capture is complete.
 - **Drive ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok from your MCP client:** call `agentify_ensure_ready`, then `agentify_query` with a `prompt`. Use a stable `key` per project to keep parallel jobs isolated.
 - **Parallel jobs:** create/ensure a tab per project with `agentify_tab_create(key: ...)`, then use that `key` for `agentify_query`, `agentify_read_page`, and `agentify_download_images`.
 - **Upload files:** pass local paths via `attachments` to `agentify_query` or `agentify_image_gen` (best-effort; depends on the site UI).

@@ -3043,6 +3043,57 @@ test('chatgpt-controller: readPageText falls back to nested deep research conten
   assert.match(text, /RAGBench and TRACe/);
 });
 
+test('chatgpt-controller: readConversationText returns the complete virtualized transcript', async () => {
+  const evaluations = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      evaluations.push(js);
+      return {
+        text: 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nFinal turn',
+        complete: true,
+        truncated: false,
+        reason: null,
+        messageCount: 3,
+        scrollPasses: 4
+      };
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/virtualized-thread';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+  assert.deepEqual(result, {
+    text: 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nFinal turn',
+    complete: true,
+    truncated: false,
+    reason: null,
+    messageCount: 3,
+    scrollPasses: 4
+  });
+  assert.equal(evaluations.length, 1);
+  assert.match(evaluations[0], /data-message-author-role/);
+  assert.match(evaluations[0], /scrollTop/);
+  assert.match(evaluations[0], /const cap = 500/);
+});
+
 test('chatgpt-controller: research export uses native download hook for markdown report', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-export-'));
   t.after(async () => {

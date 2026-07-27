@@ -11,7 +11,7 @@ test('mcp tool profiles default to the full compatibility surface', () => {
   const resolved = resolveMcpToolProfile({ argv: [], env: {} });
   assert.deepEqual(resolved.profiles, ['full']);
   assert.deepEqual(new Set(resolved.tools), new Set(ALL_MCP_TOOL_NAMES));
-  assert.equal(resolved.tools.length, 34);
+  assert.equal(resolved.tools.length, 35);
 });
 
 test('mcp tool profiles expose a narrow core workflow', () => {
@@ -22,6 +22,7 @@ test('mcp tool profiles expose a narrow core workflow', () => {
     'agentify_query',
     'agentify_research',
     'agentify_read_page',
+    'agentify_read_conversation',
     'agentify_status',
     'agentify_stop_query',
     'agentify_list_runs',
@@ -37,6 +38,7 @@ test('mcp tool profiles compose additively from argv or environment', () => {
   assert.ok(argvResolved.tools.includes('agentify_query'));
   assert.ok(argvResolved.tools.includes('agentify_navigate'));
   assert.equal(argvResolved.tools.filter((name) => name === 'agentify_read_page').length, 1);
+  assert.equal(argvResolved.tools.filter((name) => name === 'agentify_read_conversation').length, 1);
 
   const envResolved = resolveMcpToolProfile({ argv: [], env: { AGENTIFY_MCP_TOOL_PROFILE: 'context,admin' } });
   assert.deepEqual(envResolved.profiles, ['context', 'admin']);

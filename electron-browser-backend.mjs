@@ -383,6 +383,9 @@ export class ElectronBrowserBackend {
       }
     });
     trackWindow(this.windows, win);
+    try {
+      win.webContents.setBackgroundThrottling(false);
+    } catch {}
     if (this.userAgent) {
       try {
         win.webContents.setUserAgent(this.userAgent);
@@ -391,6 +394,9 @@ export class ElectronBrowserBackend {
     win.webContents.on('did-create-window', (childWin) => {
       if (!childWin || childWin.isDestroyed?.()) return;
       trackWindow(this.windows, childWin);
+      try {
+        childWin.webContents.setBackgroundThrottling(false);
+      } catch {}
       if (this.userAgent) {
         try {
           childWin.webContents.setUserAgent(this.userAgent);

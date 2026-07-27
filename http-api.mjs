@@ -3586,6 +3586,19 @@ export function startHttpApi({
         return sendJson(res, 200, { ok: true, tabId, text });
       }
 
+      if (url.pathname === '/read-conversation' && req.method === 'POST') {
+        await projectsReady;
+        const body = await parseBody(req);
+        const maxChars = positiveIntOr(body.maxChars, 200_000, 1_000_000);
+        const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
+        const controller = tabs.getControllerById(tabId);
+        if (typeof controller?.readConversationText !== 'function') {
+          return sendJson(res, 501, { error: 'conversation_read_unsupported' });
+        }
+        const capture = await runExclusive(controller, async () => await controller.readConversationText({ maxChars }));
+        return sendJson(res, 200, { ok: true, tabId, ...capture });
+      }
+
       if (url.pathname === '/download-images' && req.method === 'POST') {
         const body = await parseBody(req);
         const maxImages = positiveIntOr(body.maxImages, 6, 50);
