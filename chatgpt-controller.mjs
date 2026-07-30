@@ -598,7 +598,10 @@ export class ChatGPTController {
         const movable = ranked.find(({ node, overflow }) => {
           if (overflow <= 1) return false;
           const previousTop = node.scrollTop;
-          node.scrollTop = Math.min(previousTop + 1, Math.max(0, node.scrollHeight - node.clientHeight));
+          const maximum = Math.max(0, node.scrollHeight - node.clientHeight);
+          node.scrollTop = previousTop >= maximum - 1
+            ? Math.max(0, previousTop - 1)
+            : Math.min(previousTop + 1, maximum);
           const moved = node.scrollTop !== previousTop;
           node.scrollTop = previousTop;
           return moved;
@@ -621,7 +624,10 @@ export class ChatGPTController {
         };
         if (windowScroller.scrollHeight - windowScroller.clientHeight > 1) {
           const previousTop = windowScroller.scrollTop;
-          windowScroller.scrollTop = Math.min(previousTop + 1, windowScroller.scrollHeight - windowScroller.clientHeight);
+          const maximum = windowScroller.scrollHeight - windowScroller.clientHeight;
+          windowScroller.scrollTop = previousTop >= maximum - 1
+            ? Math.max(0, previousTop - 1)
+            : Math.min(previousTop + 1, maximum);
           const moved = windowScroller.scrollTop !== previousTop;
           windowScroller.scrollTop = previousTop;
           if (moved) return windowScroller;
@@ -641,6 +647,27 @@ export class ChatGPTController {
         else transcript.push(...fresh);
         return fresh.length;
       };
+      const captureResult = ({ complete, reason, scrollPasses }) => {
+        const fullText = transcript
+          .map((message) => displayRole(message.role) + '\\n' + message.text)
+          .join('\\n\\n');
+        if (fullText.length > cap) {
+          if (complete) reason = 'max_chars';
+          complete = false;
+        }
+        if (transcript[0]?.role === 'assistant') {
+          if (complete) reason = 'leading_turn_missing';
+          complete = false;
+        }
+        return {
+          text: fullText.slice(0, cap),
+          complete,
+          truncated: !complete,
+          reason,
+          messageCount: transcript.length,
+          scrollPasses
+        };
+      };
       const initialMessages = readMessages();
       if (!initialMessages.length) {
         return {
@@ -659,6 +686,7 @@ export class ChatGPTController {
         let reason = 'conversation_scroller_not_found';
         let scrollPasses = 0;
         let stillPasses = 0;
+        let quietPasses = 0;
         for (; scrollPasses < 200; scrollPasses += 1) {
           const firstMessage = messageNodes()[0];
           if (!firstMessage) {
@@ -673,13 +701,20 @@ export class ChatGPTController {
           const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
           if (freshCount > 0) {
             stillPasses = 0;
+            quietPasses = 0;
             continue;
           }
           if (!moved) {
-            complete = true;
-            reason = null;
-            break;
+            quietPasses += 1;
+            if (quietPasses >= 4) {
+              complete = true;
+              reason = null;
+              break;
+            }
+            await wait(250 * quietPasses);
+            continue;
           }
+          quietPasses = 0;
           stillPasses += 1;
           if (stillPasses >= 3) {
             reason = 'conversation_scroll_stalled';
@@ -687,38 +722,78 @@ export class ChatGPTController {
           }
         }
         if (scrollPasses >= 200) reason = 'conversation_scroll_limit_reached';
-        const fullText = transcript
-          .map((message) => displayRole(message.role) + '\\n' + message.text)
-          .join('\\n\\n');
-        if (fullText.length > cap) {
-          complete = false;
-          reason = 'max_chars';
-        }
-        return {
-          text: fullText.slice(0, cap),
-          complete,
-          truncated: !complete,
-          reason,
-          messageCount: transcript.length,
-          scrollPasses
-        };
+        return captureResult({ complete, reason, scrollPasses });
       }
 
       const originalTop = scroller.scrollTop;
       let complete = true;
       let reason = null;
       let scrollPasses = 0;
-      const captureStartedAt = performance.now();
       try {
         scroller.scrollTop = 0;
         await settle();
         capture();
 
-        const maxPasses = 200;
-        for (; scrollPasses < maxPasses; scrollPasses += 1) {
-          if (performance.now() - captureStartedAt >= 45_000) {
+        const maxTopPasses = 60;
+        const topCaptureStartedAt = performance.now();
+        let topProven = false;
+        let stillPasses = 0;
+        let quietPasses = 0;
+        for (let topPasses = 0; topPasses < maxTopPasses; topPasses += 1) {
+          scrollPasses += 1;
+          if (performance.now() - topCaptureStartedAt >= 15_000) {
             complete = false;
-            reason = 'conversation_capture_timeout';
+            reason = reason || 'conversation_top_capture_timeout';
+            break;
+          }
+          const firstMessage = messageNodes()[0];
+          if (!firstMessage) {
+            complete = false;
+            reason = reason || 'conversation_messages_not_found';
+            break;
+          }
+          const beforeTop = firstMessage.getBoundingClientRect().top;
+          firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
+          scroller.scrollTop = 0;
+          await settle();
+          const freshCount = capture({ prepend: true });
+          const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
+          const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
+          if (freshCount > 0) {
+            stillPasses = 0;
+            quietPasses = 0;
+            continue;
+          }
+          if (!moved && scroller.scrollTop <= 1) {
+            quietPasses += 1;
+            if (quietPasses >= 4) {
+              topProven = true;
+              break;
+            }
+            await wait(250 * quietPasses);
+            continue;
+          }
+          quietPasses = 0;
+          stillPasses += 1;
+          if (stillPasses >= 3) {
+            complete = false;
+            reason = reason || 'conversation_top_scroll_stalled';
+            break;
+          }
+        }
+        if (!topProven) {
+          complete = false;
+          reason = reason || 'conversation_top_not_reached';
+        }
+
+        const maxDownwardPasses = 200;
+        const downwardCaptureStartedAt = performance.now();
+        let downwardPasses = 0;
+        for (; downwardPasses < maxDownwardPasses; downwardPasses += 1) {
+          scrollPasses += 1;
+          if (performance.now() - downwardCaptureStartedAt >= 45_000) {
+            complete = false;
+            reason = reason || 'conversation_capture_timeout';
             break;
           }
           const top = scroller.scrollTop;
@@ -734,33 +809,19 @@ export class ChatGPTController {
           capture();
           if (scroller.scrollTop <= top && scroller.scrollHeight - scroller.clientHeight > top + 1) {
             complete = false;
-            reason = 'conversation_scroll_stalled';
+            reason = reason || 'conversation_scroll_stalled';
             break;
           }
         }
-        if (scrollPasses >= maxPasses) {
+        if (downwardPasses >= maxDownwardPasses) {
           complete = false;
-          reason = 'conversation_scroll_limit_reached';
+          reason = reason || 'conversation_scroll_limit_reached';
         }
       } finally {
         scroller.scrollTop = originalTop;
       }
 
-      const fullText = transcript
-        .map((message) => displayRole(message.role) + '\\n' + message.text)
-        .join('\\n\\n');
-      if (fullText.length > cap) {
-        complete = false;
-        reason = 'max_chars';
-      }
-      return {
-        text: fullText.slice(0, cap),
-        complete,
-        truncated: !complete,
-        reason,
-        messageCount: transcript.length,
-        scrollPasses
-      };
+      return captureResult({ complete, reason, scrollPasses });
     })()`);
     if (!captured || typeof captured !== 'object') {
       return {

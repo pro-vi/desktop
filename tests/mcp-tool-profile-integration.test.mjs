@@ -48,7 +48,7 @@ async function readJsonBody(req) {
 test('mcp server tools/list exposes only the selected core profile', async () => {
   const toolDefinitions = await listedToolDefinitions('core');
   const tools = toolDefinitions.map((tool) => tool.name);
-  assert.equal(tools.length, 9);
+  assert.equal(tools.length, 10);
   assert.ok(tools.includes('agentify_query'));
   assert.ok(tools.includes('agentify_wait_run'));
   assert.equal(tools.includes('agentify_shutdown'), false);

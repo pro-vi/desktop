@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 
 import { ChatGPTController } from '../chatgpt-controller.mjs';
 
@@ -23,6 +24,131 @@ function readyState() {
       rawPromptVisible: true,
       sendVisible: true
     }
+  };
+}
+
+function virtualizedConversationPage(messages, {
+  initialStart = 0,
+  initialScrollTop = 100,
+  loadDelayMs = null,
+  loadOnMessageScroll = true,
+  scrollerMovable = true
+} = {}) {
+  let loadedStart = initialStart;
+  let scrollTop = initialScrollTop;
+  let now = 0;
+  let earlierLoadAt = null;
+  let scroller;
+
+  const scheduleEarlierMessages = () => {
+    if (loadedStart <= 0 || loadDelayMs === null || earlierLoadAt !== null) return;
+    earlierLoadAt = now + loadDelayMs;
+  };
+  const advanceClock = (ms) => {
+    now += ms;
+    if (earlierLoadAt !== null && now >= earlierLoadAt) {
+      loadedStart -= 1;
+      earlierLoadAt = null;
+    }
+  };
+
+  const nodes = messages.map(({ role, text }, index) => ({
+    innerText: text,
+    textContent: text,
+    get isConnected() {
+      return index >= loadedStart;
+    },
+    get parentElement() {
+      return scroller;
+    },
+    getAttribute(name) {
+      if (name === 'data-message-author-role') return role;
+      if (name === 'data-message-id') return `message-${index}`;
+      return null;
+    },
+    closest(selector) {
+      return selector === '[data-message-id]' ? this : null;
+    },
+    getBoundingClientRect() {
+      return { top: (index - loadedStart) * 80 };
+    },
+    scrollIntoView() {
+      scrollTop = 0;
+      if (!loadOnMessageScroll || index !== loadedStart || loadedStart <= 0) return;
+      if (loadDelayMs === null) loadedStart -= 1;
+      else scheduleEarlierMessages();
+    }
+  }));
+
+  const documentElement = {
+    clientHeight: 100,
+    scrollHeight: 100,
+    scrollTop: 0,
+    parentElement: null,
+    contains: () => true,
+    querySelectorAll: () => nodes.slice(loadedStart)
+  };
+  scroller = {
+    clientHeight: 100,
+    scrollHeight: 300,
+    parentElement: documentElement,
+    contains: () => true,
+    querySelectorAll: () => nodes.slice(loadedStart),
+    get scrollTop() {
+      return scrollTop;
+    },
+    set scrollTop(value) {
+      if (!scrollerMovable) return;
+      scrollTop = Math.max(0, Math.min(200, Number(value) || 0));
+      if (scrollTop === 0) scheduleEarlierMessages();
+    }
+  };
+  const body = {
+    clientHeight: 100,
+    scrollHeight: 100,
+    scrollTop: 0,
+    parentElement: documentElement,
+    contains: () => true,
+    querySelectorAll: () => nodes.slice(loadedStart)
+  };
+  const document = {
+    documentElement,
+    scrollingElement: documentElement,
+    body,
+    querySelector: (selector) => selector === 'main' ? scroller : null,
+    querySelectorAll: () => nodes.slice(loadedStart)
+  };
+  const window = {
+    innerHeight: 100,
+    scrollY: 0,
+    scrollTo(_x, value) {
+      this.scrollY = value;
+    }
+  };
+
+  return {
+    async navigate() {},
+    async evaluate(js) {
+      return await vm.runInNewContext(js, {
+        document,
+        window,
+        getComputedStyle: (node) => ({ overflowY: node === scroller ? 'auto' : 'visible' }),
+        performance: { now: () => now },
+        setTimeout: (callback, ms) => {
+          advanceClock(Number(ms) || 0);
+          callback();
+        }
+      });
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/virtualized-thread';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
   };
 }
 
@@ -3092,6 +3218,111 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
   assert.match(evaluations[0], /data-message-author-role/);
   assert.match(evaluations[0], /scrollTop/);
   assert.match(evaluations[0], /const cap = 500/);
+});
+
+test('chatgpt-controller: readConversationText top-anchors before scanning a virtualized transcript', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'user', text: 'First turn' },
+    { role: 'assistant', text: 'First reply' },
+    { role: 'user', text: 'Final turn' }
+  ], { initialStart: 1 });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+
+  assert.equal(result.text, 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nFinal turn');
+  assert.equal(result.complete, true);
+  assert.equal(result.truncated, false);
+  assert.equal(result.reason, null);
+  assert.equal(result.messageCount, 3);
+  assert.ok(result.scrollPasses > 2);
+});
+
+test('chatgpt-controller: readConversationText waits for delayed leading turns with a user-role surviving head', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'user', text: 'First turn' },
+    { role: 'assistant', text: 'First reply' },
+    { role: 'user', text: 'Second turn' },
+    { role: 'assistant', text: 'Second reply' }
+  ], { initialStart: 2, loadDelayMs: 400 });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+
+  assert.equal(result.text, 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nSecond turn\n\nAssistant\nSecond reply');
+  assert.equal(result.complete, true);
+  assert.equal(result.truncated, false);
+  assert.equal(result.reason, null);
+  assert.equal(result.messageCount, 4);
+});
+
+test('chatgpt-controller: readConversationText recognizes a scroller already at its bottom boundary', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'user', text: 'First turn' },
+    { role: 'assistant', text: 'First reply' },
+    { role: 'user', text: 'Second turn' },
+    { role: 'assistant', text: 'Second reply' }
+  ], {
+    initialStart: 2,
+    initialScrollTop: 200,
+    loadDelayMs: 400,
+    loadOnMessageScroll: false
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+
+  assert.equal(result.text, 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nSecond turn\n\nAssistant\nSecond reply');
+  assert.equal(result.complete, true);
+  assert.equal(result.messageCount, 4);
+});
+
+test('chatgpt-controller: readConversationText waits for delayed leading turns without a movable scroller', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'user', text: 'First turn' },
+    { role: 'assistant', text: 'First reply' },
+    { role: 'user', text: 'Second turn' },
+    { role: 'assistant', text: 'Second reply' }
+  ], { initialStart: 2, loadDelayMs: 400, scrollerMovable: false });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+
+  assert.equal(result.text, 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nSecond turn\n\nAssistant\nSecond reply');
+  assert.equal(result.complete, true);
+  assert.equal(result.messageCount, 4);
+});
+
+test('chatgpt-controller: readConversationText reports a missing leading user turn', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'assistant', text: 'Reply without its prompt' },
+    { role: 'user', text: 'Later turn' }
+  ]);
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+
+  assert.equal(result.text, 'Assistant\nReply without its prompt\n\nUser\nLater turn');
+  assert.equal(result.complete, false);
+  assert.equal(result.truncated, true);
+  assert.equal(result.reason, 'leading_turn_missing');
+  assert.equal(result.messageCount, 2);
+  assert.ok(result.scrollPasses > 1);
+});
+
+test('chatgpt-controller: readConversationText preserves max_chars over the leading-role safety net', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'assistant', text: 'Reply without its prompt' }
+  ]);
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 10 });
+
+  assert.equal(result.text, 'Assistant\n');
+  assert.equal(result.complete, false);
+  assert.equal(result.truncated, true);
+  assert.equal(result.reason, 'max_chars');
+  assert.equal(result.messageCount, 1);
 });
 
 test('chatgpt-controller: research export uses native download hook for markdown report', async (t) => {

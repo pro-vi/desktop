@@ -510,7 +510,7 @@ If you already had your client open, restart it (or start a new session) so it r
 
 ### MCP tool profiles
 
-Agentify exposes the complete 34-tool surface by default for compatibility. Coding agents usually need only the 9-tool core workflow:
+Agentify exposes the complete 35-tool surface by default for compatibility. Coding agents usually need only the 10-tool core workflow:
 
 ```bash
 node mcp-server.mjs --tool-profile core
