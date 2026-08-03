@@ -155,6 +155,10 @@ function byImportId(imports, importId) {
   return imports.find((entry) => entry.id === importId);
 }
 
+function routeObservedAt(index) {
+  return new Date(Date.parse('2026-08-01T00:00:00.000Z') + index * 1_000).toISOString();
+}
+
 test('catalog store: record and cursor publish atomically and exact replay/re-import are idempotent', async (t) => {
   const stateDir = await tempState(t, 'atomic');
   const blobs = createPrivateLibraryBlobStore({ stateDir });
@@ -451,6 +455,138 @@ test('catalog store: unavailable route observations preserve exact prior verific
     evidence: 'direct-navigation'
   });
   assert.equal(verifiedAgain.route.kind, 'verified');
+});
+
+test('catalog store: equivalent route observations refresh time without growing history', async (t) => {
+  const stateDir = await tempState(t, 'route-semantic-dedup');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = makeStore({ stateDir, blobs, randomId: () => 'route-semantic-dedup' });
+  const started = await store.beginImport(manifest('8'), assignment());
+  const prepared = await completePrepared({
+    blobs,
+    importId: started.id,
+    recordIndex: 0,
+    conversationId: 'route-semantic-thread'
+  });
+  await commitOne(store, started.id, prepared.record, { schemaVersion: 1, recordIndex: 1 });
+  const canonicalUrl = 'https://chatgpt.com/c/route-semantic-thread';
+
+  await store.verifyRoute(prepared.record.identity, {
+    canonicalUrl,
+    verifiedAt: routeObservedAt(0),
+    evidence: 'direct-navigation'
+  });
+  await store.verifyRoute(prepared.record.identity, {
+    canonicalUrl,
+    verifiedAt: routeObservedAt(1),
+    evidence: 'direct-navigation'
+  });
+  let durable = JSON.parse(await fs.readFile(store.statePath, 'utf8'));
+  assert.equal(durable.routeHistories[0].observations.length, 1);
+  assert.equal(durable.routeHistories[0].observations[0].verifiedAt, routeObservedAt(1));
+
+  await store.observeUnavailable(prepared.record.identity, {
+    observedAt: routeObservedAt(2),
+    reason: 'not-found',
+    retryable: true
+  });
+  await store.observeUnavailable(prepared.record.identity, {
+    observedAt: routeObservedAt(3),
+    reason: 'not-found',
+    retryable: true
+  });
+  durable = JSON.parse(await fs.readFile(store.statePath, 'utf8'));
+  assert.equal(durable.routeHistories[0].observations.length, 2);
+  assert.equal(durable.routeHistories[0].observations[1].observedAt, routeObservedAt(3));
+  assert.equal((await store.get(prepared.record.identity)).route.previousUrl, canonicalUrl);
+});
+
+test('catalog store: route history retains only the newest 256 semantic transitions', async (t) => {
+  const stateDir = await tempState(t, 'route-retention');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = makeStore({ stateDir, blobs, randomId: () => 'route-retention' });
+  const started = await store.beginImport(manifest('9'), assignment());
+  const prepared = await completePrepared({
+    blobs,
+    importId: started.id,
+    recordIndex: 0,
+    conversationId: 'route-retention-thread'
+  });
+  await commitOne(store, started.id, prepared.record, { schemaVersion: 1, recordIndex: 1 });
+  const canonicalUrl = 'https://chatgpt.com/c/route-retention-thread';
+
+  for (let index = 0; index < 300; index += 1) {
+    if (index % 2 === 0) {
+      await store.verifyRoute(prepared.record.identity, {
+        canonicalUrl,
+        verifiedAt: routeObservedAt(index),
+        evidence: 'direct-navigation'
+      });
+    } else {
+      await store.observeUnavailable(prepared.record.identity, {
+        observedAt: routeObservedAt(index),
+        reason: 'not-found',
+        retryable: true
+      });
+    }
+  }
+
+  const durable = JSON.parse(await fs.readFile(store.statePath, 'utf8'));
+  const observations = durable.routeHistories[0].observations;
+  assert.equal(observations.length, 256);
+  assert.equal(observations[0].verifiedAt, routeObservedAt(44));
+  assert.equal(observations.at(-1).observedAt, routeObservedAt(299));
+  assert.equal((await store.get(prepared.record.identity)).route.previousUrl, canonicalUrl);
+});
+
+test('catalog store: legacy large route history loads and compacts on the next catalog mutation', async (t) => {
+  const stateDir = await tempState(t, 'route-legacy-retention');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = makeStore({ stateDir, blobs, randomId: () => 'route-legacy-retention' });
+  const started = await store.beginImport(manifest('a'), assignment());
+  const prepared = await completePrepared({
+    blobs,
+    importId: started.id,
+    recordIndex: 0,
+    conversationId: 'route-legacy-thread'
+  });
+  await commitOne(store, started.id, prepared.record, { schemaVersion: 1, recordIndex: 1 });
+  const canonicalUrl = 'https://chatgpt.com/c/route-legacy-thread';
+  await store.verifyRoute(prepared.record.identity, {
+    canonicalUrl,
+    verifiedAt: routeObservedAt(0),
+    evidence: 'direct-navigation'
+  });
+
+  const durable = JSON.parse(await fs.readFile(store.statePath, 'utf8'));
+  durable.routeHistories[0].observations = Array.from({ length: 300 }, (_, index) => index % 2 === 0
+    ? {
+        kind: 'verified',
+        canonicalUrl,
+        verifiedAt: routeObservedAt(index),
+        evidence: 'direct-navigation'
+      }
+    : {
+        kind: 'temporarily-unavailable',
+        previousUrl: canonicalUrl,
+        observedAt: routeObservedAt(index),
+        reason: 'not-found',
+        retryable: true
+      });
+  await fs.writeFile(store.statePath, `${JSON.stringify(durable, null, 2)}\n`, { mode: 0o600 });
+
+  const restarted = makeStore({
+    stateDir,
+    blobs,
+    randomId: () => 'route-legacy-next'
+  });
+  assert.equal((await restarted.load()).routeHistories[0].observations.length, 300);
+  await restarted.beginImport(manifest('b'), assignment());
+
+  const compacted = JSON.parse(await fs.readFile(restarted.statePath, 'utf8'));
+  assert.equal(compacted.routeHistories[0].observations.length, 256);
+  assert.equal(compacted.routeHistories[0].observations[0].verifiedAt, routeObservedAt(44));
+  assert.equal(compacted.routeHistories[0].observations.at(-1).observedAt, routeObservedAt(299));
 });
 
 test('catalog store: catalog pagination is deterministic, filtered, bounded, and non-duplicating', async (t) => {

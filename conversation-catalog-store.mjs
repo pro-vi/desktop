@@ -45,6 +45,13 @@ const RECORD_KEYS = Object.freeze([
 ]);
 const ROUTE_HISTORY_KEYS = Object.freeze(['schemaVersion', 'identity', 'observations']);
 const SUSPENSION_KEYS = Object.freeze(['reason', 'observedAt']);
+// The latest route and most recent verified URL drive current behavior. Retaining
+// 256 semantic transitions leaves ample local diagnostic history while bounding
+// one repeatedly verified identity to tens of kilobytes. The parser keeps the
+// original V0 ceiling so an existing large history can load and compact on its
+// next mutation.
+const MAX_RETAINED_ROUTE_OBSERVATIONS = 256;
+const MAX_LEGACY_ROUTE_OBSERVATIONS = 100_000;
 
 function storeError(code) {
   const error = new Error(code);
@@ -183,7 +190,10 @@ function parseRouteHistory(value) {
     throw storeError('catalog_store_schema_unsupported');
   }
   const identity = parseContract(parseConversationIdentity, value.identity);
-  if (!Array.isArray(value.observations) || value.observations.length < 1 || value.observations.length > 100_000) {
+  if (
+    !Array.isArray(value.observations) || value.observations.length < 1 ||
+    value.observations.length > MAX_LEGACY_ROUTE_OBSERVATIONS
+  ) {
     throw storeError('catalog_store_corrupt_state');
   }
   const observations = value.observations.map((observation) =>
@@ -365,6 +375,46 @@ function identityRecords(state, identity) {
 
 function routeHistoryFor(state, identity) {
   return state.routeHistories.find((history) => sameConversationIdentity(history.identity, identity)) || null;
+}
+
+function sameRouteObservationSemantics(left, right) {
+  if (!left || !right || left.kind !== right.kind) return false;
+  if (left.kind === 'verified') {
+    return left.canonicalUrl === right.canonicalUrl && left.evidence === right.evidence;
+  }
+  if (left.kind === 'temporarily-unavailable') {
+    return left.previousUrl === right.previousUrl && left.reason === right.reason && left.retryable === right.retryable;
+  }
+  return false;
+}
+
+function appendRouteObservation(observations, observation) {
+  const previous = observations.at(-1) || null;
+  const next = previous && sameRouteObservationSemantics(previous, observation)
+    ? [...observations.slice(0, -1), observation]
+    : [...observations, observation];
+  return next.slice(-MAX_RETAINED_ROUTE_OBSERVATIONS);
+}
+
+function compactRouteHistories(state) {
+  let changed = false;
+  const routeHistories = state.routeHistories.map((history) => {
+    if (history.observations.length <= MAX_RETAINED_ROUTE_OBSERVATIONS) return history;
+    changed = true;
+    return {
+      ...history,
+      observations: history.observations.slice(-MAX_RETAINED_ROUTE_OBSERVATIONS)
+    };
+  });
+  return changed ? { ...state, routeHistories } : state;
+}
+
+function mostRecentVerifiedUrl(history) {
+  const verified = history?.observations.slice().reverse().find(({ kind }) => kind === 'verified');
+  if (verified) return verified.canonicalUrl;
+  const carried = history?.observations.slice().reverse()
+    .find(({ kind, previousUrl }) => kind === 'temporarily-unavailable' && previousUrl !== null);
+  return carried?.previousUrl || null;
 }
 
 function projectConversationFromRecords(records, identity, history = null) {
@@ -580,7 +630,7 @@ export function createConversationCatalogStore({
   }
 
   async function persist(candidate) {
-    const parsed = parseState({ ...candidate, revision: durableState.revision + 1 });
+    const parsed = compactRouteHistories(parseState({ ...candidate, revision: durableState.revision + 1 }));
     const bytes = encodeState(parsed);
     if (bytes.length > maxStateBytes) throw storeError('catalog_store_size_limit');
     const terminalBytes = encodeState(terminalImportProjection(parsed));
@@ -907,10 +957,10 @@ export function createConversationCatalogStore({
       const histories = durableState.routeHistories.slice();
       if (historyIndex >= 0) {
         const history = histories[historyIndex];
-        if (JSON.stringify(history.observations.at(-1)) === JSON.stringify(observation)) {
-          return clone(projectConversation(durableState, identity));
-        }
-        histories[historyIndex] = { ...history, observations: [...history.observations, observation] };
+        histories[historyIndex] = {
+          ...history,
+          observations: appendRouteObservation(history.observations, observation)
+        };
       } else {
         histories.push({
           schemaVersion: CONVERSATION_CATALOG_STORE_SCHEMA_VERSION,
@@ -936,7 +986,7 @@ export function createConversationCatalogStore({
       const historyIndex = durableState.routeHistories.findIndex((history) =>
         sameConversationIdentity(history.identity, identity));
       const current = historyIndex >= 0 ? durableState.routeHistories[historyIndex] : null;
-      const previousUrl = current?.observations.slice().reverse().find(({ kind }) => kind === 'verified')?.canonicalUrl || null;
+      const previousUrl = mostRecentVerifiedUrl(current);
       const observation = parseCatalogRoute({
         kind: 'temporarily-unavailable',
         previousUrl,
@@ -944,10 +994,10 @@ export function createConversationCatalogStore({
       }, identity);
       const histories = durableState.routeHistories.slice();
       if (current) {
-        if (JSON.stringify(current.observations.at(-1)) === JSON.stringify(observation)) {
-          return clone(projectConversation(durableState, identity));
-        }
-        histories[historyIndex] = { ...current, observations: [...current.observations, observation] };
+        histories[historyIndex] = {
+          ...current,
+          observations: appendRouteObservation(current.observations, observation)
+        };
       } else {
         histories.push({
           schemaVersion: CONVERSATION_CATALOG_STORE_SCHEMA_VERSION,
