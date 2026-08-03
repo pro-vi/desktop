@@ -128,6 +128,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + }
     // contract: S1/S2/S10 share one real and failure-injectable filesystem boundary
     // post: directories are 0700, files are 0600, writes are fsynced, and paths remain below an exact non-symlink boundary
+    // threat boundary: rejects escapes and pre-existing symlinks; V0 trusts the owning OS user and does not defend against a same-user process racing files inside the owner-only state directory
     // errors: link, mode, confinement, size, publication, replacement, and uncertain-write failures stay distinct
     // hides: temp names, hard-link publication, directory fsync portability, and platform file APIs
 ```
@@ -137,15 +138,15 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 - readConversationText({ maxChars }): Promise<LegacyConversationText>
 + captureConversation({ maxCaptureBytes }): Promise<ConversationCapture>
     // pre: active page is an owned canonical ChatGPT conversation and controller mutex is held
-    // post: complete requires generation inactive before and after capture, both transcript boundaries, and ordered-window stitching
+    // post: complete requires generation inactive before and after capture, both transcript boundaries, and passing overlap/order/gap checks; orderedWindowStitching is their derived summary flag
     // post: one provider turn container may contain multiple exact messages; preserve served DOM order + provider IDs, and fail partial on conflicting duplicates or reorder
     // post: a numeric provider-turn gap is accepted only after a bounded overlapping served-range scan observes no mapped message there; empty or malformed mapped input still fails partial
     // errors: provider transport rejects; representable incomplete states return PartialCapture
     // hides: selectors, virtualization, scroll strategy, and overlap matching
 
 + readConversationText({ maxChars }): Promise<LegacyConversationText>
-    // post: legacy text is rendered from captureConversation and owns no completeness semantics
-    // errors: preserves the existing public error surface
+    // post: legacy text is rendered from the same structured window-capture primitive, without adopting the library capture's canonical-route or compatibility-capability preconditions
+    // errors: preserves the existing public error surface and closed legacy reason vocabulary
     // hides: structured identities and snapshot storage
 ```
 
@@ -218,7 +219,9 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + }
     // pre: register identity came from an exact owned route; snapshot blobs exist before commitComplete
     // post: one identity has at most one live source; latest advances atomically iff a complete new hash is durable
-    // post: every begun attempt reaches one durable terminal outcome, including restart recovery
+    // post: every begun attempt reaches one durable terminal outcome in-process or through startup recovery; uncertain replacements are reconciled from durable bytes before later operations
+    // post: retain every open attempt plus at most 64 terminal attempts per active or forgotten source; an internal predecessor snapshot preserves latest/change semantics across compaction
+    // deferred: tombstone count itself remains unbounded in V0; docs/plans/2026-08-02-transcript-tombstone-retention-follow-up.md owns the separate restore-safe storage redesign
     // errors: not-found, duplicate identity (`transcript_source_exists`), duplicate key (`transcript_source_key_exists`), disabled, corrupt-state, and IO have stable symbolic codes
     // hides: source index, write queue, blob placement, and recoverable deletion mechanism
 ```
@@ -274,6 +277,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + }
     // pre: identity is exact; cursor belongs to the requested snapshot
     // post: explicit snapshot wins; otherwise newest complete live/imported snapshot wins by capturedAt with deterministic tie-break
+    // post: live capturedAt is the capture time; imported capturedAt is the durable local CatalogImport.createdAt, while untrusted provider timestamps remain only in immutable raw archive evidence
     // post: every published turn is retrievable whole within TRANSCRIPT_PAGE_MAX_TEXT_CHARS; pagination never strands latest state
     // errors: unknown identity, no complete snapshot, corrupt blob, cursor mismatch, and page limit are distinct
     // hides: origin-selection query, Markdown rendering, local paths by default, and future search/indexing
@@ -362,7 +366,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   inspect(archive: GrantedArchive): Promise<ExportManifest>
 +   streamConversations(archive: GrantedArchive, scope: ChatGptProfileScopeId, cursor?: ImportCursor): AsyncIterable<DecodedArchiveConversation>
 + }
-    // pre: archive came from a grant; entry count, expanded bytes, depth, and compression ratio are bounded
+    // pre: archive came from a grant; entry count, expanded bytes, depth, compression ratio, and conversation count (100,000 maximum) are bounded independently from the 10,000-problem outcome limit
     // post: one conversations.json or numbered conversation JSON files stream without whole-archive buffering
     // errors: zip-slip, expansion bomb, corrupt JSON, unsupported layout, and record decode stay distinguishable
     // hides: ZIP library, streaming parser, undocumented fields, and future adapters
@@ -428,7 +432,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   list(request: ListCatalogRequest): Promise<CatalogPage>
 +   listImports(): Promise<CatalogImport[]>
 + }
-    // pre: import consumes a human grant; comparable account hints must agree
+    // pre: import consumes a human grant; comparable account hints must agree only when a stable profile-hint port is explicitly injected and both sides expose a value
     // post: raw/snapshot blobs stage first, then one bounded catalog commit publishes a contiguous batch + cursor; interrupted imports resume
     // errors: outcome unions cross HTTP/MCP unchanged; paths, raw records, and transcript bodies never enter errors
     // hides: batch assembly, decoder versions, route retry policy, and provider automation
@@ -471,8 +475,8 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + const blobs = createPrivateLibraryBlobStore({ stateDir, fileSystem: privateFileSystem })                 // S1
 + const transcriptStore = createTranscriptStore({ stateDir, blobs, fileSystem: privateFileSystem })        // S2
 + const catalogStore = createConversationCatalogStore({ stateDir, blobs, fileSystem: privateFileSystem })  // S10/S5
-+ await transcriptStore.recoverInterrupted()
-+ await catalogStore.recoverInterruptedImports()
++ const libraryStartup = await recoverTranscriptLibraryStartup({ transcriptStore, catalogStore })
++   // recover each store independently; Electron/HTTP still start and expose content-free unavailable status if one library store cannot recover
 + const capture = createChatGptTranscriptCapture({ tabs })                                        // S3
 + const routeVerifier = createChatGptRouteVerifier({ tabs })                                       // S11
 + const grants = createElectronExportImportGrants({ dialog })                                      // S8
@@ -494,9 +498,10 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   parseTranscriptSourceKey(key)
 +   POST /transcripts/track
 +     resolveTab({ key, createIfMissing: false })
-+     controller.getUrl()
-+     parseChatGptEntryTarget(url)
-+       guard target.kind === 'canonical-conversation' -> 409 'owned-conversation-required'
++     controller.runExclusive(...)
++       servedUrl = controller.getUrl()
++       parseChatGptEntryTarget(servedUrl)
++         guard target.kind === 'canonical-conversation' -> 409 'owned_conversation_required'
 +     identityFromOwnedLocation(profileScopeId, target.location)
 +     transcriptSync.track({ label, tags, key, identity, location })
 +       TranscriptStore.register(...)
@@ -559,14 +564,16 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + agentify_query({ liveSourceId, key: sourceKey, chatUrl: conversationUrl, prompt })
 +   POST /query
 +     when liveSourceId is present, require the exact all-or-none liveSourceId + key + canonical chatUrl trio
++     reject competing tabId, model, vendorId, projectUrl, imageGeneration, or query-string tab selectors
 +     before tab/run/provider work:
 +       transcriptSync.list()
 +       guard exactly one enabled source agrees on source ID, key, source identity, target identity, and requested URL identity
 +         -> 409 'conversation-not-live-bound'
 +     existing durable query lifecycle
-+     after navigation and before provider send:
-+       controller.getUrl()
++     inside the same controller lock, after navigation and before provider send:
 +       guard exact source/request/served provider-ID agreement -> 409 'conversation-not-live-bound'
++       after receipt-backed send, capture the served URL before releasing that lock
++       validate the captured URL before persisting durable affinity
 +     persist liveSourceId in the durable logical request; /runs/retry repeats both guards before provider send
 +     on receipt-backed canonical success:
 +       transcriptSync.sync(liveSourceId, 'post-query')
@@ -586,15 +593,16 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +       exportReader.inspect(archive)
 +         guard archive limits -> rejected 'unsafe-archive'
 +         guard supported JSON layout -> rejected 'unsupported-export'
-+         if comparable accountHint conflicts -> rejected 'account-hint-conflict'
++         if an injected stable profile hint and export accountHint are both present and conflict -> rejected 'account-hint-conflict'
 +       catalogStore.beginImport(manifest, assignment)
++       importObservedAt = catalogImport.createdAt // durable local receipt time, reused on resume/replay
 +       preparedBatch = [] // bounded by record count before any catalog write
 +       for await decoded of exportReader.streamConversations(...):
 +         rawRef = blobs.putRaw(decoded.rawRecord)
 +         snapshotRef = decoded.status === 'complete'
-+           ? blobs.putSnapshot(makeImportedSnapshot(normalizeArchiveConversation(decoded)))
++           ? blobs.putSnapshot(makeImportedSnapshot(normalizeArchiveConversation(decoded), { capturedAt: importObservedAt }))
 +           : null
-+         prepared = { identity, title, rawRef, snapshotRef, problem, observedAt }
++         prepared = { identity, title, rawRef, snapshotRef, problem, observedAt: importObservedAt }
 +         preparedBatch.push(prepared)
 +         when batch bound reached or stream ends:
 +           catalogStore.commitPreparedRecords(importId, preparedBatch, nextCursor)
@@ -610,8 +618,9 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 ```diff
 // Interrupted import recovery · U7
 + app startup
-+   catalogStore.recoverInterruptedImports()
-+     each open import -> visible partial outcome + durable resume cursor
++   recoverTranscriptLibraryStartup({ transcriptStore, catalogStore })
++     catch transcript and catalog recovery independently
++     each open import -> visible partial outcome + durable resume cursor when catalog recovery succeeds
 + agentify_import_chatgpt_export({ same archive grant, profileScopeId })
 +   archiveHash agrees
 +   stream from durable cursor
@@ -625,6 +634,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   parseTranscriptSourceKey(key)
 +   POST /catalog/verify
 +     routeVerifier.verify(identity, key)
++       bound the whole controller-exclusive verification by navigationTimeoutMs
 +       force a replacement document at the exact claimed owned URL under selected authenticated profile
 +       require an explicit non-blocked challenge observation
 +       controller.inspectConversationRoute()
@@ -634,6 +644,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +       stable served owned route + exact provider ID -> verified
 +       not-found/forbidden/foreign-profile -> unavailable observation
 +       local tab acquisition/login/challenge/transport -> failed; no route mutation
++       host deadline expiry -> failed 'transport'; release the controller lock and perform no route mutation
 +     verified -> catalogStore.verifyRoute(identity, result)
 +     unavailable -> catalogStore.observeUnavailable(identity, observation)
 +       // availability observation is not deletion and may be retried
@@ -643,12 +654,12 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 // Explicit local forgetting · U3/U6
 + agentify_forget_transcript({ sourceId, confirm: true })
 +   POST /transcripts/forget
-+     guard confirm === true -> 400 'confirmation-required'
-+     guard no active attempt -> 409 'transcript-sync-active'
++     guard confirm === true -> 400 'transcript_confirmation_required'
++     guard no active attempt -> 409 'transcript_sync_active'
 +     transcriptSync.forget(sourceId)
 +       TranscriptStore.forget(sourceId)
 +         remove source from active index atomically
-+         move local source metadata to recoverable deletion target
++         append a logical tombstone containing the retained bounded attempt history; no files move and V0 exposes no restore action
 +         return { recoverable: true, recoveryLocation }
 ```
 
@@ -679,13 +690,14 @@ agentify-desktop/
 ~ mcp-server.mjs                                  MODIFIED  coding-agent library tools                   U3/U4/U7
 ~ mcp-tool-profile.mjs                            MODIFIED  catalog/transcript tool membership           U3/U4/U7
 ~ main.mjs                                        MODIFIED  composition + recovery                       U2/U3/U4/U7
++ library-startup.mjs                              NEW       isolated best-effort library recovery        U2/U7
 ~ ui/preload.cjs                                  MODIFIED  import/catalog/transcript IPC mirror         U6/U7
 ~ ui/preload.mjs                                  MODIFIED  import/catalog/transcript IPC mirror         U6/U7
 ~ ui/control-center.html                          MODIFIED  grant/import/catalog/source review           U6/U7
 ~ ui/control-center.js                            MODIFIED  import/verify/source actions                 U6/U7
 ~ ui/control-center.css                           MODIFIED  import/catalog/sync states                   U6/U7
 ~ README.md                                       MODIFIED  bootstrap, privacy, reload, recovery         U4/U6/U7
-~ package.json                                    MODIFIED  package-safe Electron dependency placement   U6
+~ package.json                                    MODIFIED  Electron/electron-builder build dependencies U6
 ~ package-lock.json                               MODIFIED  package dependency metadata                 U6
 + scripts/e2e-transcript-library.mjs               NEW       real Electron/MCP acceptance runner          U6/U7
 + scripts/visual-proof-transcript-library.mjs      NEW       deterministic Control Center visual proof    U6/U7
@@ -703,6 +715,7 @@ agentify-desktop/
 + tests/library-blob-store.test.mjs                NEW       immutable/hash/corruption invariants        U2/U7
 + tests/transcript-source-contract.test.mjs        NEW       source metadata boundary parity             U2/U3/U7
 + tests/transcript-store.test.mjs                  NEW       source/attempt/restart invariants           U2
++ tests/library-startup.test.mjs                    NEW       isolated recovery/startup availability      U2/U7
 + tests/transcript-sync.test.mjs                   NEW       manual/post-query lifecycle                 U3
 + tests/transcript-read.test.mjs                   NEW       live/import selection + citations           U4/U7
 + tests/export-import-grants.test.mjs              NEW       one-use picker and file identity             U7
@@ -735,12 +748,12 @@ agentify-desktop/
 | **S4** | `TranscriptSyncService` | injected into HTTP/MCP handlers | in-memory service implementing exact results | shared source-field schema parity; route schemas; status mapping; confirmation guards |
 | **S5** | `ImportedConversationIndex` | `createTranscriptReadService({ imported })` | empty index for U4; catalog store for U7 | live loop builds before import; deterministic live/import selection |
 | **S6** | `ChatGptLocation` parser | identity and route-verifier dependencies | existing exact parser tests plus live rehearsal | foreign origin refusal; exact provider ID; query/hash stripping |
-| **S7** | Browser DOM/virtualization | `ChatGPTController.captureConversation()` | VM-backed virtualized DOM plus none — live e2e | repeated turns, compound same-container messages, proven non-message provider gaps, delayed boundaries, stable normalized hash |
+| **S7** | Browser DOM/virtualization | `ChatGPTController.captureConversation()` | VM-backed virtualized DOM plus none — live e2e | repeated turns, compound same-container messages, proven non-message provider gaps, delayed boundaries, overlap/order/gap outcomes, and stable normalized hash; `orderedWindowStitching` is their derived summary flag, not independent evidence |
 | **S8** | `ExportImportGrantPort` | `createElectronExportImportGrants()` injected into catalog service | one-use grants with expired/reused/moved variants | human selection, path confinement, scope confirmation, no path leakage |
-| **S9** | `ChatGptExportReader` | `createConversationCatalogService({ exportReader })` | single/numbered JSON, ambiguous graph, zip-slip, expansion-bomb fixtures | bounded streaming; exact decode; hostile archive rejection |
+| **S9** | `ChatGptExportReader` | `createConversationCatalogService({ exportReader })` | single/numbered JSON, ambiguous graph, zip-slip, expansion-bomb fixtures | independently bounded 100,000 records/10,000 problems; exact decode; hostile archive rejection |
 | **S10** | `ConversationCatalogStore` | catalog service constructor and read-service imported index | real private filesystem plus failure-injecting atomic writer/subprocess | bounded batch+cursor atomicity; replay idempotence; interrupted recovery; no fuzzy identity |
 | **S11** | `ConversationRouteVerificationPort` | catalog service constructor plus map-owned served-conversation inspection | verified/unavailable/failed scripted outcomes plus retained-route error shell and live e2e | exact promotion requires stable route + provider ID + visible provider turn; transient failure non-mutation; unavailable-is-not-deleted |
-| **S12** | `ConversationCatalogService` | injected into HTTP/MCP handlers | in-memory service implementing exact import/verify variants | shared verification-key schema; protocol mapping; account-hint gate; sensitive-error redaction |
+| **S12** | `ConversationCatalogService` | injected into HTTP/MCP handlers | in-memory service implementing exact import/verify variants | shared verification-key schema; protocol mapping; conditional injected account-hint gate; sensitive-error redaction |
 
 ## 5. Build order
 
@@ -767,8 +780,8 @@ U7  export import + direct verification    deps: U1, U2, U4
     deferred acceptance: pause when a user-selected personal export is ready — import and re-import it, retrieve one item without logging content, verify one exact route, and retain the catalog identity/snapshot after one unavailable or failed observation
 
 U6  minimal control + privacy + E2E        deps: U3, U4, U7
-    establishes: import scope/result, recovery, catalog route, live source, storage, and local forgetting are user-legible and exercised through real Electron/MCP entry points
-    checkpoint: pause — human review of disabled, syncing, partial, suspended, complete, and forget states
+    establishes: import scope/result, restart-based recovery, first-page catalog route, live source, storage, and local forgetting are user-legible and exercised through real Electron/MCP entry points
+    checkpoint: pause — externally attested human review of disabled, syncing, partial, suspended, complete, and forget states; a caller-supplied visual-proof verdict is not itself human evidence
 
 U8  sidebar catalog reconciliation         deps: U7, U6       DEFERRED POST-V0
     establishes later: bounded observations can classify first-seen/resurfaced without making title, rank, or absence authoritative
@@ -781,4 +794,4 @@ U5  opt-in periodic scheduler              deps: U8 and U1/U3 live gates   DEFER
 
 ### Review contract
 
-The approved V0 boundary is U1 → U2 → U3 → U4 → U7 → U6. U8 and U5 remain named so the intended future exists, but a builder must not implement their sidebar or timer contracts in this pass. Approval requires automated contract tests; real-process Electron, HTTP, MCP, private-filesystem, restart, and controlled ZIP acceptance; and live authenticated E2E for manual track/sync/restart, paginated retrieval with exact citations, continuation into the same thread, and local forget. U7 approval composes four explicit proofs: one supported real ZIP fixture traverses the production grant/reader/blob/catalog/service with a deterministic dialog result and real filesystem/subprocess crash recovery and replay; hostile real ZIP bytes exercise production reader/service rejection; recovered imported state is listed and retrieved through real Electron, HTTP, MCP, and Control Center entry points; and exact route promotion, unavailable, failed, and non-deletion outcomes pass controller/service contract tests. These proofs must not be collapsed into a claim that one controlled import traversed every entry point or that an imported route was verified live. The personal real-export import, same-archive re-import, imported-item retrieval, and imported-route verification journey is explicitly deferred until the user has an export ready; its absence is recorded as unverified follow-up evidence, not a V0 blocker and never a passed check. A missing authenticated ChatGPT profile remains a human-input blocker for the live path.
+The approved V0 boundary is U1 → U2 → U3 → U4 → U7 → U6. U8 and U5 remain named so the intended future exists, but a builder must not implement their sidebar or timer contracts in this pass. Approval requires automated contract tests; real-process Electron, HTTP, MCP, private-filesystem, restart, and controlled ZIP acceptance; and live authenticated E2E for manual track/sync/restart, paginated retrieval with exact citations, continuation into the same thread, and local forget. U7 approval composes four explicit proofs: one supported real ZIP fixture traverses the production grant/reader/blob/catalog/service with a deterministic dialog result and real filesystem/subprocess crash recovery and replay; hostile real ZIP bytes exercise production reader/service rejection; recovered imported state is listed and retrieved through real Electron, HTTP, MCP, and Control Center entry points; and exact route promotion, unavailable, failed, and non-deletion outcomes pass controller/service contract tests. These proofs must not be collapsed into a claim that one controlled import traversed every entry point or that an imported route was verified live. The personal real-export import, same-archive re-import, imported-item retrieval, and imported-route verification journey is explicitly deferred until the user has an export ready; its absence is recorded as unverified follow-up evidence, not a V0 blocker and never a passed check. Likewise, a caller-supplied `--pixel-review` value records a declaration, not externally attested human review. A missing authenticated ChatGPT profile remains a human-input blocker for the live path.

@@ -486,7 +486,7 @@ A page from a tracked live source also returns `liveSourceId`, `sourceKey`, and 
 agentify_query({ liveSourceId: LIVE_SOURCE_ID, key: SOURCE_KEY, chatUrl: CONVERSATION_URL, prompt: "Continue from here." })
 ```
 
-After Agentify observes and records a completed reply, it runs the same transcript sync again. Imported-only conversations do not return live continuation fields.
+When `liveSourceId` is present, use only that exact `liveSourceId` + `key` + canonical `chatUrl` binding. Do not also send `tabId`, `model`, `vendorId`, `projectUrl`, `imageGeneration`, or a `?tabId=` selector. After Agentify observes and records a completed reply, it waits for the same transcript sync before returning. Imported-only conversations do not return live continuation fields.
 
 ### Import and direct route verification
 
@@ -496,7 +496,9 @@ Download your ChatGPT export yourself; Agentify does not request it, follow expo
 2. Click **Choose ZIP and import** and select one export ZIP in the desktop picker.
 3. Review the import as complete, partial, or rejected, then inspect the catalog for that scope.
 
-The picker creates a short-lived, one-use file grant. The import API accepts that grant ID, never an arbitrary archive path. Raw archive records are staged before catalog entries become visible. If an export contains an ambiguous branch or unsupported message content, that record remains catalog-only instead of becoming a made-up transcript. Account hints are optional; Agentify compares them only when both the browser profile and export expose a stable comparable value.
+The picker creates a short-lived, one-use file grant. The import API accepts that grant ID, never an arbitrary archive path. Raw archive records are staged before catalog entries become visible. Archives above 100,000 conversation records or above 10,000 catalog-only problems are rejected as unsafe. If an export contains an ambiguous branch or unsupported message content, that record remains catalog-only instead of becoming a made-up transcript.
+
+Exports may carry an optional account hint. V0 currently has no stable browser-side hint to compare, so scope assignment remains an explicit human confirmation; Agentify never invents an account ID. Imported snapshot ordering uses the durable local import time, not an untrusted provider timestamp from the archive.
 
 Re-importing the same archive under the same scope resumes from its saved position and does not duplicate identities or snapshots. If you assigned the archive to the wrong scope, use the import's explicit reassignment action, confirm the change, then re-select the same ZIP so snapshots can be rebuilt under the new scope.
 
@@ -504,13 +506,17 @@ Personal-export acceptance is currently deferred until a user has an export read
 
 Imported routes start unverified and cannot be used for navigation. Set a verification tab key, then verify one catalog item from the Control Center or call `agentify_verify_catalog_conversation`. Agentify navigates directly to the claimed conversation and promotes the route only when the served ChatGPT conversation ID matches exactly. Not-found, forbidden, foreign-profile, login, challenge, and transport results are observations or failures; none means the provider conversation was deleted.
 
+Control Center V0 shows the first 100 catalog rows for a scope; use paginated HTTP or MCP calls for later pages. A partial import can be resumed but not discarded in V0. Verification tabs are ordinary Agentify tabs: they appear in the main tab list and can be shown or hidden there.
+
 ### Private storage, forgetting, and recovery
 
 Library data lives under `~/.agentify-desktop/transcript-library/`, or under `$AGENTIFY_DESKTOP_STATE_DIR/transcript-library/` when that override is set. On POSIX systems, Agentify creates private `0700` directories (only the owner can enter them) and `0600` files (only the owner can read or write them). V0 storage is local plaintext, not encrypted storage. Raw export records and normalized snapshots are not written to normal logs or error responses.
 
-`agentify_forget_transcript({ sourceId, confirm: true })` removes one tracked source from the active list and keeps a recoverable local deletion record. It never deletes or edits the ChatGPT conversation. V0 does not garbage-collect shared immutable blobs, so forgetting a source is not a promise that every referenced local byte was erased.
+`agentify_forget_transcript({ sourceId, confirm: true })` removes one tracked source from the active list and keeps a local deletion tombstone. The returned recovery location is a logical identifier only; V0 has no restore UI/API and no physical `local-trash` directory. It never deletes or edits the ChatGPT conversation. V0 does not garbage-collect shared immutable blobs, so forgetting a source is not a promise that every referenced local byte was erased.
 
-On Electron startup, an unfinished live capture becomes `interrupted` without advancing its prior latest snapshot. An unfinished import becomes a visible partial import with a resume position. Select the same archive again with the same scope to resume; selecting a completed archive again is also safe.
+On Electron startup, an unfinished live capture becomes `interrupted` without advancing its prior latest snapshot. An unfinished import becomes a visible partial import with a resume position. Recovery is best-effort per store: if one library store cannot recover, Agentify still starts and unrelated tabs and queries remain usable while that library section reports unavailable. Select the same archive again with the same scope to resume; selecting a completed archive again is also safe.
+
+Control Center disables source-row actions while a source is syncing or disabled. Restart Electron to recover a stale syncing attempt. The confirmed HTTP/MCP forget operation remains valid for a disabled source.
 
 Electron and the MCP server are separate long-lived processes and neither hot-reloads:
 
@@ -527,6 +533,8 @@ V0 is manual: exact live tracking and sync, immutable paginated retrieval with c
 Deferred work is explicit. U8 sidebar reconciliation is not present: there is no sidebar discovery, scan, backfill, resurfacing logic, or deletion inference. U5 periodic provider synchronization is not present: there are no timed or background transcript captures. The Control Center receives content-free local change notifications after durable library mutations so import progress and changes made through HTTP or MCP become visible; those notifications never navigate to ChatGPT or start a sync. Export-request automation, embeddings, psychological classification, and audio-file archiving are also outside V0.
 
 Transcript capture and route verification use the logged-in provider UI only when you request the operation. Agentify does not bypass login, challenges, rate limits, or other protective measures, and it cannot guarantee account safety. Review the account-risk boundary under [ChatGPT compatibility status](#chatgpt-compatibility-status) before using browser automation.
+
+Filesystem confinement rejects path escapes and pre-existing symlinks. V0 trusts the owning OS user; it does not defend against another process running as that same user racing files inside the owner-only state directory.
 
 ## Connect from MCP clients
 Quickstart can register MCP automatically, but manual commands are below if you prefer explicit setup.
@@ -720,7 +728,7 @@ The supported product surface is the local browser-control + MCP workflow descri
 ```bash
 npm run dist
 ```
-Artifacts land in `dist/`.
+Artifacts land in `dist/`. Source `npm run start` and `npm run dist` require development dependencies; the packaged application embeds Electron.
 
 ## Security and data
 - Control API binds to `127.0.0.1` on an ephemeral port by default.
