@@ -2,8 +2,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
-import { parseChatGptEntryTarget } from './chatgpt-location.mjs';
+import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-location.mjs';
+import { providerConversationIdFromOwnedLocation } from './conversation-identity.mjs';
 import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
+import {
+  TRANSCRIPT_TURN_MAX_TEXT_CHARS,
+  parseConversationCapture,
+  projectLegacyConversationText
+} from './transcript-contract.mjs';
 import {
   CHATGPT_ANY_MODE_PATTERN,
   CHATGPT_ANY_MODEL_PATTERN,
@@ -33,6 +39,77 @@ function clipText(value, max = 240) {
   if (!text) return '';
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function extractChatGptTranscriptMessageText(node) {
+  if (!node || typeof node !== 'object') return '';
+  const childNodes = node.childNodes;
+  if (!childNodes || typeof childNodes.length !== 'number') {
+    const innerText = typeof node.innerText === 'string' ? node.innerText : '';
+    const textContent = typeof node.textContent === 'string' ? node.textContent : '';
+    return innerText || textContent;
+  }
+  const blockTags = new Set([
+    'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DIV', 'DL', 'DT', 'FIELDSET',
+    'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TBODY',
+    'TFOOT', 'THEAD', 'TR', 'UL'
+  ]);
+  const skippedTags = new Set(['BUTTON', 'CANVAS', 'NOSCRIPT', 'SCRIPT', 'STYLE', 'SVG', 'TEMPLATE']);
+  const chunks = [];
+  const append = (value) => {
+    const text = String(value || '').replace(/\r\n?/g, '\n');
+    if (text) chunks.push(text);
+  };
+  const boundary = () => {
+    const last = chunks[chunks.length - 1] || '';
+    if (!last.endsWith('\n')) chunks.push('\n');
+  };
+  const walk = (current, preserveWhitespace = false) => {
+    if (!current) return;
+    if (current.nodeType === 3) {
+      const value = String(current.nodeValue || '');
+      append(preserveWhitespace ? value : value.replace(/[\t\n\f\r ]+/g, ' '));
+      return;
+    }
+    if (current.nodeType !== 1 && current !== node) return;
+    const tagName = String(current.tagName || '').toUpperCase();
+    if (
+      skippedTags.has(tagName) ||
+      current.hidden === true ||
+      current.getAttribute?.('aria-hidden') === 'true'
+    ) return;
+    try {
+      const style = typeof getComputedStyle === 'function' ? getComputedStyle(current) : null;
+      if (
+        style?.display === 'none' ||
+        style?.visibility === 'hidden' ||
+        style?.visibility === 'collapse' ||
+        style?.contentVisibility === 'hidden'
+      ) return;
+    } catch {}
+    if (tagName === 'BR') {
+      boundary();
+      return;
+    }
+    if (tagName === 'IMG') {
+      // Image alt attributes are not rendered transcript text and may change as
+      // virtualized image grids hydrate. Image retrieval has its own controller path.
+      return;
+    }
+    const isBlock = blockTags.has(tagName);
+    if (isBlock) boundary();
+    const preserve = preserveWhitespace || tagName === 'PRE';
+    for (const child of Array.from(current.childNodes || [])) walk(child, preserve);
+    if (tagName === 'TD' || tagName === 'TH') append('\t');
+    if (isBlock) boundary();
+  };
+  walk(node);
+  return chunks.join('')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function looksLikeResearchShellText(value) {
@@ -281,7 +358,8 @@ export class ChatGPTController {
     vendorName = null,
     uiContract = null,
     onCompatibilityObservation = null,
-    compatibilityBackend = 'electron'
+    compatibilityBackend = 'electron',
+    captureHostTimeoutMs = 330_000
   }) {
     this.page = page;
     this.selectors = selectors;
@@ -291,6 +369,11 @@ export class ChatGPTController {
     this.onCompatibilityObservation =
       typeof onCompatibilityObservation === 'function' ? onCompatibilityObservation : null;
     this.compatibilityBackend = compatibilityBackend === 'chrome-cdp' ? 'chrome-cdp' : 'electron';
+    const parsedCaptureHostTimeoutMs = Math.floor(Number(captureHostTimeoutMs));
+    this.captureHostTimeoutMs = Number.isSafeInteger(parsedCaptureHostTimeoutMs) &&
+      parsedCaptureHostTimeoutMs >= 1 && parsedCaptureHostTimeoutMs <= 10 * 60_000
+      ? parsedCaptureHostTimeoutMs
+      : 330_000;
     this.onBlocked = onBlocked;
     this.onUnblocked = onUnblocked;
     this.stateDir = stateDir;
@@ -350,7 +433,8 @@ export class ChatGPTController {
   async runCompatibilityCapability(capabilityId, operation, {
     anchorId = null,
     postcondition = () => true,
-    authoritativeTerminal = false
+    authoritativeTerminal = false,
+    mapResult = null
   } = {}) {
     if (typeof operation !== 'function') throw new Error('compatibility_operation_required');
     const contract = this.uiContract;
@@ -425,7 +509,10 @@ export class ChatGPTController {
       });
 
     try {
-      const result = await operation();
+      const operationResult = await operation();
+      const result = typeof mapResult === 'function'
+        ? await mapResult(operationResult, resolution)
+        : operationResult;
       const behaviorPassed = !!(await postcondition(result));
       const resolutionStatus = resolution.kind === 'resolution' ? resolution.healthStatus : null;
       const status = !behaviorPassed || resolutionStatus === 'fail'
@@ -463,16 +550,104 @@ export class ChatGPTController {
     await this.page.navigate(url);
   }
 
-  async prepareChatEntry({ chatUrl, timeoutMs = 30_000 } = {}) {
+  async prepareChatEntry({ chatUrl, timeoutMs = 30_000, forceNavigation = false } = {}) {
     const target = parseChatGptEntryTarget(chatUrl);
     const currentUrl = await this.getUrl().catch(() => '');
-    if (currentUrl !== target.chatUrl) await this.navigate(target.chatUrl);
-    await this.ensureReady({ timeoutMs });
+    const effectiveTimeoutMs = Math.max(1, Math.floor(Number(timeoutMs) || 30_000));
+    const deadline = Date.now() + effectiveTimeoutMs;
+    const mustNavigate = forceNavigation || currentUrl !== target.chatUrl;
+    let priorDocumentEpoch = null;
+    if (forceNavigation) {
+      priorDocumentEpoch = await this.#readDocumentEpoch().catch(() => null);
+      if (priorDocumentEpoch === null) {
+        const error = new Error('navigation_document_epoch_unavailable');
+        error.code = 'compatibility_drift';
+        throw error;
+      }
+    }
+    if (mustNavigate) await this.navigate(target.chatUrl);
+    if (forceNavigation) {
+      await this.#waitForDocumentReplacement(priorDocumentEpoch, deadline);
+    }
+    await this.ensureReady({ timeoutMs: Math.max(1, deadline - Date.now()) });
     return target;
+  }
+
+  async #readDocumentEpoch() {
+    const value = await this.#eval(`(() => {
+      const value = Number(globalThis.performance?.timeOrigin);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    })()`);
+    const epoch = Number(value);
+    return Number.isFinite(epoch) && epoch > 0 ? epoch : null;
+  }
+
+  async #waitForDocumentReplacement(priorEpoch, deadline) {
+    while (Date.now() < deadline) {
+      const currentEpoch = await this.#readDocumentEpoch().catch(() => null);
+      if (currentEpoch !== null && currentEpoch !== priorEpoch) return;
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+    }
+    const error = new Error('navigation_document_not_replaced');
+    error.code = 'navigation_document_not_replaced';
+    throw error;
   }
 
   async #eval(js) {
     return await this.page.evaluate(js);
+  }
+
+  async #evalCapture(js) {
+    return await this.page.evaluate(js);
+  }
+
+  async #settleCaptureTermination() {
+    if (typeof this.page?.terminateEvaluation !== 'function') return;
+    let terminationTimeoutId = null;
+    try {
+      await Promise.race([
+        Promise.resolve().then(async () => await this.page.terminateEvaluation()).catch(() => false),
+        new Promise((resolve) => {
+          terminationTimeoutId = setTimeout(resolve, 5_000);
+        })
+      ]);
+    } finally {
+      if (terminationTimeoutId !== null) clearTimeout(terminationTimeoutId);
+    }
+  }
+
+  async #runCaptureWithHostDeadline(operation) {
+    let timeoutId = null;
+    let expired = false;
+    let termination = Promise.resolve();
+    const running = Promise.resolve().then(operation);
+    const deadline = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        expired = true;
+        termination = this.#settleCaptureTermination();
+        const error = new Error('conversation_capture_timeout');
+        error.code = 'conversation_capture_timeout';
+        reject(error);
+      }, this.captureHostTimeoutMs);
+    });
+    try {
+      const value = await Promise.race([running, deadline]);
+      if (expired) {
+        const error = new Error('conversation_capture_timeout');
+        error.code = 'conversation_capture_timeout';
+        throw error;
+      }
+      return value;
+    } catch (error) {
+      if (!expired) throw error;
+      running.catch(() => {});
+      await termination.catch(() => {});
+      const timeout = new Error('conversation_capture_timeout');
+      timeout.code = 'conversation_capture_timeout';
+      throw timeout;
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
   }
 
   async #evalDeepResearch(js) {
@@ -506,6 +681,71 @@ export class ChatGPTController {
     return await this.page.getUrl();
   }
 
+  #transcriptDependencySelector(dependency, fallback = null) {
+    const mappedSelector = this.uiContract?.profile?.exemptions
+      ?.find((entry) => entry?.dependency === dependency)?.selector;
+    if (typeof mappedSelector === 'string' && mappedSelector.trim()) return mappedSelector;
+    return this.uiContract?.kind === 'chatgpt' ? null : fallback;
+  }
+
+  async inspectConversationRoute() {
+    const messageSelector = this.#transcriptDependencySelector(
+      'transcript-message',
+      '[data-message-author-role]'
+    );
+    const turnOrdinalSelector = this.#transcriptDependencySelector(
+      'transcript-turn-ordinal',
+      '[data-testid^="conversation-turn-"]'
+    );
+    if (!messageSelector || !turnOrdinalSelector) {
+      return { status: 'failed', reason: 'compatibility-drift' };
+    }
+
+    const inspectOnce = async () => await this.#eval(`(() => {
+      const messageSelector = ${JSON.stringify(messageSelector)};
+      const turnOrdinalSelector = ${JSON.stringify(turnOrdinalSelector)};
+      const isVisible = (node) => {
+        if (!node || node.isConnected === false) return false;
+        try {
+          if (node.closest?.('[aria-hidden="true"], [inert]')) return false;
+          const style = getComputedStyle(node);
+          if (style?.display === 'none' || style?.visibility === 'hidden' || style?.opacity === '0') return false;
+          const rect = node.getBoundingClientRect?.();
+          return !!rect && Number(rect.width) > 0 && Number(rect.height) > 0;
+        } catch {
+          return false;
+        }
+      };
+      const visibleOrdinals = new Set();
+      const messages = Array.from(document.querySelectorAll(messageSelector)).slice(0, 2000);
+      for (const message of messages) {
+        if (!isVisible(message)) continue;
+        if (!String(message.getAttribute?.('data-message-author-role') || '').trim()) continue;
+        const turn = message.closest?.(turnOrdinalSelector);
+        if (!isVisible(turn)) continue;
+        const match = /^conversation-turn-([1-9]\\d*)$/.exec(
+          String(turn.getAttribute?.('data-testid') || '')
+        );
+        if (!match) continue;
+        const ordinal = Number(match[1]);
+        if (!Number.isSafeInteger(ordinal) || ordinal <= 0) continue;
+        visibleOrdinals.add(ordinal);
+      }
+      return visibleOrdinals.size;
+    })()`);
+
+    const deadline = Date.now() + 1_500;
+    while (true) {
+      const visibleTurnCount = await inspectOnce();
+      if (!Number.isSafeInteger(visibleTurnCount) || visibleTurnCount < 0) {
+        return { status: 'failed', reason: 'compatibility-drift' };
+      }
+      if (visibleTurnCount > 0) return { status: 'served', visibleTurnCount };
+      if (Date.now() >= deadline) return { status: 'unavailable', reason: 'not-found' };
+      await sleep(Math.min(150, Math.max(1, deadline - Date.now())));
+    }
+  }
+
   async readPageText({ maxChars = 200_000 } = {}) {
     let text = await this.#eval(`(() => {
       const cap = ${maxChars};
@@ -534,37 +774,959 @@ export class ChatGPTController {
     return text;
   }
 
-  async readConversationText({ maxChars = 200_000 } = {}) {
-    const cap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
-    const captured = await this.#eval(`(async () => {
-      const cap = ${cap};
-      const messageSelector = '[data-message-author-role]';
-      const clean = (value) => String(value || '')
-        .replace(/\\u0000/g, '')
-        .replace(/\\s+\\n/g, '\\n')
-        .trim();
-      const displayRole = (role) => role === 'assistant' ? 'Assistant' : role === 'user' ? 'User' : role;
+  async captureConversation({ maxCaptureBytes = 4 * 1024 * 1024 } = {}) {
+    const cap = Math.max(1, Math.min(16 * 1024 * 1024, Math.floor(Number(maxCaptureBytes) || 4 * 1024 * 1024)));
+    const operation = async () => await this.runCompatibilityCapability('transcript', async () => {
+      const readOwnedTarget = async () => {
+        try {
+          const target = parseChatGptEntryTarget(await this.getUrl());
+          if (target?.kind !== 'canonical-conversation') return null;
+          const providerConversationId = providerConversationIdFromOwnedLocation(
+            locationFromConversationUrl(target.chatUrl)
+          );
+          return { conversationUrl: target.chatUrl, providerConversationId };
+        } catch {
+          return null;
+        }
+      };
+      const before = await readOwnedTarget();
+      let routeGuard = null;
+      let routeGuardStable = true;
+      if (before && typeof this.page?.beginNavigationGuard === 'function') {
+        const matchesOwnedTarget = (value) => {
+          try {
+            const target = parseChatGptEntryTarget(value);
+            if (target?.kind !== 'canonical-conversation') return false;
+            return providerConversationIdFromOwnedLocation(
+              locationFromConversationUrl(target.chatUrl)
+            ) === before.providerConversationId;
+          } catch {
+            return false;
+          }
+        };
+        try {
+          routeGuard = await this.page.beginNavigationGuard(matchesOwnedTarget);
+          if (!routeGuard || typeof routeGuard.isStable !== 'function') routeGuardStable = false;
+        } catch {
+          routeGuardStable = false;
+        }
+      }
+      let captured;
+      let after = null;
+      try {
+        captured = before
+          ? await this.#captureConversationWindows({ maxCaptureBytes: cap })
+          : {
+              status: 'partial',
+              reason: 'compatibility_drift',
+              rawTurns: [],
+              evidence: {
+                topBoundary: false,
+                bottomBoundary: false,
+                orderedWindowStitching: false,
+                scrollPasses: 0,
+                windowCount: 1,
+                messageCount: 0,
+                providerIdCount: 0,
+                byteCount: 0
+              }
+            };
+        after = await readOwnedTarget();
+        if (routeGuard) {
+          try {
+            routeGuardStable = routeGuardStable && !!(await routeGuard.isStable());
+          } catch {
+            routeGuardStable = false;
+          }
+        }
+      } finally {
+        try {
+          await routeGuard?.dispose?.();
+        } catch {
+          routeGuardStable = false;
+        }
+      }
+      const routeStable = !!before && !!after && routeGuardStable &&
+        before.providerConversationId === after.providerConversationId;
+      const conversationUrl = routeStable ? after.conversationUrl : null;
+      try {
+        if (routeStable) providerConversationIdFromOwnedLocation(locationFromConversationUrl(conversationUrl));
+      } catch {
+        return parseConversationCapture({
+          ...captured,
+          status: 'partial',
+          reason: 'compatibility_drift',
+          conversationUrl: null,
+          capturedAt: new Date().toISOString()
+        });
+      }
+      const capturedAt = new Date().toISOString();
+      const value = captured.status === 'complete' && !routeStable
+        ? { ...captured, status: 'partial', reason: 'compatibility_drift', conversationUrl: null, capturedAt }
+        : { ...captured, conversationUrl, capturedAt };
+      return parseConversationCapture(value);
+    }, {
+      anchorId: 'assistant-message',
+      postcondition: (value) => value?.status === 'complete',
+      mapResult: (value, resolution) => {
+        if (resolution?.kind === 'resolution' && resolution.healthStatus !== 'fail') return value;
+        return value?.status === 'partial' && value.reason === 'compatibility_drift'
+          ? value
+          : { ...value, status: 'partial', reason: 'compatibility_drift' };
+      }
+    });
+    try {
+      return await this.#runCaptureWithHostDeadline(operation);
+    } catch (error) {
+      if (error?.code !== 'conversation_capture_timeout') throw error;
+      return parseConversationCapture({
+        status: 'partial',
+        reason: 'conversation_capture_timeout',
+        conversationUrl: null,
+        capturedAt: new Date().toISOString(),
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
+      });
+    }
+  }
+
+  async #captureConversationWindows({ maxCaptureBytes }) {
+    const messageSelector = this.#transcriptDependencySelector(
+      'transcript-message',
+      '[data-message-author-role]'
+    );
+    const ownerSelector = this.#transcriptDependencySelector(
+      'transcript-message-id',
+      '[data-message-id]'
+    );
+    const turnOrdinalSelector = this.#transcriptDependencySelector(
+      'transcript-turn-ordinal',
+      '[data-testid^="conversation-turn-"]'
+    );
+    const stopSelector = this.selectors?.stopButton ||
+      (this.uiContract?.kind === 'chatgpt' ? null : 'button[data-testid="stop-button"]');
+    const generationIndicatorSelector = this.#transcriptDependencySelector(
+      'transcript-generation-indicator',
+      '[role="status"], [aria-live]'
+    );
+    if (!messageSelector || !ownerSelector || !turnOrdinalSelector || !stopSelector || !generationIndicatorSelector) {
+      return {
+        status: 'partial',
+        reason: 'compatibility_drift',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
+      };
+    }
+    let captured;
+    try {
+      captured = await this.#evalCapture(`(async () => {
+      const cap = ${maxCaptureBytes};
+      const maxTurnTextChars = ${TRANSCRIPT_TURN_MAX_TEXT_CHARS};
+      const maxProviderTurnOrdinal = 100_000;
+      const maxProviderGapSpan = 64;
+      const maxGapScanSteps = 4_096;
+      const maxGapScanMs = 90_000;
+      const messageSelector = ${JSON.stringify(messageSelector)};
+      const ownerSelector = ${JSON.stringify(ownerSelector)};
+      const turnOrdinalSelector = ${JSON.stringify(turnOrdinalSelector)};
+      const stopSelector = ${JSON.stringify(stopSelector)};
+      const generationIndicatorSelector = ${JSON.stringify(generationIndicatorSelector)};
+      const transcriptTextForNode = ${extractChatGptTranscriptMessageText.toString()};
+      const utf8Bytes = (value) => {
+        let bytes = 0;
+        for (const symbol of String(value || '')) {
+          const code = symbol.codePointAt(0);
+          bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+        }
+        return bytes;
+      };
+      const turnBytes = (turn) => utf8Bytes(turn.role) + utf8Bytes(turn.text) + utf8Bytes(turn.providerMessageId || '');
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const settle = async () => await wait(120);
-      const readMessages = () => Array.from(document.querySelectorAll(messageSelector))
-        .map((node) => {
-          const role = clean(node.getAttribute('data-message-author-role')).toLowerCase() || 'unknown';
-          const text = clean(node.innerText) || clean(node.textContent);
-          const owner = node.closest('[data-message-id]');
-          const messageId = clean(
-            node.getAttribute('data-message-id') ||
-            owner?.getAttribute('data-message-id') ||
-            node.getAttribute('data-testid') ||
-            owner?.getAttribute('data-testid')
-          );
-          return {
-            role,
-            text,
-            identity: messageId ? 'id:' + messageId : 'text:' + role + '\\u0000' + text
+      const settleProviderObservation = async () => {
+        if (typeof requestAnimationFrame === 'function') {
+          await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+          return;
+        }
+        await wait(16);
+      };
+      let mappedInputInvalid = false;
+      const providerMessageIdForNode = (node) => {
+        const owner = node.closest(ownerSelector);
+        const messageId = (
+          node.getAttribute('data-message-id') ||
+          owner?.getAttribute('data-message-id')
+        );
+        if (typeof messageId !== 'string' || !messageId.length) return null;
+        if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(messageId)) {
+          mappedInputInvalid = true;
+          return null;
+        }
+        return messageId;
+      };
+      const providerTurnIndexForNode = (node) => {
+        const owner = node.closest(turnOrdinalSelector);
+        const testId = owner?.getAttribute('data-testid') || '';
+        if (!owner) return null;
+        const matched = /^conversation-turn-(\\d+)$/.exec(testId);
+        if (!matched) {
+          mappedInputInvalid = true;
+          return null;
+        }
+        const value = Number(matched[1]);
+        if (!Number.isSafeInteger(value) || value < 1 || value > maxProviderTurnOrdinal) {
+          mappedInputInvalid = true;
+          return null;
+        }
+        return value;
+      };
+      const unresolvedMessageKeys = new Set();
+      const unresolvedTurnOwnerShells = new Set();
+      const turnOwnerShellCleanObservationCounts = new Map();
+      const provenAbsentProviderOrdinals = new Set();
+      const providerTurnIndexForOwner = (owner) => {
+        const testId = String(owner?.getAttribute?.('data-testid') || '');
+        const matched = /^conversation-turn-(\\d+)$/.exec(testId);
+        if (!matched) {
+          mappedInputInvalid = true;
+          return null;
+        }
+        const value = Number(matched[1]);
+        if (!Number.isSafeInteger(value) || value < 1 || value > maxProviderTurnOrdinal) {
+          mappedInputInvalid = true;
+          return null;
+        }
+        return value;
+      };
+      const historicalChromeObservationSignatures = new Map();
+      const historicalChromeObservationCounts = new Map();
+      const historicalProviderChromeSignature = (owner) => {
+        try {
+          if (
+            typeof owner.getAttribute?.('data-message-id') === 'string' ||
+            (owner.querySelectorAll?.('[data-message-id]')?.length || 0) > 0
+          ) return null;
+          const elements = [owner, ...Array.from(owner.querySelectorAll?.('*') || [])];
+          if (elements.length > 64) return null;
+          const mappedChrome = (element) => {
+            try {
+              return !!element?.matches?.(generationIndicatorSelector);
+            } catch {
+              return false;
+            }
           };
-        })
-        .filter((message) => message.text);
+          if (!elements.some(mappedChrome)) return null;
+          const semanticContentSelector = [
+            'p', 'pre', 'code', 'blockquote', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+            'ul', 'ol', 'li', 'a', 'canvas', 'audio', 'video', 'iframe', 'figure', 'figcaption'
+          ].join(', ');
+          if ((owner.querySelectorAll?.(semanticContentSelector)?.length || 0) > 0) {
+            return null;
+          }
+          const text = String(owner.textContent || '');
+          if (text.length > 256) return null;
+          return 'map-owned-historical-chrome';
+        } catch {
+          return null;
+        }
+      };
+      const providerNodeIsServed = (node) => {
+        if (!node || node.isConnected === false || node.hidden === true) return false;
+        if (node.getAttribute?.('aria-hidden') === 'true' || node.hasAttribute?.('inert')) return false;
+        if (node.closest?.('[aria-hidden="true"], [inert]')) return false;
+        try {
+          if (
+            typeof node.checkVisibility === 'function' &&
+            node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) === false
+          ) return false;
+          const clientRectangles = node.getClientRects?.();
+          if (
+            clientRectangles &&
+            typeof clientRectangles.length === 'number' &&
+            clientRectangles.length === 0
+          ) return false;
+          const style = window.getComputedStyle?.(node);
+          if (
+            style?.display === 'none' ||
+            style?.visibility === 'hidden' ||
+            style?.visibility === 'collapse' ||
+            style?.contentVisibility === 'hidden' ||
+            Number.parseFloat(style?.opacity || '1') <= 0
+          ) return false;
+        } catch {
+          return false;
+        }
+        return true;
+      };
+      const turnOwnerIsServed = (owner) => providerNodeIsServed(owner);
+      const observeTurnOwnerShells = () => {
+        const owners = Array.from(document.querySelectorAll(turnOrdinalSelector));
+        if (owners.length > maxProviderTurnOrdinal) mappedInputInvalid = true;
+        const groups = new Map();
+        for (const owner of owners.slice(0, maxProviderTurnOrdinal)) {
+          if (!turnOwnerIsServed(owner)) continue;
+          const ordinal = providerTurnIndexForOwner(owner);
+          if (!Number.isSafeInteger(ordinal)) continue;
+          const group = groups.get(ordinal) || [];
+          group.push(owner);
+          groups.set(ordinal, group);
+        }
+        for (const ordinal of unresolvedTurnOwnerShells) {
+          if (!groups.has(ordinal)) {
+            turnOwnerShellCleanObservationCounts.set(ordinal, 0);
+            historicalChromeObservationSignatures.delete(ordinal);
+            historicalChromeObservationCounts.delete(ordinal);
+          }
+        }
+        for (const [ordinal, group] of groups) {
+          const ownerRecords = group.map((owner) => ({
+            owner,
+            mappedCount: (owner.matches?.(messageSelector) ? 1 : 0) +
+              (owner.querySelectorAll?.(messageSelector)?.length || 0)
+          }));
+          const emptyOwners = ownerRecords.filter(({ mappedCount }) => mappedCount === 0);
+          const hasEmptyOwner = emptyOwners.length > 0;
+          if (hasEmptyOwner) {
+            const historicalChromeSignatures = emptyOwners
+              .map(({ owner }) => historicalProviderChromeSignature(owner));
+            const historicalChromeSignature = historicalChromeSignatures.every(Boolean)
+              ? 'eligible'
+              : null;
+            if (historicalChromeSignature !== null) {
+              const priorSignature = historicalChromeObservationSignatures.get(ordinal);
+              const observationCount = priorSignature === historicalChromeSignature
+                ? Math.min(1_000, (historicalChromeObservationCounts.get(ordinal) || 0) + 1)
+                : 1;
+              historicalChromeObservationSignatures.set(ordinal, historicalChromeSignature);
+              historicalChromeObservationCounts.set(ordinal, observationCount);
+              if (observationCount >= 4) {
+                unresolvedTurnOwnerShells.delete(ordinal);
+                turnOwnerShellCleanObservationCounts.delete(ordinal);
+                continue;
+              }
+            } else {
+              historicalChromeObservationSignatures.delete(ordinal);
+              historicalChromeObservationCounts.delete(ordinal);
+            }
+            unresolvedTurnOwnerShells.add(ordinal);
+            turnOwnerShellCleanObservationCounts.set(ordinal, 0);
+            continue;
+          }
+          historicalChromeObservationSignatures.delete(ordinal);
+          historicalChromeObservationCounts.delete(ordinal);
+          if (!unresolvedTurnOwnerShells.has(ordinal)) continue;
+          const cleanCount = Math.min(
+            1_000,
+            (turnOwnerShellCleanObservationCounts.get(ordinal) || 0) + 1
+          );
+          turnOwnerShellCleanObservationCounts.set(ordinal, cleanCount);
+          if (cleanCount >= 4) {
+            unresolvedTurnOwnerShells.delete(ordinal);
+            turnOwnerShellCleanObservationCounts.delete(ordinal);
+          }
+        }
+      };
+      const readMessages = () => {
+        observeTurnOwnerShells();
+        const records = Array.from(document.querySelectorAll(messageSelector))
+          .map((node) => {
+            const turnOwner = node.closest(turnOrdinalSelector);
+            if (!providerNodeIsServed(node) || (turnOwner && !turnOwnerIsServed(turnOwner))) {
+              mappedInputInvalid = true;
+              return null;
+            }
+            const roleValue = node.getAttribute('data-message-author-role');
+            const role = typeof roleValue === 'string' && roleValue.length ? roleValue : 'unknown';
+            const text = transcriptTextForNode(node);
+            const normalizedRole = role.trim().toLowerCase();
+            const roleInvalid = role.length < 1 || role.length > 64 ||
+              /[\\u0000-\\u001f\\u007f]/.test(role) || !normalizedRole ||
+              normalizedRole.length > 64 || /[\\u0000-\\u001f\\u007f]/.test(normalizedRole);
+            const textInvalid = typeof text !== 'string' || text.length > maxTurnTextChars || text.includes('\\u0000');
+            if (roleInvalid || textInvalid) mappedInputInvalid = true;
+            return {
+              providerTurnIndex: providerTurnIndexForNode(node),
+              providerMessageId: providerMessageIdForNode(node),
+              role,
+              text: textInvalid ? '' : text,
+              turnOwner
+            };
+          })
+          .filter(Boolean);
+        const partCounts = new Map();
+        const positioned = records
+          .map((message) => {
+            const providerTurnPartIndex = message.turnOwner
+              ? partCounts.get(message.turnOwner) || 0
+              : null;
+            if (message.turnOwner) {
+              partCounts.set(message.turnOwner, providerTurnPartIndex + 1);
+            }
+            if (providerTurnPartIndex !== null && providerTurnPartIndex >= maxProviderTurnOrdinal) {
+              mappedInputInvalid = true;
+            }
+            return {
+              providerTurnIndex: message.providerTurnIndex,
+              providerTurnPartIndex,
+              providerMessageId: message.providerMessageId,
+              role: message.role,
+              text: message.text
+            };
+          });
+        const resolved = [];
+        for (const message of positioned) {
+          const positionKey = Number.isSafeInteger(message.providerTurnIndex) &&
+              Number.isSafeInteger(message.providerTurnPartIndex)
+            ? 'position:' + message.providerTurnIndex + ':' + message.providerTurnPartIndex
+            : null;
+          const messageKey = message.providerMessageId
+            ? 'id:' + message.providerMessageId
+            : positionKey
+              ? 'idless-empty:' + positionKey
+              : null;
+          if (typeof message.text !== 'string' || !message.text.trim().length) {
+            unresolvedMessageKeys.add(messageKey || 'unpositioned');
+            continue;
+          }
+          if (message.providerMessageId) unresolvedMessageKeys.delete(messageKey);
+          resolved.push(message);
+        }
+        return resolved;
+      };
       const messageNodes = () => Array.from(document.querySelectorAll(messageSelector));
+      const messageNodeForProviderId = (providerMessageId) => messageNodes()
+        .find((node) => providerMessageIdForNode(node) === providerMessageId) || null;
+      const token = (turn) => turn.providerMessageId
+        ? 'id:' + turn.providerMessageId
+        : Number.isSafeInteger(turn.providerTurnIndex) && Number.isSafeInteger(turn.providerTurnPartIndex)
+          ? 'turn:' + turn.providerTurnIndex + ':' + turn.providerTurnPartIndex
+          : 'fallback:' + turn.role + '\\u0000' + turn.text;
+      const hasProviderPosition = (turn) => Number.isSafeInteger(turn.providerTurnIndex) &&
+        Number.isSafeInteger(turn.providerTurnPartIndex);
+      const providerPositionKey = (turn) => hasProviderPosition(turn)
+        ? turn.providerTurnIndex + ':' + turn.providerTurnPartIndex
+        : null;
+      const compareProviderPosition = (left, right) =>
+        left.providerTurnIndex - right.providerTurnIndex ||
+        left.providerTurnPartIndex - right.providerTurnPartIndex;
+      const followsProviderPosition = (previous, turn) => {
+        if (turn.providerTurnIndex === previous.providerTurnIndex) {
+          return turn.providerTurnPartIndex === previous.providerTurnPartIndex + 1;
+        }
+        if (turn.providerTurnIndex <= previous.providerTurnIndex || turn.providerTurnPartIndex !== 0) {
+          return false;
+        }
+        if (turn.providerTurnIndex - previous.providerTurnIndex - 1 > maxProviderGapSpan) return false;
+        for (let ordinal = previous.providerTurnIndex + 1; ordinal < turn.providerTurnIndex; ordinal += 1) {
+          if (!provenAbsentProviderOrdinals.has(ordinal)) return false;
+        }
+        return true;
+      };
+      const startsAtProvenProviderBoundary = (turn) => {
+        if (!turn || !hasProviderPosition(turn) || turn.providerTurnPartIndex !== 0) return false;
+        const leadingGapSpan = turn.providerTurnIndex - 1;
+        if (leadingGapSpan > maxProviderGapSpan) return false;
+        for (let ordinal = 1; ordinal < turn.providerTurnIndex; ordinal += 1) {
+          if (!provenAbsentProviderOrdinals.has(ordinal)) return false;
+        }
+        return true;
+      };
+      const contiguousProviderPositionKeys = (turns) => {
+        const ordered = turns.filter(hasProviderPosition).sort(compareProviderPosition);
+        const keys = new Set();
+        if (!startsAtProvenProviderBoundary(ordered[0])) return keys;
+        keys.add(providerPositionKey(ordered[0]));
+        for (let index = 1; index < ordered.length; index += 1) {
+          if (!followsProviderPosition(ordered[index - 1], ordered[index])) break;
+          keys.add(providerPositionKey(ordered[index]));
+        }
+        return keys;
+      };
+      const sameTurn = (left, right) => {
+        if (token(left) !== token(right)) return false;
+        return left.providerTurnIndex === right.providerTurnIndex &&
+          left.providerTurnPartIndex === right.providerTurnPartIndex &&
+          left.providerMessageId === right.providerMessageId &&
+          left.role === right.role && left.text === right.text;
+      };
+      const sameSlice = (left, leftStart, right, rightStart, length) => {
+        for (let index = 0; index < length; index += 1) {
+          if (!sameTurn(left[leftStart + index], right[rightStart + index])) return false;
+        }
+        return true;
+      };
+      const fallbackIsAmbiguous = (turns) => {
+        const seen = new Set();
+        for (const turn of turns) {
+          if (turn.providerMessageId) continue;
+          const key = token(turn);
+          if (seen.has(key)) return true;
+          seen.add(key);
+        }
+        return false;
+      };
+      const visible = (node) => {
+        if (!node) return false;
+        const rectangle = node.getBoundingClientRect?.();
+        const style = window.getComputedStyle?.(node);
+        if (style?.visibility === 'hidden' || style?.display === 'none') return false;
+        if (
+          rectangle && Number.isFinite(rectangle.width) && Number.isFinite(rectangle.height) &&
+          (rectangle.width <= 0 || rectangle.height <= 0)
+        ) return false;
+        return true;
+      };
+      const generationIsActive = () => {
+        if (Array.from(document.querySelectorAll(stopSelector)).some(visible)) return true;
+        const messages = messageNodes();
+        return Array.from(document.querySelectorAll(generationIndicatorSelector)).some((node) => {
+          if (!visible(node)) return false;
+          if (messages.some((message) => message === node || message.contains?.(node))) return false;
+          const text = String(node.textContent || node.getAttribute?.('aria-label') || '').trim();
+          return /\\b(?:thinking|reasoning|working|searching|browsing|generating|analyzing)\\b/i.test(text);
+        });
+      };
+      const generationActiveBefore = generationIsActive();
+
+      let transcript = [];
+      let byteCount = 0;
+      let windowCount = 0;
+      let reason = null;
+      const providerPositionStabilityObservations = 4;
+      const providerPositionObservationCounts = new Map();
+      const unsettledProviderPositions = new Set();
+      const providerOwnerObservationSignatures = new Map();
+      const providerOwnerObservationCounts = new Map();
+      const unsettledProviderOwners = new Set();
+      const providerOwnerGroups = (window) => {
+        const groups = new Map();
+        for (const turn of window) {
+          if (!hasProviderPosition(turn)) continue;
+          const key = String(turn.providerTurnIndex);
+          const group = groups.get(key) || [];
+          group.push(turn);
+          groups.set(key, group);
+        }
+        return groups;
+      };
+      const providerOwnerSignature = (group) => JSON.stringify(group.map((turn) => ({
+        part: turn.providerTurnPartIndex,
+        identity: turn.providerMessageId
+          ? { kind: 'provider', id: turn.providerMessageId }
+          : { kind: 'fallback', role: turn.role, text: turn.text }
+      })));
+      const observeProviderOwners = (window, { reconcile = false } = {}) => {
+        for (const [ownerKey, group] of providerOwnerGroups(window)) {
+          const signature = providerOwnerSignature(group);
+          const priorSignature = providerOwnerObservationSignatures.get(ownerKey);
+          if (priorSignature === undefined) {
+            providerOwnerObservationSignatures.set(ownerKey, signature);
+            providerOwnerObservationCounts.set(ownerKey, 1);
+            unsettledProviderOwners.add(ownerKey);
+            continue;
+          }
+          if (priorSignature === signature) {
+            const count = Math.min(1_000, (providerOwnerObservationCounts.get(ownerKey) || 0) + 1);
+            providerOwnerObservationCounts.set(ownerKey, count);
+            if (count >= providerPositionStabilityObservations) unsettledProviderOwners.delete(ownerKey);
+            else unsettledProviderOwners.add(ownerKey);
+            continue;
+          }
+          if (!reconcile || (providerOwnerObservationCounts.get(ownerKey) || 0) >= providerPositionStabilityObservations) {
+            reason = 'compatibility_drift';
+            return { ok: false, failure: 'provider-owner-composition-changed' };
+          }
+          const ownerOrdinal = Number(ownerKey);
+          const existing = transcript.filter((turn) => turn.providerTurnIndex === ownerOrdinal);
+          if (
+            existing.some((turn) => !turn.providerMessageId) ||
+            group.some((turn) => !turn.providerMessageId)
+          ) {
+            reason = 'compatibility_drift';
+            return { ok: false, failure: 'provider-owner-idless-composition-changed' };
+          }
+          const existingIds = existing.map((turn) => turn.providerMessageId);
+          const nextIds = group.map((turn) => turn.providerMessageId);
+          let existingCursor = 0;
+          for (const providerMessageId of nextIds) {
+            if (providerMessageId === existingIds[existingCursor]) existingCursor += 1;
+          }
+          if (existingCursor !== existingIds.length || new Set(nextIds).size !== nextIds.length) {
+            reason = 'compatibility_drift';
+            return { ok: false, failure: 'provider-owner-sequence-changed' };
+          }
+          const otherProviderIds = new Set(transcript
+            .filter((turn) => turn.providerTurnIndex !== ownerOrdinal && turn.providerMessageId)
+            .map((turn) => turn.providerMessageId));
+          if (nextIds.some((providerMessageId) => otherProviderIds.has(providerMessageId))) {
+            reason = 'compatibility_drift';
+            return { ok: false, failure: 'duplicate-provider-id' };
+          }
+          const existingBytes = existing.reduce((total, turn) => total + turnBytes(turn), 0);
+          const replacementBytes = group.reduce((total, turn) => total + turnBytes(turn), 0);
+          const nextByteCount = byteCount - existingBytes + replacementBytes;
+          if (nextByteCount > cap) {
+            reason = 'max_capture_bytes';
+            return { ok: false, failure: 'capture-limit' };
+          }
+          for (const turn of existing) {
+            const positionKey = providerPositionKey(turn);
+            providerPositionObservationCounts.delete(positionKey);
+            unsettledProviderPositions.delete(positionKey);
+          }
+          transcript = [
+            ...transcript.filter((turn) => turn.providerTurnIndex !== ownerOrdinal),
+            ...group
+          ].sort(compareProviderPosition);
+          byteCount = nextByteCount;
+          for (const turn of group) {
+            const positionKey = providerPositionKey(turn);
+            providerPositionObservationCounts.set(positionKey, 1);
+            unsettledProviderPositions.add(positionKey);
+          }
+          providerOwnerObservationSignatures.set(ownerKey, signature);
+          providerOwnerObservationCounts.set(ownerKey, 1);
+          unsettledProviderOwners.add(ownerKey);
+        }
+        return { ok: true };
+      };
+      const adopt = (window) => {
+        windowCount += 1;
+        if (mappedInputInvalid) {
+          reason = 'compatibility_drift';
+          return false;
+        }
+        if (!window.length) return true;
+        const providerIds = new Set();
+        const hasProviderPositions = window.every(hasProviderPosition);
+        const hasAnyProviderPosition = window.some((turn) =>
+          Number.isSafeInteger(turn.providerTurnIndex) || Number.isSafeInteger(turn.providerTurnPartIndex)
+        );
+        if (hasAnyProviderPosition && !hasProviderPositions) {
+          reason = 'compatibility_drift';
+          return false;
+        }
+        for (let index = 0; index < window.length; index += 1) {
+          const turn = window[index];
+          if (turn.providerMessageId && providerIds.has(turn.providerMessageId)) {
+            reason = 'compatibility_drift';
+            return false;
+          }
+          if (turn.providerMessageId) providerIds.add(turn.providerMessageId);
+          if (
+            hasProviderPositions && index > 0 &&
+            compareProviderPosition(turn, window[index - 1]) <= 0
+          ) {
+            reason = 'compatibility_drift';
+            return false;
+          }
+        }
+        const ownerObservation = observeProviderOwners(window);
+        if (!ownerObservation.ok) return false;
+        const nextBytes = window.reduce((total, turn) => total + turnBytes(turn), 0);
+        if (nextBytes > cap) {
+          reason = 'max_capture_bytes';
+          return false;
+        }
+        transcript = [...window];
+        byteCount = nextBytes;
+        for (const turn of window) {
+          const positionKey = providerPositionKey(turn);
+          if (positionKey) {
+            providerPositionObservationCounts.set(positionKey, 1);
+            unsettledProviderPositions.add(positionKey);
+          }
+        }
+        return true;
+      };
+      const mergeWindow = (window, direction, { allowTextRefresh = false } = {}) => {
+        windowCount += 1;
+        if (mappedInputInvalid) {
+          reason = 'compatibility_drift';
+          return { ok: false, added: 0, failure: 'invalid-mapped-input' };
+        }
+        if (!window.length) return { ok: true, added: 0 };
+        if (!transcript.length) {
+          windowCount -= 1;
+          return { ok: adopt(window), added: transcript.length };
+        }
+        const windowHasProviderPositions = window.every(hasProviderPosition);
+        const windowHasAnyProviderPosition = window.some((turn) =>
+          Number.isSafeInteger(turn.providerTurnIndex) || Number.isSafeInteger(turn.providerTurnPartIndex)
+        );
+        if (windowHasProviderPositions) {
+          const seenWindowPositions = new Set();
+          for (let index = 0; index < window.length; index += 1) {
+            const positionKey = providerPositionKey(window[index]);
+            if (
+              seenWindowPositions.has(positionKey) ||
+              (index > 0 && compareProviderPosition(window[index], window[index - 1]) <= 0)
+            ) {
+              reason = 'compatibility_drift';
+              return { ok: false, added: 0, failure: 'provider-order-changed' };
+            }
+            seenWindowPositions.add(positionKey);
+          }
+          const ownerObservation = observeProviderOwners(window, { reconcile: true });
+          if (!ownerObservation.ok) return { ok: false, added: 0, failure: ownerObservation.failure };
+        }
+        const lockedProviderPositions = contiguousProviderPositionKeys(transcript);
+        const providerTurns = new Map();
+        const providerIndices = new Map();
+        const providerPositionTurns = new Map();
+        for (let index = 0; index < transcript.length; index += 1) {
+          const turn = transcript[index];
+          if (hasProviderPosition(turn)) {
+            const positionKey = providerPositionKey(turn);
+            if (providerPositionTurns.has(positionKey)) {
+              reason = 'compatibility_drift';
+              return { ok: false, added: 0, failure: 'duplicate-provider-position' };
+            }
+            providerPositionTurns.set(positionKey, turn);
+          }
+          if (!turn.providerMessageId) continue;
+          if (providerTurns.has(turn.providerMessageId)) {
+            reason = 'compatibility_drift';
+            return { ok: false, added: 0, failure: 'duplicate-provider-id' };
+          }
+          providerTurns.set(turn.providerMessageId, turn);
+          providerIndices.set(turn.providerMessageId, index);
+        }
+        const windowProviderIds = new Set();
+        const windowProviderPositions = new Map();
+        let refreshed = 0;
+        for (const turn of window) {
+          if (hasProviderPosition(turn)) {
+            const positionKey = providerPositionKey(turn);
+            if (windowProviderPositions.has(positionKey)) {
+              reason = 'compatibility_drift';
+              return { ok: false, added: 0, failure: 'duplicate-provider-position' };
+            }
+            windowProviderPositions.set(positionKey, turn);
+            const priorPosition = providerPositionTurns.get(positionKey);
+            if (priorPosition && !sameTurn(priorPosition, turn)) {
+              const textRefresh = (
+                allowTextRefresh ||
+                !lockedProviderPositions.has(positionKey) ||
+                (providerPositionObservationCounts.get(positionKey) || 0) < providerPositionStabilityObservations
+              ) &&
+                priorPosition.providerMessageId === turn.providerMessageId &&
+                priorPosition.role === turn.role &&
+                priorPosition.text !== turn.text;
+              if (textRefresh) {
+                const nextByteCount = byteCount - turnBytes(priorPosition) + turnBytes(turn);
+                if (nextByteCount > cap) {
+                  reason = 'max_capture_bytes';
+                  return { ok: false, added: 0, refreshed, failure: 'capture-limit' };
+                }
+                transcript = transcript.map((candidate) =>
+                  providerPositionKey(candidate) === positionKey ? turn : candidate
+                );
+                byteCount = nextByteCount;
+                providerPositionTurns.set(positionKey, turn);
+                if (turn.providerMessageId) providerTurns.set(turn.providerMessageId, turn);
+                providerPositionObservationCounts.set(positionKey, 1);
+                unsettledProviderPositions.add(positionKey);
+                refreshed += 1;
+                continue;
+              }
+              reason = 'compatibility_drift';
+              const changedField = priorPosition.providerMessageId !== turn.providerMessageId
+                ? 'id'
+                : priorPosition.role !== turn.role
+                  ? 'role'
+                  : 'text';
+              return {
+                ok: false,
+                added: 0,
+                failure: 'provider-position-' + changedField + '-changed'
+              };
+            }
+            if (priorPosition) {
+              const observationCount = Math.min(
+                1_000,
+                (providerPositionObservationCounts.get(positionKey) || 0) + 1
+              );
+              providerPositionObservationCounts.set(positionKey, observationCount);
+              if (observationCount >= providerPositionStabilityObservations) {
+                unsettledProviderPositions.delete(positionKey);
+              } else {
+                unsettledProviderPositions.add(positionKey);
+              }
+            }
+          }
+          if (turn.providerMessageId && windowProviderIds.has(turn.providerMessageId)) {
+            reason = 'compatibility_drift';
+            return { ok: false, added: 0, failure: 'duplicate-provider-id' };
+          }
+          if (turn.providerMessageId) windowProviderIds.add(turn.providerMessageId);
+          const prior = turn.providerMessageId ? providerTurns.get(turn.providerMessageId) : null;
+          if (prior && !sameTurn(prior, turn)) {
+            reason = 'compatibility_drift';
+            return { ok: false, added: 0, failure: 'compatibility-drift' };
+          }
+        }
+        if (windowHasProviderPositions) {
+          if (!transcript.every(hasProviderPosition)) {
+            reason = 'compatibility_drift';
+            return { ok: false, added: 0, failure: 'provider-position-coverage-changed' };
+          }
+          for (let index = 1; index < window.length; index += 1) {
+            if (compareProviderPosition(window[index], window[index - 1]) <= 0) {
+              reason = 'compatibility_drift';
+              return { ok: false, added: 0, failure: 'provider-order-changed' };
+            }
+          }
+          const additions = window.filter((turn) => !providerPositionTurns.has(providerPositionKey(turn)));
+          const addedBytes = additions.reduce((total, turn) => total + turnBytes(turn), 0);
+          if (byteCount + addedBytes > cap) {
+            reason = 'max_capture_bytes';
+            return { ok: false, added: 0, failure: 'capture-limit' };
+          }
+          transcript = [...transcript, ...additions]
+            .sort(compareProviderPosition);
+          for (const turn of additions) {
+            const positionKey = providerPositionKey(turn);
+            providerPositionObservationCounts.set(positionKey, 1);
+            unsettledProviderPositions.add(positionKey);
+          }
+          byteCount += addedBytes;
+          return { ok: true, added: additions.length, refreshed };
+        }
+        if (windowHasAnyProviderPosition) {
+          reason = 'compatibility_drift';
+          return { ok: false, added: 0, failure: 'provider-position-coverage-changed' };
+        }
+        if (window.every((turn) => turn.providerMessageId)) {
+          const known = [];
+          const novel = [];
+          for (let windowIndex = 0; windowIndex < window.length; windowIndex += 1) {
+            const providerMessageId = window[windowIndex].providerMessageId;
+            if (providerIndices.has(providerMessageId)) {
+              known.push({ windowIndex, transcriptIndex: providerIndices.get(providerMessageId) });
+            } else {
+              novel.push(windowIndex);
+            }
+          }
+          if (known.length > 0) {
+            for (let index = 1; index < known.length; index += 1) {
+              if (known[index].transcriptIndex <= known[index - 1].transcriptIndex) {
+                reason = 'compatibility_drift';
+                return { ok: false, added: 0, failure: 'provider-order-changed' };
+              }
+            }
+            if (!novel.length) return { ok: true, added: 0 };
+            const firstKnown = known[0];
+            const lastKnown = known[known.length - 1];
+            const additions = direction === 'prepend' && firstKnown.transcriptIndex === 0 &&
+                novel.every((windowIndex) => windowIndex < firstKnown.windowIndex)
+              ? window.slice(0, firstKnown.windowIndex)
+              : direction === 'append' && lastKnown.transcriptIndex === transcript.length - 1 &&
+                  novel.every((windowIndex) => windowIndex > lastKnown.windowIndex)
+                ? window.slice(lastKnown.windowIndex + 1)
+                : null;
+            if (additions) {
+              const addedBytes = additions.reduce((total, turn) => total + turnBytes(turn), 0);
+              if (byteCount + addedBytes > cap) {
+                reason = 'max_capture_bytes';
+                return { ok: false, added: 0, failure: 'capture-limit' };
+              }
+              transcript = direction === 'prepend'
+                ? [...additions, ...transcript]
+                : [...transcript, ...additions];
+              byteCount += addedBytes;
+              return { ok: true, added: additions.length };
+            }
+          }
+        }
+        if (window.length <= transcript.length) {
+          for (let start = 0; start <= transcript.length - window.length; start += 1) {
+            if (sameSlice(transcript, start, window, 0, window.length)) {
+              return { ok: true, added: 0 };
+            }
+          }
+        }
+        const limit = Math.min(window.length, transcript.length);
+        const candidates = [];
+        for (let overlap = 1; overlap <= limit; overlap += 1) {
+          const matches = direction === 'prepend'
+            ? sameSlice(window, window.length - overlap, transcript, 0, overlap)
+            : sameSlice(transcript, transcript.length - overlap, window, 0, overlap);
+          if (matches) candidates.push(overlap);
+        }
+        if (!candidates.length) {
+          return { ok: false, added: 0, failure: 'no-overlap' };
+        }
+        const overlap = candidates[candidates.length - 1];
+        const additions = direction === 'prepend'
+          ? window.slice(0, window.length - overlap)
+          : window.slice(overlap);
+        if (additions.length > 0 && candidates.length > 1 && fallbackIsAmbiguous([...transcript, ...window])) {
+          reason = 'ambiguous_message_overlap';
+          return { ok: false, added: 0, failure: 'ambiguous-fallback' };
+        }
+        const addedBytes = additions.reduce((total, turn) => total + turnBytes(turn), 0);
+        if (byteCount + addedBytes > cap) {
+          reason = 'max_capture_bytes';
+          return { ok: false, added: 0, failure: 'capture-limit' };
+        }
+        transcript = direction === 'prepend'
+          ? [...additions, ...transcript]
+          : [...transcript, ...additions];
+        byteCount += addedBytes;
+        return { ok: true, added: additions.length };
+      };
+
+      const merge = (window, direction, options = {}) => {
+        const result = mergeWindow(window, direction, options);
+        return { ...result, observedWindow: window };
+      };
+      const visibleWindowHasUnsettledProviderState = (window) => window.some((turn) => {
+        const positionKey = providerPositionKey(turn);
+        const ownerKey = Number.isSafeInteger(turn.providerTurnIndex)
+          ? String(turn.providerTurnIndex)
+          : null;
+        return (positionKey ? unsettledProviderPositions.has(positionKey) : false) ||
+          (ownerKey ? unsettledProviderOwners.has(ownerKey) : false);
+      });
+      const resultHasStableObservedWindow = (result) => result.ok &&
+        (result.refreshed || 0) <= 0 &&
+        Array.isArray(result.observedWindow) &&
+        result.observedWindow.length > 0 &&
+        !visibleWindowHasUnsettledProviderState(result.observedWindow);
+      const confirmStableWindow = async (direction, initialResult) => {
+        let result = initialResult;
+        for (let retry = 0; result.ok && retry < providerPositionStabilityObservations * 2; retry += 1) {
+          await settleProviderObservation();
+          const observedWindow = readMessages();
+          result = merge(observedWindow, direction);
+          if (resultHasStableObservedWindow(result)) return result;
+        }
+        if (result.ok) {
+          reason = 'compatibility_drift';
+          return { ok: false, added: 0, failure: 'provider-position-did-not-settle' };
+        }
+        return result;
+      };
+
       const findScroller = () => {
         const firstMessage = messageNodes()[0] || null;
         const candidates = [];
@@ -591,7 +1753,11 @@ export class ChatGPTController {
             return {
               node,
               overflow,
-              score: (overflow > 8 && acceptsVerticalScroll ? 1_000_000 : 0) + (containsMessage ? 10_000 : 0) + (messageCount * 100) + Math.min(node.clientHeight, 2_000) * 1_000 + Math.max(0, overflow)
+              score: (overflow > 8 && acceptsVerticalScroll ? 1_000_000 : 0) +
+                (containsMessage ? 10_000 : 0) +
+                (messageCount * 100) +
+                Math.min(node.clientHeight, 2_000) * 1_000 +
+                Math.max(0, overflow)
             };
           })
           .sort((left, right) => right.score - left.score);
@@ -607,7 +1773,6 @@ export class ChatGPTController {
           return moved;
         });
         if (movable) return movable.node;
-
         const windowScroller = {
           get scrollTop() {
             return Math.max(window.scrollY || 0, document.documentElement.scrollTop || 0, document.body?.scrollTop || 0);
@@ -634,60 +1799,42 @@ export class ChatGPTController {
         }
         return ranked.every(({ overflow }) => overflow <= 1) ? ranked[0]?.node || null : null;
       };
-      const transcript = [];
-      const seenMessages = new Set();
-      const capture = ({ prepend = false } = {}) => {
-        const fresh = [];
-        for (const message of readMessages()) {
-          if (seenMessages.has(message.identity)) continue;
-          seenMessages.add(message.identity);
-          fresh.push(message);
-        }
-        if (prepend) transcript.unshift(...fresh);
-        else transcript.push(...fresh);
-        return fresh.length;
-      };
-      const captureResult = ({ complete, reason, scrollPasses }) => {
-        const fullText = transcript
-          .map((message) => displayRole(message.role) + '\\n' + message.text)
-          .join('\\n\\n');
-        if (fullText.length > cap) {
-          if (complete) reason = 'max_chars';
-          complete = false;
-        }
-        if (transcript[0]?.role === 'assistant') {
-          if (complete) reason = 'leading_turn_missing';
-          complete = false;
-        }
+
+      const initial = readMessages();
+      windowCount += 1;
+      if (!initial.length || mappedInputInvalid) {
+        const generationActiveAfter = generationIsActive();
         return {
-          text: fullText.slice(0, cap),
-          complete,
-          truncated: !complete,
-          reason,
-          messageCount: transcript.length,
-          scrollPasses
-        };
-      };
-      const initialMessages = readMessages();
-      if (!initialMessages.length) {
-        return {
-          text: '',
-          complete: false,
-          truncated: true,
-          reason: 'conversation_messages_not_found',
-          messageCount: 0,
-          scrollPasses: 0
+          status: 'partial',
+          reason: mappedInputInvalid
+            ? 'compatibility_drift'
+            : generationActiveBefore || generationActiveAfter
+            ? 'conversation_generation_active'
+            : 'conversation_messages_not_found',
+          rawTurns: [],
+          evidence: {
+            topBoundary: false,
+            bottomBoundary: false,
+            orderedWindowStitching: false,
+            scrollPasses: 0,
+            windowCount,
+            messageCount: 0,
+            providerIdCount: 0,
+            byteCount: 0
+          }
         };
       }
+      windowCount -= 1;
+
       const scroller = findScroller();
+      let scrollPasses = 0;
+      let topBoundary = false;
+      let bottomBoundary = false;
       if (!scroller) {
-        capture();
-        let complete = false;
-        let reason = 'conversation_scroller_not_found';
-        let scrollPasses = 0;
-        let stillPasses = 0;
+        adopt(initial);
         let quietPasses = 0;
-        for (; scrollPasses < 200; scrollPasses += 1) {
+        for (let topPasses = 0; !reason && topPasses < 100; topPasses += 1) {
+          scrollPasses += 1;
           const firstMessage = messageNodes()[0];
           if (!firstMessage) {
             reason = 'conversation_messages_not_found';
@@ -696,151 +1843,651 @@ export class ChatGPTController {
           const beforeTop = firstMessage.getBoundingClientRect().top;
           firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
           await settle();
-          const freshCount = capture({ prepend: true });
+          let result = merge(readMessages(), 'prepend', { allowTextRefresh: true });
+          result = await confirmStableWindow('prepend', result);
           const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
           const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
-          if (freshCount > 0) {
-            stillPasses = 0;
+          if (!result.ok) {
+            if (!reason) reason = 'ambiguous_message_overlap';
+            break;
+          }
+          if (result.added > 0 || result.refreshed > 0 || moved) {
             quietPasses = 0;
             continue;
           }
-          if (!moved) {
-            quietPasses += 1;
-            if (quietPasses >= 4) {
-              complete = true;
-              reason = null;
-              break;
-            }
-            await wait(250 * quietPasses);
-            continue;
-          }
-          quietPasses = 0;
-          stillPasses += 1;
-          if (stillPasses >= 3) {
-            reason = 'conversation_scroll_stalled';
+          quietPasses += 1;
+          if (quietPasses >= 4) {
+            topBoundary = true;
             break;
           }
+          await wait(250 * quietPasses);
         }
-        if (scrollPasses >= 200) reason = 'conversation_scroll_limit_reached';
-        return captureResult({ complete, reason, scrollPasses });
-      }
+        if (!reason && !topBoundary) {
+          reason = 'conversation_capture_limit_reached';
+        }
 
-      const originalTop = scroller.scrollTop;
-      let complete = true;
-      let reason = null;
-      let scrollPasses = 0;
-      try {
-        scroller.scrollTop = 0;
-        await settle();
-        capture();
-
-        const maxTopPasses = 60;
-        const topCaptureStartedAt = performance.now();
-        let topProven = false;
-        let stillPasses = 0;
-        let quietPasses = 0;
-        for (let topPasses = 0; topPasses < maxTopPasses; topPasses += 1) {
+        quietPasses = 0;
+        for (let bottomPasses = 0; !reason && bottomPasses < 100; bottomPasses += 1) {
           scrollPasses += 1;
-          if (performance.now() - topCaptureStartedAt >= 15_000) {
-            complete = false;
-            reason = reason || 'conversation_top_capture_timeout';
+          const messages = messageNodes();
+          const lastMessage = messages[messages.length - 1];
+          if (!lastMessage) {
+            reason = 'conversation_messages_not_found';
             break;
           }
-          const firstMessage = messageNodes()[0];
-          if (!firstMessage) {
-            complete = false;
-            reason = reason || 'conversation_messages_not_found';
-            break;
-          }
-          const beforeTop = firstMessage.getBoundingClientRect().top;
-          firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
-          scroller.scrollTop = 0;
+          const beforeTop = lastMessage.getBoundingClientRect().top;
+          lastMessage.scrollIntoView({ block: 'start', behavior: 'instant' });
           await settle();
-          const freshCount = capture({ prepend: true });
-          const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
+          let result = merge(readMessages(), 'append');
+          result = await confirmStableWindow('append', result);
+          const afterTop = lastMessage.isConnected ? lastMessage.getBoundingClientRect().top : Number.NaN;
           const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
-          if (freshCount > 0) {
-            stillPasses = 0;
+          if (!result.ok) {
+            if (!reason) reason = 'ambiguous_message_overlap';
+            break;
+          }
+          if (result.added > 0 || moved) {
             quietPasses = 0;
             continue;
           }
-          if (!moved && scroller.scrollTop <= 1) {
-            quietPasses += 1;
-            if (quietPasses >= 4) {
-              topProven = true;
+          quietPasses += 1;
+          if (quietPasses >= 4) {
+            bottomBoundary = true;
+            break;
+          }
+          await wait(250 * quietPasses);
+        }
+        if (!reason && !bottomBoundary) {
+          reason = 'conversation_capture_limit_reached';
+        }
+      } else {
+        const originalTop = scroller.scrollTop;
+        const recoverDisjointWindow = async (direction, previousScrollTop, attemptedScrollTop) => {
+          const boundary = direction === 'prepend' ? transcript[0] : transcript[transcript.length - 1];
+          if (!boundary?.providerMessageId) {
+            reason = 'ambiguous_message_overlap';
+            return { ok: false, added: 0, failure: 'unanchored-overlap' };
+          }
+          const block = direction === 'prepend' ? 'end' : 'start';
+          const movedInDirection = () => direction === 'prepend'
+            ? scroller.scrollTop < previousScrollTop - 0.5
+            : scroller.scrollTop > previousScrollTop + 0.5;
+          for (let retry = 0; retry < 6; retry += 1) {
+            scroller.scrollTop = previousScrollTop;
+            await wait(120 + (retry * 80));
+            const anchor = messageNodeForProviderId(boundary.providerMessageId);
+            if (anchor) {
+              anchor.scrollIntoView({ block, behavior: 'instant' });
+              await wait(120 + (retry * 80));
+              const anchored = merge(readMessages(), direction);
+              if ((anchored.ok && (anchored.added > 0 || movedInDirection())) ||
+                  (!anchored.ok && anchored.failure !== 'no-overlap')) return anchored;
+            }
+
+            const divisor = 2 ** (retry + 1);
+            const bridgeTop = previousScrollTop + ((attemptedScrollTop - previousScrollTop) / divisor);
+            if (Math.abs(bridgeTop - previousScrollTop) <= 0.5) break;
+            scroller.scrollTop = bridgeTop;
+            await wait(120 + (retry * 80));
+            const bridged = merge(readMessages(), direction);
+            if ((bridged.ok && (bridged.added > 0 || movedInDirection())) ||
+                (!bridged.ok && bridged.failure !== 'no-overlap')) return bridged;
+          }
+          reason = 'ambiguous_message_overlap';
+          return { ok: false, added: 0, failure: 'overlap-recovery-exhausted' };
+        };
+        try {
+          const topStartedAt = performance.now();
+          let quietPasses = 0;
+          let stillPasses = 0;
+          for (let topPasses = 0; !reason && topPasses < 60; topPasses += 1) {
+            scrollPasses += 1;
+            if (performance.now() - topStartedAt >= 15_000) {
+              reason = 'conversation_capture_timeout';
               break;
             }
-            await wait(250 * quietPasses);
-            continue;
-          }
-          quietPasses = 0;
-          stillPasses += 1;
-          if (stillPasses >= 3) {
-            complete = false;
-            reason = reason || 'conversation_top_scroll_stalled';
-            break;
-          }
-        }
-        if (!topProven) {
-          complete = false;
-          reason = reason || 'conversation_top_not_reached';
-        }
-
-        const maxDownwardPasses = 200;
-        const downwardCaptureStartedAt = performance.now();
-        let downwardPasses = 0;
-        for (; downwardPasses < maxDownwardPasses; downwardPasses += 1) {
-          scrollPasses += 1;
-          if (performance.now() - downwardCaptureStartedAt >= 45_000) {
-            complete = false;
-            reason = reason || 'conversation_capture_timeout';
-            break;
-          }
-          const top = scroller.scrollTop;
-          const maximum = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-          if (top >= maximum - 1) {
+            const firstMessage = messageNodes()[0];
+            if (!firstMessage) {
+              reason = 'conversation_messages_not_found';
+              break;
+            }
+            const beforeTop = firstMessage.getBoundingClientRect().top;
+            const previousScrollTop = scroller.scrollTop;
+            if (previousScrollTop > 1) {
+              scroller.scrollTop = 0;
+            } else {
+              firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
+              scroller.scrollTop = 0;
+            }
             await settle();
-            capture();
-            break;
+            const attemptedScrollTop = scroller.scrollTop;
+            let result = merge(readMessages(), 'prepend', { allowTextRefresh: true });
+            if (!result.ok && result.failure === 'no-overlap') {
+              result = await recoverDisjointWindow('prepend', previousScrollTop, attemptedScrollTop);
+            }
+            result = await confirmStableWindow('prepend', result);
+            const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
+            const moved = scroller.scrollTop < previousScrollTop ||
+              !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
+            if (!result.ok) {
+              if (!reason) reason = 'ambiguous_message_overlap';
+              break;
+            }
+            if (result.added > 0 || result.refreshed > 0 || moved) {
+              quietPasses = 0;
+              stillPasses = 0;
+              continue;
+            }
+            if (scroller.scrollTop <= 1) {
+              quietPasses += 1;
+              if (quietPasses >= 4) {
+                topBoundary = true;
+                break;
+              }
+              await wait(250 * quietPasses);
+              continue;
+            }
+            quietPasses = 0;
+            stillPasses += 1;
+            if (stillPasses >= 3) {
+              reason = 'conversation_scroll_stalled';
+              break;
+            }
           }
-          const step = Math.max(240, Math.floor(scroller.clientHeight * 0.8));
-          scroller.scrollTop = Math.min(maximum, top + step);
-          await settle();
-          capture();
-          if (scroller.scrollTop <= top && scroller.scrollHeight - scroller.clientHeight > top + 1) {
-            complete = false;
-            reason = reason || 'conversation_scroll_stalled';
-            break;
+          if (!reason && !topBoundary) reason = 'conversation_top_not_reached';
+
+          const downStartedAt = performance.now();
+          const maxDownwardNavigationPasses = 4_000;
+          const maxDownwardGapProofPasses = maxProviderGapSpan * maxGapScanSteps;
+          const maxDownwardCaptureMs = 300_000;
+          let downwardNavigationPasses = 0;
+          let downwardGapProofPasses = 0;
+          let bottomQuietPasses = 0;
+          let downwardProviderFrontier = 0;
+          let downwardSearchLower = null;
+          let downwardSearchUpper = null;
+          let downwardSearchExpectedTop = null;
+          let downwardSearchPreviousSnapshot = null;
+          let downwardSearchCandidateOrdinals = [];
+          let downwardSearchSuccessorOrdinal = null;
+          let downwardSearchSawPredecessor = false;
+          let downwardSearchSawSuccessor = false;
+          let downwardSearchStartedAt = null;
+          const observedTurnOwnerMessageCounts = new Map();
+          const maxGapScrollPositionRetries = 6;
+          const settleGapScan = async () => {
+            if (typeof requestAnimationFrame === 'function') {
+              await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+              return;
+            }
+            await wait(1);
+          };
+          const restoreGapScrollPosition = async (expectedTop) => {
+            let adjusted = false;
+            for (let attempt = 0; attempt < maxGapScrollPositionRetries; attempt += 1) {
+              if (Math.abs(scroller.scrollTop - expectedTop) <= 0.5) return { ok: true, adjusted };
+              adjusted = true;
+              scroller.scrollTop = expectedTop;
+              await settleGapScan();
+            }
+            return {
+              ok: Math.abs(scroller.scrollTop - expectedTop) <= 0.5,
+              adjusted
+            };
+          };
+          const resetDownwardSearch = () => {
+            downwardSearchLower = null;
+            downwardSearchUpper = null;
+            downwardSearchExpectedTop = null;
+            downwardSearchPreviousSnapshot = null;
+            downwardSearchCandidateOrdinals = [];
+            downwardSearchSuccessorOrdinal = null;
+            downwardSearchSawPredecessor = false;
+            downwardSearchSawSuccessor = false;
+            downwardSearchStartedAt = null;
+          };
+          const nextDownwardScrollTop = (top, maximum) => {
+            const mappedNodes = messageNodes();
+            const turnOwners = Array.from(document.querySelectorAll(turnOrdinalSelector));
+            const scrollerRectangle = scroller.getBoundingClientRect?.();
+            const viewportTop = Number.isFinite(scrollerRectangle?.top) ? scrollerRectangle.top : 0;
+            const viewportBottom = viewportTop + Math.max(1, scroller.clientHeight);
+            const rectangleForNode = (node) => {
+              const turnOwner = node?.closest?.(turnOrdinalSelector);
+              const ownerRectangle = turnOwner?.getBoundingClientRect?.();
+              return ownerRectangle &&
+                  Number.isFinite(ownerRectangle.top) && Number.isFinite(ownerRectangle.bottom)
+                ? ownerRectangle
+                : node?.getBoundingClientRect?.();
+            };
+            const intersectsViewport = (node) => {
+              const rectangle = rectangleForNode(node);
+              return Number.isFinite(rectangle?.top) && Number.isFinite(rectangle?.bottom) &&
+                rectangle.bottom > viewportTop && rectangle.top < viewportBottom;
+            };
+            const nodesByOrdinal = new Map();
+            const viewportNodesByOrdinal = new Map();
+            const mappedCountsByOrdinal = new Map();
+            const viewportMappedOrdinals = new Set();
+            for (const node of mappedNodes) {
+              const ordinal = providerTurnIndexForNode(node);
+              if (Number.isSafeInteger(ordinal)) {
+                mappedCountsByOrdinal.set(ordinal, (mappedCountsByOrdinal.get(ordinal) || 0) + 1);
+                if (intersectsViewport(node)) viewportMappedOrdinals.add(ordinal);
+                observedTurnOwnerMessageCounts.set(
+                  ordinal,
+                  Math.max(observedTurnOwnerMessageCounts.get(ordinal) || 0, mappedCountsByOrdinal.get(ordinal))
+                );
+              }
+              const text = transcriptTextForNode(node);
+              if (
+                Number.isSafeInteger(ordinal) &&
+                text.trim().length > 0
+              ) {
+                nodesByOrdinal.set(ordinal, node);
+                if (intersectsViewport(node)) viewportNodesByOrdinal.set(ordinal, node);
+              }
+            }
+            const viewportOwnerOrdinals = new Set();
+            for (const owner of turnOwners) {
+              const matched = /^conversation-turn-(\\d+)$/.exec(owner.getAttribute?.('data-testid') || '');
+              const ordinal = matched ? Number(matched[1]) : null;
+              if (!Number.isSafeInteger(ordinal)) continue;
+              if (intersectsViewport(owner)) viewportOwnerOrdinals.add(ordinal);
+              const mappedCount = (owner.matches?.(messageSelector) ? 1 : 0) +
+                (owner.querySelectorAll?.(messageSelector)?.length || 0);
+              observedTurnOwnerMessageCounts.set(
+                ordinal,
+                Math.max(observedTurnOwnerMessageCounts.get(ordinal) || 0, mappedCount)
+              );
+            }
+            let target = nodesByOrdinal.get(downwardProviderFrontier) || null;
+            let frontierAdvanced = false;
+            const capturedProviderOrdinals = new Set(
+              transcript.filter(hasProviderPosition).map((turn) => turn.providerTurnIndex)
+            );
+            while (
+              nodesByOrdinal.has(downwardProviderFrontier + 1) ||
+              capturedProviderOrdinals.has(downwardProviderFrontier + 1) ||
+              provenAbsentProviderOrdinals.has(downwardProviderFrontier + 1)
+            ) {
+              downwardProviderFrontier += 1;
+              target = nodesByOrdinal.get(downwardProviderFrontier) || target;
+              frontierAdvanced = true;
+            }
+            if (frontierAdvanced) {
+              resetDownwardSearch();
+            }
+            const missingOrdinal = downwardProviderFrontier + 1;
+            const nearVisibleFutureOrdinals = [...viewportNodesByOrdinal.keys()]
+              .filter((ordinal) => ordinal > missingOrdinal && ordinal <= missingOrdinal + maxProviderGapSpan);
+            if (nearVisibleFutureOrdinals.length > 0) {
+              if (downwardSearchUpper === null) {
+                const successorOrdinal = Math.min(...nearVisibleFutureOrdinals);
+                const servedScrollInterval = (node) => {
+                  const rectangle = rectangleForNode(node);
+                  if (
+                    !Number.isFinite(rectangle?.top) ||
+                    !Number.isFinite(rectangle?.bottom) ||
+                    rectangle.bottom <= rectangle.top
+                  ) return null;
+                  return {
+                    lower: Math.floor(top + rectangle.top - viewportBottom) + 1,
+                    upper: Math.ceil(top + rectangle.bottom - viewportTop) - 1
+                  };
+                };
+                const successorInterval = servedScrollInterval(
+                  viewportNodesByOrdinal.get(successorOrdinal)
+                );
+                const predecessorOrdinal = missingOrdinal - 1;
+                const predecessorInterval = predecessorOrdinal === 0 && topBoundary
+                  ? { lower: 0, upper: Number.POSITIVE_INFINITY }
+                  : servedScrollInterval(nodesByOrdinal.get(predecessorOrdinal));
+                if (!successorInterval || (predecessorOrdinal === 0 && !predecessorInterval)) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                const overlapLower = predecessorInterval
+                  ? Math.max(
+                      0,
+                      predecessorOrdinal === 0 ? 0 : predecessorInterval.lower,
+                      successorInterval.lower
+                    )
+                  : null;
+                const overlapUpper = predecessorInterval
+                  ? Math.min(
+                      maximum,
+                      predecessorInterval.upper,
+                      successorInterval.upper
+                    )
+                  : null;
+                const overlapSampleCount = overlapLower === null || overlapUpper === null
+                  ? 0
+                  : overlapUpper - overlapLower + 1;
+                const needsOvershootRecovery = predecessorOrdinal > 0 && overlapSampleCount <= 2;
+                const searchLower = needsOvershootRecovery
+                  ? Math.ceil(Math.max(0, top - scroller.clientHeight))
+                  : overlapLower;
+                const searchUpper = needsOvershootRecovery
+                  ? Math.floor(Math.min(maximum, top + scroller.clientHeight))
+                  : overlapUpper;
+                const gapScanSampleCount = searchUpper - searchLower + 1;
+                if (!Number.isSafeInteger(searchLower) || !Number.isSafeInteger(searchUpper)) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                if (gapScanSampleCount <= 2) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                if (gapScanSampleCount > maxGapScanSteps) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                downwardSearchLower = searchLower;
+                downwardSearchUpper = searchUpper;
+                downwardSearchSuccessorOrdinal = successorOrdinal;
+                downwardSearchCandidateOrdinals = Array.from(
+                  { length: successorOrdinal - missingOrdinal },
+                  (_unused, offset) => missingOrdinal + offset
+                );
+                downwardSearchStartedAt = performance.now();
+                downwardSearchExpectedTop = downwardSearchLower;
+                return downwardSearchLower;
+              }
+            }
+            if (downwardSearchUpper !== null) {
+              if (performance.now() - downwardSearchStartedAt >= maxGapScanMs) {
+                reason = 'ambiguous_message_overlap';
+                return top;
+              }
+              const servedOrdinals = new Set([
+                ...viewportMappedOrdinals,
+                ...viewportOwnerOrdinals
+              ]);
+              const servedProviderIds = new Set(mappedNodes
+                .filter(intersectsViewport)
+                .map((node) => providerMessageIdForNode(node))
+                .filter(Boolean));
+              const sortedServedOrdinals = [...servedOrdinals].sort((left, right) => left - right);
+              if (!sortedServedOrdinals.length) {
+                reason = 'ambiguous_message_overlap';
+                return top;
+              }
+              const predecessorOrdinal = downwardSearchCandidateOrdinals[0] - 1;
+              const snapshot = {
+                top,
+                low: sortedServedOrdinals[0],
+                high: sortedServedOrdinals[sortedServedOrdinals.length - 1],
+                providerIds: servedProviderIds
+              };
+              if (downwardSearchPreviousSnapshot) {
+                const previous = downwardSearchPreviousSnapshot;
+                const scrollConnected = top >= previous.top - 0.5 && top - previous.top <= 1.5;
+                const sharesProviderAnchor = [...servedProviderIds].some((id) => previous.providerIds.has(id));
+                const ordinalRangesConnect = snapshot.low <= previous.high + 1 && previous.low <= snapshot.high + 1;
+                if (!scrollConnected || (!sharesProviderAnchor && !ordinalRangesConnect)) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+              }
+              downwardSearchPreviousSnapshot = snapshot;
+              downwardSearchSawPredecessor ||= predecessorOrdinal === 0
+                ? topBoundary
+                : servedOrdinals.has(predecessorOrdinal);
+              downwardSearchSawSuccessor ||= servedOrdinals.has(downwardSearchSuccessorOrdinal);
+              if (top >= downwardSearchUpper) {
+                const candidateOrdinals = new Set(downwardSearchCandidateOrdinals);
+                const observedCandidate = downwardSearchCandidateOrdinals.some((ordinal) =>
+                  (observedTurnOwnerMessageCounts.get(ordinal) || 0) > 0
+                ) || transcript.some((turn) => candidateOrdinals.has(turn.providerTurnIndex));
+                if (observedCandidate) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                if (!downwardSearchSawPredecessor) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                if (!downwardSearchSawSuccessor) {
+                  reason = 'ambiguous_message_overlap';
+                  return top;
+                }
+                for (const ordinal of downwardSearchCandidateOrdinals) {
+                  provenAbsentProviderOrdinals.add(ordinal);
+                }
+                downwardProviderFrontier = downwardSearchSuccessorOrdinal - 1;
+                resetDownwardSearch();
+                return nextDownwardScrollTop(top, maximum);
+              }
+              const nextTop = Math.min(downwardSearchUpper, Math.floor(top) + 1);
+              downwardSearchExpectedTop = nextTop;
+              return nextTop;
+            }
+            const step = Math.max(240, Math.floor(scroller.clientHeight * 0.8));
+            if (!target) return Math.min(maximum, top + step);
+            const rectangle = rectangleForNode(target);
+            const targetBottom = Number.isFinite(rectangle?.bottom) ? rectangle.bottom : null;
+            const targetTop = Number.isFinite(rectangle?.top) ? rectangle.top : null;
+            const overlap = Math.max(1, Math.floor(scroller.clientHeight * 0.2));
+            const spansViewport = targetTop !== null && targetBottom !== null &&
+              targetTop <= viewportTop + 1 && targetBottom > viewportBottom + 1;
+            const distance = targetTop !== null && targetTop > viewportTop + 1
+              ? targetTop - viewportTop
+              : spansViewport
+                ? targetBottom - viewportTop + 1
+                : targetBottom !== null && targetBottom > viewportTop + overlap
+                  ? targetBottom - viewportTop - overlap
+                  : step;
+            return Math.min(maximum, top + Math.max(1, distance));
+          };
+          while (!reason) {
+            scrollPasses += 1;
+            if (performance.now() - downStartedAt >= maxDownwardCaptureMs) {
+              reason = 'conversation_capture_timeout';
+              break;
+            }
+            const restoredGapPosition = downwardSearchUpper !== null
+              ? await restoreGapScrollPosition(downwardSearchExpectedTop)
+              : { ok: true, adjusted: false };
+            if (!restoredGapPosition.ok) {
+              reason = 'ambiguous_message_overlap';
+              break;
+            }
+            if (downwardSearchUpper !== null) {
+              if (downwardGapProofPasses >= maxDownwardGapProofPasses) {
+                reason = 'conversation_capture_limit_reached';
+                break;
+              }
+              downwardGapProofPasses += 1;
+            } else {
+              if (downwardNavigationPasses >= maxDownwardNavigationPasses) {
+                reason = 'conversation_capture_limit_reached';
+                break;
+              }
+              downwardNavigationPasses += 1;
+            }
+            if (restoredGapPosition.adjusted) {
+              let result = merge(readMessages(), 'append');
+              result = await confirmStableWindow('append', result);
+              if (!result.ok) {
+                if (!reason) reason = 'ambiguous_message_overlap';
+                break;
+              }
+              continue;
+            }
+            const top = scroller.scrollTop;
+            const maximum = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+            if (top >= maximum - 1) {
+              const recoveryTop = nextDownwardScrollTop(top, maximum);
+              if (Math.abs(recoveryTop - top) > 0.5) {
+                scroller.scrollTop = recoveryTop;
+                await (downwardSearchUpper !== null ? settleGapScan() : settle());
+                let result = merge(readMessages(), 'append');
+                result = await confirmStableWindow('append', result);
+                if (!result.ok) {
+                  if (!reason) reason = 'ambiguous_message_overlap';
+                  break;
+                }
+                bottomQuietPasses = 0;
+                continue;
+              }
+              if (reason) break;
+              await settle();
+              let result = merge(readMessages(), 'append');
+              if (!result.ok && result.failure === 'no-overlap') {
+                result = await recoverDisjointWindow('append', top, scroller.scrollTop);
+              }
+              result = await confirmStableWindow('append', result);
+              if (!result.ok) {
+                if (!reason) reason = 'ambiguous_message_overlap';
+                break;
+              }
+              const settledMaximum = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+              if (result.added > 0 || scroller.scrollTop < settledMaximum - 1) {
+                bottomQuietPasses = 0;
+                continue;
+              }
+              bottomQuietPasses += 1;
+              if (bottomQuietPasses >= 4) {
+                bottomBoundary = true;
+                break;
+              }
+              await wait(250 * bottomQuietPasses);
+              continue;
+            }
+            bottomQuietPasses = 0;
+            const requestedScrollTop = nextDownwardScrollTop(top, maximum);
+            const scanningProviderGap = downwardSearchUpper !== null;
+            const movingBackward = requestedScrollTop < top - 0.5;
+            scroller.scrollTop = requestedScrollTop;
+            await (scanningProviderGap ? settleGapScan() : settle());
+            const attemptedScrollTop = scroller.scrollTop;
+            let result = merge(readMessages(), 'append');
+            if (!result.ok && result.failure === 'no-overlap') {
+              result = await recoverDisjointWindow('append', top, attemptedScrollTop);
+            }
+            result = await confirmStableWindow('append', result);
+            if (!result.ok) {
+              if (!reason) reason = 'ambiguous_message_overlap';
+              break;
+            }
+            if (
+              !scanningProviderGap &&
+              !movingBackward &&
+              scroller.scrollTop <= top &&
+              scroller.scrollHeight - scroller.clientHeight > top + 1
+            ) {
+              reason = 'conversation_scroll_stalled';
+              break;
+            }
           }
+        } finally {
+          scroller.scrollTop = originalTop;
         }
-        if (downwardPasses >= maxDownwardPasses) {
-          complete = false;
-          reason = reason || 'conversation_scroll_limit_reached';
-        }
-      } finally {
-        scroller.scrollTop = originalTop;
       }
 
-      return captureResult({ complete, reason, scrollPasses });
-    })()`);
-    if (!captured || typeof captured !== 'object') {
+      if (topBoundary && transcript[0]?.role === 'assistant') {
+        topBoundary = false;
+        reason = reason || 'conversation_top_not_reached';
+      }
+      if (!reason && unresolvedMessageKeys.size > 0) {
+        reason = 'compatibility_drift';
+      }
+      if (!reason && unresolvedTurnOwnerShells.size > 0) {
+        reason = 'compatibility_drift';
+      }
+      if (!reason && unsettledProviderPositions.size > 0) {
+        reason = 'compatibility_drift';
+      }
+      if (!reason && unsettledProviderOwners.size > 0) {
+        reason = 'compatibility_drift';
+      }
+      if (!reason && transcript.every(hasProviderPosition)) {
+        let providerPositionsComplete = startsAtProvenProviderBoundary(transcript[0]);
+        for (let index = 1; providerPositionsComplete && index < transcript.length; index += 1) {
+          const previous = transcript[index - 1];
+          const turn = transcript[index];
+          if (!followsProviderPosition(previous, turn)) {
+            providerPositionsComplete = false;
+          }
+        }
+        if (!providerPositionsComplete) {
+          reason = 'ambiguous_message_overlap';
+        }
+      } else if (!reason) {
+        reason = 'compatibility_drift';
+      }
+      if (!reason && (!topBoundary || !bottomBoundary)) {
+        reason = !topBoundary ? 'conversation_top_not_reached' : 'conversation_scroll_stalled';
+      }
+      const generationActiveAfter = generationIsActive();
+      if (generationActiveBefore || generationActiveAfter) reason = 'conversation_generation_active';
+      const rawTurns = transcript.map((turn, ordinal) => ({
+        ordinal,
+        providerMessageId: turn.providerMessageId,
+        role: turn.role,
+        text: turn.text
+      }));
+      const evidence = {
+        topBoundary,
+        bottomBoundary,
+        orderedWindowStitching: reason !== 'ambiguous_message_overlap' && reason !== 'compatibility_drift',
+        scrollPasses,
+        windowCount: Math.max(1, windowCount),
+        messageCount: rawTurns.length,
+        providerIdCount: rawTurns.filter((turn) => turn.providerMessageId !== null).length,
+        byteCount
+      };
+      return reason
+        ? { status: 'partial', reason, rawTurns, evidence }
+        : { status: 'complete', rawTurns, evidence };
+      })()`);
+    } catch (error) {
+      if (error?.code !== 'conversation_capture_timeout') throw error;
       return {
-        text: '',
-        complete: false,
-        truncated: true,
-        reason: 'conversation_capture_invalid',
-        messageCount: 0,
-        scrollPasses: 0
+        status: 'partial',
+        reason: 'conversation_capture_timeout',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
       };
     }
-    return {
-      text: String(captured.text || ''),
-      complete: captured.complete === true,
-      truncated: captured.truncated === true,
-      reason: captured.reason ? String(captured.reason) : null,
-      messageCount: Math.max(0, Number(captured.messageCount) || 0),
-      scrollPasses: Math.max(0, Number(captured.scrollPasses) || 0)
-    };
+    if (!captured || typeof captured !== 'object' || Array.isArray(captured)) {
+      return {
+        status: 'partial',
+        reason: 'compatibility_drift',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
+      };
+    }
+    return captured;
+  }
+
+  async readConversationText({ maxChars = 200_000 } = {}) {
+    const projectionCap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
+    const capture = await this.captureConversation({
+      maxCaptureBytes: Math.min(16 * 1024 * 1024, (projectionCap * 4) + 4096)
+    });
+    const projection = projectLegacyConversationText(capture, { maxChars: projectionCap });
+    return projection;
   }
 
   async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {

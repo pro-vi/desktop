@@ -48,7 +48,7 @@ test('chatgpt compatibility map: parses one frozen authority with stable hash an
   );
   assert.deepEqual(profile.anchors.map(({ id }) => id), fixture.anchorIds);
   assert.deepEqual(profile.exemptions.map(({ id }) => id), fixture.exemptionIds);
-  assert.equal(profile.capabilities.length, 9);
+  assert.equal(profile.capabilities.length, 10);
   assert.equal(profile.anchors.length > 0, true);
   assert.equal(profile.anchors.every((anchor) => anchor.branches.length > 0), true);
   assert.equal(profile.anchors.every((anchor) => anchor.capture.descriptorFields.length > 0), true);
@@ -149,4 +149,22 @@ test('chatgpt compatibility map: explicit exemptions are bounded and validated',
   const changed = clone(raw);
   changed.exemptions[0].capabilityId = 'missing-capability';
   assert.throws(() => parseChatGptCompatibilityMap(changed), /invalid_chatgpt_compatibility_map/);
+});
+
+test('chatgpt compatibility map: transcript capture dependencies are exact and map-owned', async () => {
+  const profile = createChatGptCompatibilityProfile(await readJson(mapPath));
+  assert.deepEqual(
+    profile.exemptions
+      .filter(({ capabilityId }) => capabilityId === 'transcript')
+      .map(({ dependency, selector }) => ({ dependency, selector })),
+    [
+      { dependency: 'transcript-message-id', selector: '[data-message-id]' },
+      { dependency: 'transcript-message', selector: '[data-message-author-role]' },
+      {
+        dependency: 'transcript-generation-indicator',
+        selector: '[class*="think"], [data-testid*="think"], [aria-label*="think"], [class*="research"], [data-testid*="research"], [aria-label*="research"], [class*="search"], [data-testid*="search"], [aria-label*="search"], [class*="source"], [data-testid*="source"], [aria-label*="source"], [class*="clarif"], [data-testid*="clarif"], [aria-label*="clarif"], .sr-only, [role="status"], [aria-live]'
+      },
+      { dependency: 'transcript-turn-ordinal', selector: '[data-testid^="conversation-turn-"]' }
+    ]
+  );
 });

@@ -15,6 +15,20 @@ function trackWindow(windows, win) {
   } catch {}
 }
 
+async function settleWithin(promise, timeoutMs) {
+  let timeoutId = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve(false), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
 class ElectronPageAdapter {
   constructor(win) {
     this.win = win;
@@ -94,6 +108,27 @@ class ElectronPageAdapter {
     return await this.win.webContents.executeJavaScript(js, true);
   }
 
+  async terminateEvaluation() {
+    const wc = this.win?.webContents;
+    if (!wc || wc.isDestroyed?.()) return false;
+    try {
+      const terminated = await settleWithin(
+        this.#withDebugger(async () => {
+          await this.#sendDebuggerCommand('Runtime.terminateExecution');
+          return true;
+        }),
+        2_000
+      );
+      if (terminated === true) return true;
+    } catch {}
+    try {
+      wc.forcefullyCrashRenderer();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async evaluateDeepResearch(js) {
     return await this.#withDeepResearchTarget(async (childSessionId) => {
       const result = await this.#sendDebuggerCommand(
@@ -111,6 +146,47 @@ class ElectronPageAdapter {
 
   async getUrl() {
     return this.win.webContents.getURL();
+  }
+
+  async beginNavigationGuard(matchesUrl) {
+    if (typeof matchesUrl !== 'function') throw new Error('navigation_guard_matcher_required');
+    const wc = this.win?.webContents;
+    if (!wc || wc.isDestroyed?.()) throw new Error('navigation_guard_unavailable');
+    let stable = true;
+    let disposed = false;
+    const observe = (url) => {
+      if (!stable) return;
+      try {
+        if (!matchesUrl(String(url || ''))) stable = false;
+      } catch {
+        stable = false;
+      }
+    };
+    const onDidNavigate = (_event, url) => observe(url);
+    const onDidNavigateInPage = (_event, url, isMainFrame) => {
+      if (isMainFrame !== false) observe(url);
+    };
+    const onDidStartNavigation = (_event, url, _isInPlace, isMainFrame) => {
+      if (isMainFrame !== false) observe(url);
+    };
+    observe(wc.getURL?.());
+    wc.on?.('did-navigate', onDidNavigate);
+    wc.on?.('did-navigate-in-page', onDidNavigateInPage);
+    wc.on?.('did-start-navigation', onDidStartNavigation);
+    return {
+      isStable: () => {
+        if (disposed || wc.isDestroyed?.()) return false;
+        observe(wc.getURL?.());
+        return stable;
+      },
+      dispose: async () => {
+        if (disposed) return;
+        disposed = true;
+        wc.removeListener?.('did-navigate', onDidNavigate);
+        wc.removeListener?.('did-navigate-in-page', onDidNavigateInPage);
+        wc.removeListener?.('did-start-navigation', onDidStartNavigation);
+      }
+    };
   }
 
   async sendKey(key, { modifiers = [] } = {}) {

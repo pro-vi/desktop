@@ -19,8 +19,14 @@ test('chatgpt-location: parses supported entry URL families', () => {
   });
 });
 
-test('chatgpt-location: rejects foreign malformed and ambiguous URLs', () => {
-  for (const value of ['http://chatgpt.com/c/a', 'https://example.com/c/a', 'https://chatgpt.com/g/g-custom/c/a', 'nope']) {
+test('chatgpt-location: rejects foreign malformed alternate-port and ambiguous URLs', () => {
+  for (const value of [
+    'http://chatgpt.com/c/a',
+    'https://chatgpt.com:444/c/a',
+    'https://example.com/c/a',
+    'https://chatgpt.com/g/g-custom/c/a',
+    'nope'
+  ]) {
     assert.throws(() => parseChatGptEntryTarget(value), /invalid_chatgpt_url/);
   }
 });

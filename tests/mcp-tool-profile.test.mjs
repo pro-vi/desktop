@@ -11,7 +11,23 @@ test('mcp tool profiles default to the full compatibility surface', () => {
   const resolved = resolveMcpToolProfile({ argv: [], env: {} });
   assert.deepEqual(resolved.profiles, ['full']);
   assert.deepEqual(new Set(resolved.tools), new Set(ALL_MCP_TOOL_NAMES));
-  assert.equal(resolved.tools.length, 35);
+  assert.equal(resolved.tools.length, 43);
+});
+
+test('mcp tool profiles expose the transcript and import library workflow', () => {
+  const resolved = resolveMcpToolProfile({ argv: ['--tool-profile', 'library'], env: {} });
+  assert.deepEqual(resolved.profiles, ['library']);
+  assert.deepEqual(resolved.tools, [
+    'agentify_import_chatgpt_export',
+    'agentify_verify_catalog_conversation',
+    'agentify_list_chatgpt_catalog',
+    'agentify_track_transcript',
+    'agentify_sync_transcript',
+    'agentify_list_transcripts',
+    'agentify_get_transcript',
+    'agentify_forget_transcript'
+  ]);
+  assert.equal(resolved.tools.includes('agentify_query'), false);
 });
 
 test('mcp tool profiles expose a narrow core workflow', () => {
@@ -50,6 +66,6 @@ test('mcp tool profiles compose additively from argv or environment', () => {
 test('mcp tool profiles fail fast with valid choices', () => {
   assert.throws(
     () => resolveMcpToolProfile({ argv: ['--tool-profile', 'mystery'], env: {} }),
-    /invalid_tool_profile:mystery; valid=full,core,browser,context,operations,media,admin/
+    /invalid_tool_profile:mystery; valid=full,core,library,browser,context,operations,media,admin/
   );
 });

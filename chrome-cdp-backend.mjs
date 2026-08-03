@@ -7,6 +7,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function settleWithin(promise, timeoutMs) {
+  let timeoutId = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve(false), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
 function modifierMask(modifiers = []) {
   let mask = 0;
   for (const modifier of modifiers) {
@@ -384,6 +398,27 @@ class ChromeCdpPageAdapter {
     return unwrapChromeCdpEvaluationResult(result);
   }
 
+  async terminateEvaluation() {
+    try {
+      const terminated = await settleWithin(
+        this.client.send('Runtime.terminateExecution', {}, this.sessionId).then(() => true, () => false),
+        2_000
+      );
+      if (terminated) return true;
+    } catch {}
+    try {
+      const closed = await settleWithin(
+        this.client.send('Target.closeTarget', { targetId: this.targetId }).then(() => true, () => false),
+        2_000
+      );
+      if (!closed) throw new Error('chrome_cdp_termination_failed');
+      this.markClosed();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async evaluateDeepResearch(js) {
     return await this.#withDeepResearchTarget(async (childSessionId) => {
       const result = await this.client.send(
@@ -402,6 +437,58 @@ class ChromeCdpPageAdapter {
   async getUrl() {
     const value = await this.evaluate('location.href');
     return String(value || '');
+  }
+
+  async beginNavigationGuard(matchesUrl) {
+    if (typeof matchesUrl !== 'function') throw new Error('navigation_guard_matcher_required');
+    const frameTree = await this.client.send('Page.getFrameTree', {}, this.sessionId);
+    const mainFrame = frameTree?.frameTree?.frame;
+    const mainFrameId = String(mainFrame?.id || '').trim();
+    if (!mainFrameId) throw new Error('navigation_guard_unavailable');
+    let stable = true;
+    let disposed = false;
+    const observe = (url) => {
+      if (!stable) return;
+      try {
+        if (!matchesUrl(String(url || ''))) stable = false;
+      } catch {
+        stable = false;
+      }
+    };
+    const forOwnedSession = (sessionId) => !sessionId || sessionId === this.sessionId;
+    const onFrameNavigated = ({ frame } = {}, sessionId) => {
+      if (!forOwnedSession(sessionId)) return;
+      if (String(frame?.id || '') !== mainFrameId || frame?.parentId) return;
+      observe(frame?.url);
+    };
+    const onWithinDocument = ({ frameId, url } = {}, sessionId) => {
+      if (forOwnedSession(sessionId) && String(frameId || '') === mainFrameId) observe(url);
+    };
+    const onFrameStartedNavigating = ({ frameId, url } = {}, sessionId) => {
+      if (forOwnedSession(sessionId) && String(frameId || '') === mainFrameId) observe(url);
+    };
+    const onTargetInfoChanged = ({ targetInfo } = {}) => {
+      if (String(targetInfo?.targetId || '') === this.targetId) observe(targetInfo?.url);
+    };
+    observe(mainFrame.url);
+    const removeListeners = [
+      this.client.on('Page.frameNavigated', onFrameNavigated),
+      this.client.on('Page.navigatedWithinDocument', onWithinDocument),
+      this.client.on('Page.frameStartedNavigating', onFrameStartedNavigating),
+      this.client.on('Target.targetInfoChanged', onTargetInfoChanged)
+    ];
+    return {
+      isStable: () => !disposed && !this.closed && stable,
+      dispose: async () => {
+        if (disposed) return;
+        disposed = true;
+        for (const remove of removeListeners) {
+          try {
+            remove?.();
+          } catch {}
+        }
+      }
+    };
   }
 
   async sendKey(key, { modifiers = [] } = {}) {

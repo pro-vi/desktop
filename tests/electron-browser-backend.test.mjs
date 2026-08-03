@@ -11,6 +11,7 @@ class MockBrowserWindow {
     this.destroyed = false;
     this.closed = false;
     this.minimized = false;
+    this.currentUrl = 'https://chatgpt.com/';
     this.debuggerAttached = false;
     this.backgroundThrottling = null;
     this.listeners = new Map();
@@ -24,7 +25,7 @@ class MockBrowserWindow {
       },
       insertText: async () => {},
       executeJavaScript: async () => null,
-      getURL: () => 'https://chatgpt.com/',
+      getURL: () => this.currentUrl,
       debugger: {
         isAttached: () => this.debuggerAttached,
         attach: () => {
@@ -50,6 +51,10 @@ class MockBrowserWindow {
         const list = this.webContentsListeners.get(event) || [];
         list.push(handler);
         this.webContentsListeners.set(event, list);
+      },
+      removeListener: (event, handler) => {
+        const list = this.webContentsListeners.get(event) || [];
+        this.webContentsListeners.set(event, list.filter((item) => item !== handler));
       },
       setWindowOpenHandler: () => {}
     };
@@ -180,6 +185,62 @@ test('electron-browser-backend: createSession keeps managed tabs responsive whil
   const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
   await backend.createSession({ url: 'https://chatgpt.com/', show: false });
   assert.equal(createdWindow?.backgroundThrottling, false);
+});
+
+test('electron-browser-backend: terminateEvaluation stops renderer execution through the owned debugger', async () => {
+  let createdWindow = null;
+  const commands = [];
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      createdWindow = this;
+      this.webContents.debugger.sendCommand = async (method) => {
+        commands.push(method);
+        return {};
+      };
+    }
+
+    async loadURL() {
+      return true;
+    }
+  }
+
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+
+  assert.equal(await session.page.terminateEvaluation(), true);
+  assert.deepEqual(commands, ['Runtime.terminateExecution']);
+  assert.equal(createdWindow?.debuggerAttached, false);
+});
+
+test('electron-browser-backend: navigation guard remembers an in-page route mismatch after returning', async () => {
+  let createdWindow = null;
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      createdWindow = this;
+    }
+
+    async loadURL(url) {
+      this.currentUrl = url;
+      return true;
+    }
+  }
+
+  const routeA = 'https://chatgpt.com/c/route-a';
+  const routeB = 'https://chatgpt.com/c/route-b';
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const session = await backend.createSession({ url: routeA });
+
+  const guard = await session.page.beginNavigationGuard((url) => url === routeA);
+  createdWindow.currentUrl = routeB;
+  createdWindow.emitWebContents('did-navigate-in-page', {}, routeB, true);
+  createdWindow.currentUrl = routeA;
+  createdWindow.emitWebContents('did-navigate-in-page', {}, routeA, true);
+
+  assert.equal(guard.isStable(), false);
+  await guard.dispose();
+  assert.equal(createdWindow.webContentsListeners.get('did-navigate-in-page')?.length || 0, 0);
 });
 
 test('electron-browser-backend: dispose closes tracked windows', async () => {

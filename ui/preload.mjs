@@ -13,6 +13,15 @@ contextBridge.exposeInMainWorld('agentifyDesktop', {
   openRun: (args) => ipcRenderer.invoke('agentify:openRun', args || {}),
   retryRun: (args) => ipcRenderer.invoke('agentify:retryRun', args || {}),
   archiveRun: (args) => ipcRenderer.invoke('agentify:archiveRun', args || {}),
+  requestExportGrant: (args) => ipcRenderer.invoke('agentify:requestExportGrant', args || {}),
+  importChatGptExport: (args) => ipcRenderer.invoke('agentify:importChatGptExport', args || {}),
+  getCatalog: (args) => ipcRenderer.invoke('agentify:getCatalog', args || {}),
+  getCatalogImports: () => ipcRenderer.invoke('agentify:getCatalogImports'),
+  getTranscriptSources: () => ipcRenderer.invoke('agentify:getTranscriptSources'),
+  syncTranscript: (args) => ipcRenderer.invoke('agentify:syncTranscript', args || {}),
+  forgetTranscript: (args) => ipcRenderer.invoke('agentify:forgetTranscript', args || {}),
+  verifyCatalogConversation: (args) => ipcRenderer.invoke('agentify:verifyCatalogConversation', args || {}),
+  reassignCatalogImport: (args) => ipcRenderer.invoke('agentify:reassignCatalogImport', args || {}),
   openStateDir: () => ipcRenderer.invoke('agentify:openStateDir'),
   openArtifactsDir: () => ipcRenderer.invoke('agentify:openArtifactsDir'),
   openWatchFolder: (args) => ipcRenderer.invoke('agentify:openWatchFolder', args || {}),
@@ -38,6 +47,16 @@ contextBridge.exposeInMainWorld('agentifyDesktop', {
     return () => {
       try {
         ipcRenderer.removeListener('agentify:runsChanged', handler);
+      } catch {}
+    };
+  },
+  onLibraryChanged: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const handler = () => cb();
+    ipcRenderer.on('agentify:libraryChanged', handler);
+    return () => {
+      try {
+        ipcRenderer.removeListener('agentify:libraryChanged', handler);
       } catch {}
     };
   }

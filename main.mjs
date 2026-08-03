@@ -22,7 +22,22 @@ import {
 } from './chatgpt-compatibility.mjs';
 import { createCompatibilityStore } from './compatibility-store.mjs';
 import { startHttpApi } from './http-api.mjs';
+import { createChatGptExportReader } from './chatgpt-export-reader.mjs';
+import { createConversationCatalogStore } from './conversation-catalog-store.mjs';
+import {
+  createChatGptRouteVerifier,
+  createConversationCatalogService
+} from './conversation-catalog-sync.mjs';
+import { createElectronExportImportGrants } from './export-import-grants.mjs';
+import { createPrivateLibraryBlobStore } from './library-blob-store.mjs';
+import { privateFileSystem } from './private-filesystem.mjs';
+import { createTranscriptReadService } from './transcript-read.mjs';
 import { TabManager } from './tab-manager.mjs';
+import {
+  createChatGptTranscriptCapture,
+  createTranscriptSyncService
+} from './transcript-sync.mjs';
+import { createTranscriptStore } from './transcript-store.mjs';
 import { defaultStateDir, ensureToken, readSettings, writeSettings, defaultSettings, writeState } from './state.mjs';
 import { createWatchFolderManager } from './watch-folder.mjs';
 import { getWorkspace, setWorkspace } from './orchestrator/storage.mjs';
@@ -102,6 +117,7 @@ async function main() {
   let browserBackend = null;
   let watchFolders = null;
   let server = null;
+  let exportImportGrants = null;
   try {
     const stateDir = argValue('--state-dir') || defaultStateDir();
     const basePort = Number(argValue('--port') || process.env.AGENTIFY_DESKTOP_PORT || 0);
@@ -214,6 +230,11 @@ async function main() {
       if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:runsChanged');
     } catch {}
   };
+  const emitLibraryChanged = () => {
+    try {
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('agentify:libraryChanged');
+    } catch {}
+  };
   compatibilityStore.subscribe(() => emitTabsChanged());
   browserBackend = await createBrowserBackend({
     kind: browserBackendKind,
@@ -276,6 +297,40 @@ async function main() {
       controller.serverId = serverId;
       return controller;
     }
+  });
+
+  const transcriptBlobs = createPrivateLibraryBlobStore({ stateDir, fileSystem: privateFileSystem });
+  const catalogStore = createConversationCatalogStore({
+    stateDir,
+    blobs: transcriptBlobs,
+    fileSystem: privateFileSystem
+  });
+  const transcriptStore = createTranscriptStore({
+    stateDir,
+    blobs: transcriptBlobs,
+    fileSystem: privateFileSystem
+  });
+  await transcriptStore.recoverInterrupted();
+  await catalogStore.recoverInterruptedImports();
+  exportImportGrants = createElectronExportImportGrants({ dialog });
+  const catalogSync = createConversationCatalogService({
+    store: catalogStore,
+    blobs: transcriptBlobs,
+    grants: exportImportGrants,
+    exportReader: createChatGptExportReader(),
+    routeVerifier: createChatGptRouteVerifier({ tabs }),
+    onChanged: emitLibraryChanged
+  });
+  const transcriptSync = createTranscriptSyncService({
+    store: transcriptStore,
+    blobs: transcriptBlobs,
+    capture: createChatGptTranscriptCapture({ tabs }),
+    onChanged: emitLibraryChanged
+  });
+  const transcriptRead = createTranscriptReadService({
+    sources: transcriptStore,
+    imported: catalogStore,
+    blobs: transcriptBlobs
   });
 
   // Default tab for legacy callers (no tabId).
@@ -374,6 +429,50 @@ async function main() {
   ipcMain.handle('agentify:getSettings', async () => {
     settings = await readSettings(stateDir);
     return settings;
+  });
+
+  ipcMain.handle('agentify:requestExportGrant', async (_evt, args) => {
+    return await exportImportGrants.request({
+      profileScopeId: args?.profileScopeId,
+      browserWindow: controlWin && !controlWin.isDestroyed() ? controlWin : null
+    });
+  });
+
+  ipcMain.handle('agentify:importChatGptExport', async (_evt, args) => {
+    return await catalogSync.importExport(args || {});
+  });
+
+  ipcMain.handle('agentify:getCatalog', async (_evt, args) => {
+    return await catalogSync.list(args || {});
+  });
+
+  ipcMain.handle('agentify:getCatalogImports', async () => {
+    return await catalogSync.listImports();
+  });
+
+  ipcMain.handle('agentify:getTranscriptSources', async () => {
+    return await transcriptSync.list();
+  });
+
+  ipcMain.handle('agentify:syncTranscript', async (_evt, args) => {
+    return await transcriptSync.sync(args?.sourceId, 'manual');
+  });
+
+  ipcMain.handle('agentify:forgetTranscript', async (_evt, args) => {
+    if (args?.confirm !== true) {
+      const error = new Error('transcript_confirmation_required');
+      error.code = 'transcript_confirmation_required';
+      throw error;
+    }
+    return await transcriptSync.forget(args?.sourceId);
+  });
+
+  ipcMain.handle('agentify:verifyCatalogConversation', async (_evt, args) => {
+    return await catalogSync.verifyByNavigation(args?.identity, args?.key);
+  });
+
+  ipcMain.handle('agentify:reassignCatalogImport', async (_evt, args) => {
+    return await catalogSync.reassignImportScope(args || {});
   });
 
   ipcMain.handle('agentify:setSettings', async (_evt, args) => {
@@ -654,6 +753,9 @@ async function main() {
         vendors,
         serverId,
         stateDir,
+        transcriptSync,
+        transcriptRead,
+        catalogSync,
         getSettings: async () => settings,
         onShow: async ({ tabId }) => {
           const win = tabs.getWindowById(tabId || defaultTabId);
@@ -737,6 +839,7 @@ async function main() {
       }
     },
     stopWatchFolders: async () => {
+      await exportImportGrants.closeAll();
       await watchFolders.stop();
     },
     disposeBrowserBackend: async () => {
@@ -764,11 +867,12 @@ async function main() {
     app.quit();
   });
 
-    return { stateDir, browserBackend, watchFolders, server };
+    return { stateDir, browserBackend, watchFolders, server, exportImportGrants };
   } catch (error) {
     error.browserBackend = browserBackend;
     error.watchFolders = watchFolders;
     error.server = server;
+    error.exportImportGrants = exportImportGrants;
     throw error;
   }
 }
@@ -790,6 +894,7 @@ main().catch(async (e) => {
         }
       },
       stopWatchFolders: async () => {
+        await e?.exportImportGrants?.closeAll?.();
         await e?.watchFolders?.stop?.();
       },
       disposeBrowserBackend: async () => {

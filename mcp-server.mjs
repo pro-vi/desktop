@@ -4,6 +4,36 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
+import { locationFromConversationUrl } from './chatgpt-location.mjs';
+import {
+  CATALOG_LIST_CURSOR_PATTERN,
+  parseCatalogPage,
+  parseExportImportOutcome,
+  parseRouteVerificationOutcome
+} from './conversation-catalog-contract.mjs';
+import {
+  CHATGPT_CONVERSATION_ID_PATTERN,
+  LIBRARY_LOCAL_ID_PATTERN,
+  PROFILE_SCOPE_ID_PATTERN,
+  formatConversationIdentity,
+  parseConversationIdentity,
+  providerConversationIdFromOwnedLocation,
+  sameConversationIdentity
+} from './conversation-identity.mjs';
+import {
+  TRANSCRIPT_PROVIDER_MESSAGE_ID_PATTERN,
+  parseTranscriptTurn
+} from './transcript-contract.mjs';
+import {
+  TRANSCRIPT_SOURCE_KEY_MAX_LENGTH,
+  TRANSCRIPT_SOURCE_LABEL_MAX_LENGTH,
+  TRANSCRIPT_SOURCE_TAG_MAX_LENGTH,
+  TRANSCRIPT_SOURCE_TAGS_MAX_COUNT,
+  parseTranscriptSourceKey,
+  parseTranscriptSourceLabel,
+  parseTranscriptSourceTags
+} from './transcript-source-contract.mjs';
+import { EXPORT_GRANT_ID_PATTERN } from './export-import-grants.mjs';
 import { defaultStateDir } from './state.mjs';
 import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from './mcp-lib.mjs';
 import { waitForRun } from './run-waiter.mjs';
@@ -14,6 +44,27 @@ const stateDir = defaultStateDir();
 const showTabs = process.argv.includes('--show-tabs');
 const toolProfile = resolveMcpToolProfile({ argv: process.argv.slice(2) });
 const enabledTools = new Set(toolProfile.tools);
+
+function acceptedBy(parser, value) {
+  try {
+    parser(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const transcriptSourceLabelSchema = z.string()
+  .min(1).max(TRANSCRIPT_SOURCE_LABEL_MAX_LENGTH)
+  .refine((value) => acceptedBy(parseTranscriptSourceLabel, value));
+const transcriptSourceKeySchema = z.string()
+  .min(1).max(TRANSCRIPT_SOURCE_KEY_MAX_LENGTH)
+  .refine((value) => acceptedBy(parseTranscriptSourceKey, value));
+const transcriptSourceTagSchema = z.string()
+  .min(1).max(TRANSCRIPT_SOURCE_TAG_MAX_LENGTH);
+const transcriptSourceTagsSchema = z.array(transcriptSourceTagSchema)
+  .max(TRANSCRIPT_SOURCE_TAGS_MAX_COUNT)
+  .refine((value) => acceptedBy(parseTranscriptSourceTags, value));
 
 function resolveLocalPaths(items) {
   if (!Array.isArray(items)) return [];
@@ -75,16 +126,633 @@ async function getConn() {
   return await ensureDesktopRunning({ stateDir, showTabs });
 }
 
+const TRANSCRIPT_SHA256 = /^[a-f0-9]{64}$/;
+const TRANSCRIPT_ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const TRANSCRIPT_HTTP_ERRORS = new Set([
+  'body_too_large',
+  'internal_error',
+  'invalid_conversation_identity',
+  'invalid_json',
+  'invalid_profile_scope_id',
+  'invalid_provider_conversation_id',
+  'key_vendor_mismatch',
+  'owned_conversation_required',
+  'tab_closed',
+  'tab_not_found',
+  'transcript_confirmation_required',
+  'transcript_cursor_mismatch',
+  'transcript_identity_not_found',
+  'transcript_no_complete_snapshot',
+  'transcript_page_character_limit',
+  'transcript_page_limit',
+  'transcript_controller_unavailable',
+  'transcript_request_invalid',
+  'transcript_service_unavailable',
+  'transcript_source_disabled',
+  'transcript_source_exists',
+  'transcript_source_invalid',
+  'transcript_source_key_exists',
+  'transcript_source_not_found',
+  'transcript_snapshot_identity_mismatch',
+  'transcript_snapshot_not_found',
+  'transcript_store_corrupt_state',
+  'transcript_store_io',
+  'transcript_store_reload_required',
+  'transcript_store_schema_unsupported',
+  'transcript_store_size_limit',
+  'transcript_sync_active',
+  'transcript_track_invalid',
+  'library_blob_corrupt',
+  'library_blob_io',
+  'library_blob_not_found',
+  'library_blob_schema_unsupported'
+]);
+
+for (const code of [
+  'catalog_request_invalid',
+  'catalog_service_unavailable',
+  'catalog_import_request_invalid',
+  'catalog_import_grant_invalid',
+  'catalog_import_grant_unavailable',
+  'catalog_import_interrupted',
+  'catalog_import_active',
+  'catalog_import_not_found',
+  'catalog_import_manifest_conflict',
+  'catalog_import_replay_conflict',
+  'catalog_import_cursor_mismatch',
+  'catalog_import_not_open',
+  'catalog_import_outcome_mismatch',
+  'catalog_scope_confirmation_required',
+  'catalog_scope_conflict',
+  'catalog_conversation_not_found',
+  'catalog_cursor_mismatch',
+  'catalog_route_identity_mismatch',
+  'catalog_verification_identity_mismatch',
+  'catalog_store_corrupt_state',
+  'catalog_store_schema_unsupported',
+  'catalog_store_io',
+  'catalog_store_reload_required',
+  'catalog_store_size_limit'
+]) TRANSCRIPT_HTTP_ERRORS.add(code);
+
+const transcriptIdentitySchema = z.object({
+  provider: z.literal('chatgpt'),
+  profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN),
+  providerConversationId: z.string().regex(CHATGPT_CONVERSATION_ID_PATTERN)
+}).strict();
+
+const transcriptSnapshotRefSchema = z.object({
+  kind: z.literal('snapshot'),
+  algorithm: z.literal('sha256'),
+  hash: z.string().regex(TRANSCRIPT_SHA256),
+  contentHash: z.string().regex(TRANSCRIPT_SHA256),
+  byteLength: z.number().int().positive().safe()
+}).strict();
+
+const transcriptOutcomeSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('complete'),
+    snapshot: transcriptSnapshotRefSchema,
+    changed: z.boolean()
+  }).strict(),
+  z.object({
+    kind: z.literal('partial'),
+    reason: z.enum([
+      'conversation_messages_not_found',
+      'conversation_top_not_reached',
+      'conversation_scroll_stalled',
+      'conversation_capture_timeout',
+      'conversation_generation_active',
+      'conversation_capture_limit_reached',
+      'max_capture_bytes',
+      'ambiguous_message_overlap',
+      'compatibility_drift'
+    ])
+  }).strict(),
+  z.object({
+    kind: z.literal('failed'),
+    reason: z.enum([
+      'login',
+      'challenge',
+      'tab_closed',
+      'navigation_failed',
+      'provider_transport',
+      'compatibility_drift',
+      'capture_failed',
+      'snapshot_write_failed'
+    ])
+  }).strict(),
+  z.object({ kind: z.literal('interrupted') }).strict()
+]);
+
+const transcriptAttemptSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+  sourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+  trigger: z.enum(['manual', 'post-query']),
+  startedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+  finishedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME).nullable(),
+  outcome: transcriptOutcomeSchema.nullable()
+}).strict();
+
+const transcriptLocationSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('standalone-conversation'),
+    conversationUrl: z.string().url(),
+    sourceUrl: z.string().url().optional()
+  }).strict(),
+  z.object({
+    kind: z.literal('project-conversation'),
+    projectUrl: z.string().url(),
+    conversationUrl: z.string().url(),
+    sourceUrl: z.string().url().optional()
+  }).strict()
+]);
+
+const transcriptSourceSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+  identity: transcriptIdentitySchema,
+  label: transcriptSourceLabelSchema,
+  tags: transcriptSourceTagsSchema,
+  key: transcriptSourceKeySchema,
+  target: z.object({
+    kind: z.literal('owned-conversation'),
+    location: transcriptLocationSchema
+  }).strict(),
+  enabled: z.boolean(),
+  state: z.enum(['disabled', 'syncing', 'tracked', 'complete', 'partial', 'failed', 'interrupted']),
+  latestLiveSnapshot: transcriptSnapshotRefSchema.nullable(),
+  lastAttempt: transcriptAttemptSchema.nullable(),
+  createdAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+  updatedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME)
+}).strict();
+
+const transcriptSyncResultSchema = z.object({
+  source: transcriptSourceSchema,
+  attempt: transcriptAttemptSchema,
+  status: z.enum(['complete', 'partial', 'failed', 'interrupted']),
+  outcome: transcriptOutcomeSchema
+}).strict();
+
+const transcriptDeletionSchema = z.object({
+  sourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+  recoverable: z.literal(true),
+  recoveryLocation: z.string().refine((value) =>
+    value.startsWith('local-trash/') && LIBRARY_LOCAL_ID_PATTERN.test(value.slice('local-trash/'.length))),
+  forgottenAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME)
+}).strict();
+
+const transcriptCursorSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotHash: z.string().regex(TRANSCRIPT_SHA256),
+  afterTurnId: z.string().min(1).max(600).refine((value) => !/[\u0000-\u001f\u007f]/.test(value))
+}).strict();
+
+const transcriptTurnIdentitySchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('provider'),
+    providerMessageId: z.string().regex(TRANSCRIPT_PROVIDER_MESSAGE_ID_PATTERN)
+  }).strict(),
+  z.object({
+    kind: z.literal('snapshot-local'),
+    ordinal: z.number().int().nonnegative().safe(),
+    turnContentHash: z.string().regex(TRANSCRIPT_SHA256)
+  }).strict()
+]);
+
+const transcriptTurnSchema = z.object({
+  turnId: z.string().min(1).max(600).refine((value) => !/[\u0000-\u001f\u007f]/.test(value)),
+  ordinal: z.number().int().nonnegative().safe(),
+  identity: transcriptTurnIdentitySchema,
+  role: z.enum(['user', 'assistant', 'system', 'tool', 'unknown']),
+  rawRole: z.string().min(1).max(64).nullable(),
+  text: z.string().min(1).max(1_000_000)
+}).strict();
+
+const transcriptCitationSchema = z.object({
+  identity: z.string().min(1).max(700),
+  snapshotHash: z.string().regex(TRANSCRIPT_SHA256),
+  turnId: z.string().min(1).max(600)
+}).strict();
+
+const transcriptPageSchema = z.object({
+  schemaVersion: z.literal(1),
+  identity: transcriptIdentitySchema,
+  snapshot: transcriptSnapshotRefSchema,
+  normalizationVersion: z.literal(1),
+  capturedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+  startOrdinal: z.number().int().nonnegative().safe(),
+  endOrdinal: z.number().int().positive().safe(),
+  totalTurns: z.number().int().positive().safe(),
+  text: z.string().min(1).max(1_000_000),
+  structuredTurns: z.array(transcriptTurnSchema).min(1).max(100),
+  citations: z.array(transcriptCitationSchema).min(1).max(100),
+  nextCursor: transcriptCursorSchema.nullable(),
+  liveSourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).nullable(),
+  sourceKey: transcriptSourceKeySchema.nullable(),
+  conversationUrl: z.string().url().nullable(),
+  paths: z.object({
+    snapshot: z.string().min(1).max(4096).refine((value) => path.isAbsolute(value))
+  }).strict().optional()
+}).strict();
+
+const catalogRawRecordRefSchema = z.object({
+  kind: z.literal('raw'),
+  algorithm: z.literal('sha256'),
+  hash: z.string().regex(TRANSCRIPT_SHA256),
+  byteLength: z.number().int().positive().safe()
+}).strict();
+
+const catalogImportCursorSchema = z.object({
+  schemaVersion: z.literal(1),
+  recordIndex: z.number().int().nonnegative().safe()
+}).strict();
+
+const catalogCountsSchema = z.object({
+  recordsSeen: z.number().int().nonnegative().safe(),
+  cataloged: z.number().int().nonnegative().safe(),
+  snapshots: z.number().int().nonnegative().safe(),
+  problems: z.number().int().nonnegative().safe()
+}).strict();
+
+const catalogProblemSchema = z.object({
+  recordIndex: z.number().int().nonnegative().safe(),
+  reason: z.enum([
+    'provider-id-missing',
+    'active-branch-ambiguous',
+    'message-graph-invalid',
+    'unsupported-content'
+  ]),
+  identity: transcriptIdentitySchema.nullable()
+}).strict();
+
+const catalogImportOutcomeSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('complete'),
+    importId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+    counts: catalogCountsSchema
+  }).strict(),
+  z.object({
+    status: z.literal('partial'),
+    importId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+    counts: catalogCountsSchema,
+    problems: z.array(catalogProblemSchema).min(1).max(10_000),
+    resume: catalogImportCursorSchema
+  }).strict(),
+  z.object({
+    status: z.literal('rejected'),
+    reason: z.enum([
+      'not-a-zip',
+      'unsupported-export',
+      'unsafe-archive',
+      'scope-confirmation-required',
+      'account-hint-conflict'
+    ])
+  }).strict()
+]);
+
+const catalogRouteSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('unverified'),
+    claimedConversationId: z.string().regex(CHATGPT_CONVERSATION_ID_PATTERN)
+  }).strict(),
+  z.object({
+    kind: z.literal('verified'),
+    canonicalUrl: z.string().url(),
+    verifiedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+    evidence: z.enum(['tracked-tab', 'direct-navigation'])
+  }).strict(),
+  z.object({
+    kind: z.literal('temporarily-unavailable'),
+    previousUrl: z.string().url().nullable(),
+    observedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+    reason: z.enum(['not-found', 'forbidden', 'foreign-profile', 'challenge']),
+    retryable: z.boolean()
+  }).strict()
+]);
+
+const catalogConversationSchema = z.object({
+  schemaVersion: z.literal(1),
+  identity: transcriptIdentitySchema,
+  title: z.string().min(1).max(512).nullable(),
+  route: catalogRouteSchema,
+  firstObservedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+  lastObservedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+  latestArchiveRecord: catalogRawRecordRefSchema,
+  latestImportedSnapshot: transcriptSnapshotRefSchema.nullable()
+}).strict();
+
+const catalogPageSchema = z.object({
+  items: z.array(catalogConversationSchema).max(100),
+  nextCursor: z.string().regex(CATALOG_LIST_CURSOR_PATTERN).nullable()
+}).strict();
+
+const catalogVerificationSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('verified'),
+    identity: transcriptIdentitySchema,
+    canonicalUrl: z.string().url(),
+    evidence: z.literal('direct-navigation')
+  }).strict(),
+  z.object({
+    status: z.literal('unavailable'),
+    identity: transcriptIdentitySchema,
+    observation: z.object({
+      observedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+      reason: z.enum(['not-found', 'forbidden', 'foreign-profile', 'challenge']),
+      retryable: z.boolean()
+    }).strict()
+  }).strict(),
+  z.object({
+    status: z.literal('failed'),
+    reason: z.enum(['login', 'challenge', 'transport', 'compatibility-drift'])
+  }).strict()
+]);
+
+function transcriptMcpError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function safeTranscriptHttpError(error) {
+  const body = error?.data?.body;
+  if (
+    body &&
+    typeof body === 'object' &&
+    !Array.isArray(body) &&
+    Object.keys(body).length === 1 &&
+    TRANSCRIPT_HTTP_ERRORS.has(body.error)
+  ) {
+    return body.error;
+  }
+  return 'transcript_mcp_request_failed';
+}
+
+async function requestTranscriptJson({ method, path, body }) {
+  try {
+    const conn = await getConn();
+    return await requestJson({ ...conn, method, path, body });
+  } catch (error) {
+    throw transcriptMcpError(safeTranscriptHttpError(error));
+  }
+}
+
+function parseTranscriptResponse(schema, value) {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw transcriptMcpError('transcript_mcp_response_invalid');
+  return parsed.data;
+}
+
+function isCanonicalTranscriptDateTime(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString() === value;
+}
+
+function validateTranscriptAttempt(attempt) {
+  if (attempt === null) return;
+  if (
+    !isCanonicalTranscriptDateTime(attempt.startedAt) ||
+    (attempt.finishedAt === null) !== (attempt.outcome === null) ||
+    (attempt.finishedAt !== null && !isCanonicalTranscriptDateTime(attempt.finishedAt))
+  ) {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+}
+
+function validateTranscriptSource(source) {
+  try {
+    const identity = parseConversationIdentity(source.identity);
+    const observed = locationFromConversationUrl(source.target.location.conversationUrl, {
+      sourceUrl: source.target.location.sourceUrl || null
+    });
+    const expected = source.target.location;
+    if (
+      observed.kind !== expected.kind ||
+      observed.conversationUrl !== expected.conversationUrl ||
+      (observed.projectUrl || null) !== (expected.projectUrl || null) ||
+      (observed.sourceUrl || null) !== (expected.sourceUrl || null) ||
+      providerConversationIdFromOwnedLocation(observed) !== identity.providerConversationId
+    ) {
+      throw transcriptMcpError('transcript_mcp_response_invalid');
+    }
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  validateTranscriptAttempt(source.lastAttempt);
+  const expectedState = !source.enabled
+    ? 'disabled'
+    : source.lastAttempt?.outcome === null
+      ? 'syncing'
+      : source.lastAttempt?.outcome?.kind || 'tracked';
+  if (
+    source.state !== expectedState ||
+    (source.lastAttempt !== null && source.lastAttempt.sourceId !== source.id) ||
+    !isCanonicalTranscriptDateTime(source.createdAt) ||
+    !isCanonicalTranscriptDateTime(source.updatedAt) ||
+    (source.lastAttempt === null && source.latestLiveSnapshot !== null) ||
+    (
+      source.lastAttempt?.outcome?.kind === 'complete' &&
+      JSON.stringify(source.lastAttempt.outcome.snapshot) !== JSON.stringify(source.latestLiveSnapshot)
+    )
+  ) {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  return source;
+}
+
+function parseTranscriptSourceResponse(value) {
+  return validateTranscriptSource(parseTranscriptResponse(transcriptSourceSchema, value));
+}
+
+function safeTranscriptAttempt(attempt) {
+  if (attempt === null) return null;
+  return {
+    schemaVersion: attempt.schemaVersion,
+    id: attempt.id,
+    sourceId: attempt.sourceId,
+    trigger: attempt.trigger,
+    startedAt: attempt.startedAt,
+    finishedAt: attempt.finishedAt,
+    outcome: attempt.outcome
+  };
+}
+
+function safeTranscriptSource(source) {
+  return {
+    schemaVersion: source.schemaVersion,
+    id: source.id,
+    identity: source.identity,
+    enabled: source.enabled,
+    state: source.state,
+    latestLiveSnapshot: source.latestLiveSnapshot,
+    lastAttempt: safeTranscriptAttempt(source.lastAttempt),
+    createdAt: source.createdAt,
+    updatedAt: source.updatedAt
+  };
+}
+
+function parseTranscriptSyncResponse(value) {
+  const result = parseTranscriptResponse(transcriptSyncResultSchema, value);
+  validateTranscriptSource(result.source);
+  validateTranscriptAttempt(result.attempt);
+  if (
+    result.status !== result.outcome.kind ||
+    result.attempt.outcome === null ||
+    result.attempt.outcome.kind !== result.status ||
+    JSON.stringify(result.attempt.outcome) !== JSON.stringify(result.outcome) ||
+    result.attempt.sourceId !== result.source.id ||
+    result.source.lastAttempt?.id !== result.attempt.id ||
+    JSON.stringify(result.source.lastAttempt) !== JSON.stringify(result.attempt)
+  ) {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  return result;
+}
+
+function sameTranscriptSnapshotRef(left, right) {
+  return !!left && !!right &&
+    left.kind === right.kind &&
+    left.algorithm === right.algorithm &&
+    left.hash === right.hash &&
+    left.contentHash === right.contentHash &&
+    left.byteLength === right.byteLength;
+}
+
+function expectedTranscriptTurnId(turn) {
+  return turn.identity.kind === 'provider'
+    ? `provider:${turn.identity.providerMessageId}`
+    : `snapshot-local:${turn.ordinal}:${turn.identity.turnContentHash}`;
+}
+
+function renderTranscriptPageTurns(turns) {
+  const labels = { user: 'User', assistant: 'Assistant', system: 'System', tool: 'Tool', unknown: 'Unknown' };
+  return turns.map((turn) => `${labels[turn.role]}\n${turn.text}`).join('\n\n');
+}
+
+function validateTranscriptPageTurns(turns, startOrdinal) {
+  const providerMessageIds = new Set();
+  for (let index = 0; index < turns.length; index += 1) {
+    let turn;
+    try {
+      turn = parseTranscriptTurn(turns[index], startOrdinal + index);
+    } catch {
+      throw transcriptMcpError('transcript_mcp_response_invalid');
+    }
+    if (turn.identity.kind === 'provider') {
+      if (providerMessageIds.has(turn.identity.providerMessageId)) {
+        throw transcriptMcpError('transcript_mcp_response_invalid');
+      }
+      providerMessageIds.add(turn.identity.providerMessageId);
+    }
+  }
+}
+
+function parseTranscriptPageResponse(value, request) {
+  const page = parseTranscriptResponse(transcriptPageSchema, value);
+  validateTranscriptPageTurns(page.structuredTurns, page.startOrdinal);
+  const identity = parseConversationIdentity(request.identity);
+  const identityKey = formatConversationIdentity(identity);
+  const hasLiveSource = page.liveSourceId !== null || page.sourceKey !== null || page.conversationUrl !== null;
+  if (
+    !sameConversationIdentity(page.identity, identity) ||
+    !isCanonicalTranscriptDateTime(page.capturedAt) ||
+    page.endOrdinal !== page.startOrdinal + page.structuredTurns.length ||
+    page.endOrdinal > page.totalTurns ||
+    page.structuredTurns.length > (request.limit ?? 20) ||
+    page.citations.length !== page.structuredTurns.length ||
+    page.text !== renderTranscriptPageTurns(page.structuredTurns) ||
+    (request.snapshot !== undefined && !sameTranscriptSnapshotRef(page.snapshot, request.snapshot)) ||
+    (request.cursor !== undefined && request.cursor.snapshotHash !== page.snapshot.hash) ||
+    (request.cursor === undefined && page.startOrdinal !== 0) ||
+    (request.cursor !== undefined && page.startOrdinal === 0) ||
+    (request.includePaths === true) !== (page.paths !== undefined) ||
+    (hasLiveSource && (page.liveSourceId === null || page.sourceKey === null || page.conversationUrl === null)) ||
+    (!hasLiveSource && (page.liveSourceId !== null || page.sourceKey !== null || page.conversationUrl !== null))
+  ) {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  for (let index = 0; index < page.structuredTurns.length; index += 1) {
+    const turn = page.structuredTurns[index];
+    const citation = page.citations[index];
+    if (
+      turn.ordinal !== page.startOrdinal + index ||
+      (turn.identity.kind === 'snapshot-local' && turn.identity.ordinal !== turn.ordinal) ||
+      turn.turnId !== expectedTranscriptTurnId(turn) ||
+      citation.identity !== identityKey ||
+      citation.snapshotHash !== page.snapshot.hash ||
+      citation.turnId !== turn.turnId
+    ) {
+      throw transcriptMcpError('transcript_mcp_response_invalid');
+    }
+  }
+  if (
+    page.endOrdinal < page.totalTurns
+      ? !page.nextCursor ||
+        page.nextCursor.snapshotHash !== page.snapshot.hash ||
+        page.nextCursor.afterTurnId !== page.structuredTurns.at(-1).turnId
+      : page.nextCursor !== null
+  ) {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  if (hasLiveSource) {
+    try {
+      const observed = locationFromConversationUrl(page.conversationUrl);
+      if (providerConversationIdFromOwnedLocation(observed) !== identity.providerConversationId) {
+        throw transcriptMcpError('transcript_mcp_response_invalid');
+      }
+    } catch {
+      throw transcriptMcpError('transcript_mcp_response_invalid');
+    }
+  }
+  return page;
+}
+
+function parseCatalogImportResponse(value) {
+  const shaped = parseTranscriptResponse(catalogImportOutcomeSchema, value);
+  try {
+    return parseExportImportOutcome(shaped);
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+}
+
+function parseCatalogPageResponse(value) {
+  const shaped = parseTranscriptResponse(catalogPageSchema, value);
+  try {
+    return parseCatalogPage(shaped);
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+}
+
+function parseCatalogVerificationResponse(value, expectedIdentity) {
+  const shaped = parseTranscriptResponse(catalogVerificationSchema, value);
+  let outcome;
+  try {
+    outcome = parseRouteVerificationOutcome(shaped);
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  if (outcome.status !== 'failed' && !sameConversationIdentity(outcome.identity, expectedIdentity)) {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  return outcome;
+}
+
 registerTool(
   'agentify_query',
   {
     description:
-      'Send a prompt to the local Agentify Desktop session and return the assistant response. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
+      'Send a prompt to the local Agentify Desktop session and return the assistant response. To continue a Transcript Library source, pass its returned liveSourceId, sourceKey as key, and conversationUrl as chatUrl. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
       key: z.string().optional().describe('Stable tab key (e.g., project name); creates a tab if missing.'),
       chatUrl: z.string().optional().describe('ChatGPT conversation or shared-chat URL to continue. Mutually exclusive with projectUrl; suppresses saved/default project routing.'),
+      liveSourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).optional()
+        .describe('Tracked Transcript Library source id returned with sourceKey and conversationUrl; enables fail-closed live continuation validation.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
       modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro (Pro Extended), thinking (Medium), instant. This is separate from the vendor `model` hint.'),
       modelIntent: z.string().optional().describe('Optional explicit ChatGPT generation intent for this query only. Supported intents: gpt-5.5-pro, gpt-5.4-pro. The controller fails closed unless the UI can confirm the requested generation before sending.'),
@@ -109,6 +777,7 @@ registerTool(
     tabId,
     key,
     chatUrl,
+    liveSourceId,
     projectUrl,
     modeIntent,
     modelIntent,
@@ -129,7 +798,14 @@ registerTool(
   }) => {
     const resolvedAttachments = resolveLocalPaths(attachments || []);
     const resolvedContextPaths = resolveLocalPaths(contextPaths || []);
-    const effectiveKey = key || (fireAndForget && !chatUrl ? `async-${Date.now().toString(36)}` : undefined);
+    let effectiveKey = key || (fireAndForget && !chatUrl ? `async-${Date.now().toString(36)}` : undefined);
+    if (liveSourceId !== undefined) {
+      try {
+        effectiveKey = parseTranscriptSourceKey(key);
+      } catch {
+        throw transcriptMcpError('conversation-not-live-bound');
+      }
+    }
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
@@ -141,6 +817,7 @@ registerTool(
         tabId,
         key: effectiveKey,
         chatUrl,
+        liveSourceId,
         projectUrl,
         modeIntent,
         modelIntent,
@@ -273,6 +950,221 @@ registerTool(
       content: [{ type: 'text', text: data.text || '' }],
       structuredContent: data,
       isError: data.complete === false && data.reason !== 'max_chars'
+    };
+  }
+);
+
+registerTool(
+  'agentify_import_chatgpt_export',
+  {
+    description: 'Import a ChatGPT export selected by the human in Agentify Desktop. The one-use grant never exposes a local path.',
+    inputSchema: z.object({
+      grantId: z.string().regex(EXPORT_GRANT_ID_PATTERN)
+        .describe('One-use grant id returned by the Agentify Desktop file picker.'),
+      profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN)
+        .describe('The same local ChatGPT profile scope confirmed in the picker.')
+    }).strict()
+  },
+  async ({ grantId, profileScopeId }) => {
+    const outcome = parseCatalogImportResponse(await requestTranscriptJson({
+      method: 'POST',
+      path: '/catalog/import',
+      body: { grantId, profileScopeId }
+    }));
+    const counts = outcome.status === 'rejected'
+      ? ''
+      : ` records=${outcome.counts.recordsSeen} snapshots=${outcome.counts.snapshots} problems=${outcome.counts.problems}`;
+    const detail = outcome.status === 'rejected' ? ` reason=${outcome.reason}` : ` importId=${outcome.importId}${counts}`;
+    return {
+      content: [{ type: 'text', text: `status=${outcome.status}${detail}` }],
+      structuredContent: outcome,
+      isError: outcome.status === 'rejected'
+    };
+  }
+);
+
+registerTool(
+  'agentify_verify_catalog_conversation',
+  {
+    description: 'Verify one imported ChatGPT conversation by direct exact navigation. A failed observation never means deletion.',
+    inputSchema: z.object({
+      identity: transcriptIdentitySchema,
+      key: transcriptSourceKeySchema.describe('Agentify tab key used for the direct verification navigation.')
+    }).strict()
+  },
+  async ({ identity, key }) => {
+    const expectedIdentity = parseConversationIdentity(identity);
+    const outcome = parseCatalogVerificationResponse(await requestTranscriptJson({
+      method: 'POST',
+      path: '/catalog/verify',
+      body: { identity: expectedIdentity, key }
+    }), expectedIdentity);
+    const detail = outcome.status === 'unavailable'
+      ? ` reason=${outcome.observation.reason}`
+      : outcome.status === 'failed' ? ` reason=${outcome.reason}` : '';
+    return {
+      content: [{ type: 'text', text: `status=${outcome.status}${detail}` }],
+      structuredContent: outcome,
+      isError: outcome.status === 'failed'
+    };
+  }
+);
+
+registerTool(
+  'agentify_list_chatgpt_catalog',
+  {
+    description: 'List bounded ChatGPT catalog metadata. Imported routes remain non-navigable until exact verification.',
+    inputSchema: z.object({
+      profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN).optional(),
+      cursor: z.string().regex(CATALOG_LIST_CURSOR_PATTERN).optional(),
+      limit: z.number().int().min(1).max(100).optional()
+    }).strict()
+  },
+  async ({ profileScopeId, cursor, limit }) => {
+    const query = new URLSearchParams();
+    if (profileScopeId !== undefined) query.set('profileScopeId', profileScopeId);
+    if (cursor !== undefined) query.set('cursor', cursor);
+    if (limit !== undefined) query.set('limit', String(limit));
+    const page = parseCatalogPageResponse(await requestTranscriptJson({
+      method: 'GET',
+      path: `/catalog/list${query.size ? `?${query}` : ''}`
+    }));
+    return {
+      content: [{ type: 'text', text: `count=${page.items.length}${page.nextCursor ? ' nextCursor=available' : ''}` }],
+      structuredContent: page
+    };
+  }
+);
+
+registerTool(
+  'agentify_track_transcript',
+  {
+    description: 'Track the exact owned ChatGPT conversation already open on an existing keyed tab.',
+    inputSchema: z.object({
+      label: transcriptSourceLabelSchema.describe('Local display label. It is never returned through MCP.'),
+      tags: transcriptSourceTagsSchema.describe('Local tags. They are never returned through MCP.'),
+      key: transcriptSourceKeySchema.describe('Existing Agentify tab key for the open owned conversation.'),
+      profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN).describe('Stable local ChatGPT profile scope id.')
+    }).strict()
+  },
+  async ({ label, tags, key, profileScopeId }) => {
+    const source = parseTranscriptSourceResponse(
+      await requestTranscriptJson({
+        method: 'POST',
+        path: '/transcripts/track',
+        body: { label, tags, key, profileScopeId }
+      })
+    );
+    if (source.state !== 'tracked') throw transcriptMcpError('transcript_mcp_response_invalid');
+    const structuredContent = safeTranscriptSource(source);
+    return {
+      content: [{ type: 'text', text: `sourceId=${source.id} status=${source.state}` }],
+      structuredContent
+    };
+  }
+);
+
+registerTool(
+  'agentify_sync_transcript',
+  {
+    description: 'Manually capture and publish the newest complete snapshot for a tracked source.',
+    inputSchema: z.object({
+      sourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).describe('Tracked transcript source id.')
+    }).strict()
+  },
+  async ({ sourceId }) => {
+    const result = parseTranscriptSyncResponse(await requestTranscriptJson({
+      method: 'POST',
+      path: '/transcripts/sync',
+      body: { sourceId }
+    }));
+    if (result.source.id !== sourceId) throw transcriptMcpError('transcript_mcp_response_invalid');
+    const structuredContent = {
+      source: safeTranscriptSource(result.source),
+      attempt: safeTranscriptAttempt(result.attempt),
+      status: result.status,
+      outcome: result.outcome
+    };
+    const changed = result.status === 'complete' ? ` changed=${result.outcome.changed}` : '';
+    return {
+      content: [{ type: 'text', text: `sourceId=${result.source.id} status=${result.status}${changed}` }],
+      structuredContent
+    };
+  }
+);
+
+registerTool(
+  'agentify_list_transcripts',
+  {
+    description: 'List tracked transcript source metadata without transcript text, labels, or routes.',
+    inputSchema: z.object({}).strict()
+  },
+  async () => {
+    const sources = parseTranscriptResponse(
+      z.array(transcriptSourceSchema),
+      await requestTranscriptJson({ method: 'GET', path: '/transcripts/list' })
+    );
+    for (const source of sources) validateTranscriptSource(source);
+    if (new Set(sources.map(({ id }) => id)).size !== sources.length) {
+      throw transcriptMcpError('transcript_mcp_response_invalid');
+    }
+    const structuredContent = {
+      count: sources.length,
+      sources: sources.map(safeTranscriptSource)
+    };
+    return {
+      content: [{ type: 'text', text: `count=${sources.length}` }],
+      structuredContent
+    };
+  }
+);
+
+registerTool(
+  'agentify_get_transcript',
+  {
+    description: 'Retrieve one bounded page of immutable structured transcript turns with exact citations.',
+    inputSchema: z.object({
+      identity: transcriptIdentitySchema,
+      snapshot: transcriptSnapshotRefSchema.optional().describe('Explicit immutable snapshot returned by an earlier page.'),
+      cursor: transcriptCursorSchema.optional().describe('Cursor returned by the same immutable snapshot.'),
+      limit: z.number().int().min(1).max(100).optional().describe('Maximum whole turns to return. Defaults to 20.'),
+      includePaths: z.boolean().optional().describe('Include the private local snapshot path. Defaults to false.')
+    }).strict()
+  },
+  async (request) => {
+    const page = parseTranscriptPageResponse(
+      await requestTranscriptJson({ method: 'POST', path: '/transcripts/get', body: request }),
+      request
+    );
+    return {
+      content: [{ type: 'text', text: page.text }],
+      structuredContent: page
+    };
+  }
+);
+
+registerTool(
+  'agentify_forget_transcript',
+  {
+    description: 'Forget one local transcript source. This does not delete the provider conversation.',
+    inputSchema: z.object({
+      sourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).describe('Tracked transcript source id.'),
+      confirm: z.literal(true).describe('Must be true to confirm local forgetting.')
+    }).strict()
+  },
+  async ({ sourceId, confirm }) => {
+    const deletion = parseTranscriptResponse(
+      transcriptDeletionSchema,
+      await requestTranscriptJson({
+        method: 'POST',
+        path: '/transcripts/forget',
+        body: { sourceId, confirm }
+      })
+    );
+    if (deletion.sourceId !== sourceId) throw transcriptMcpError('transcript_mcp_response_invalid');
+    return {
+      content: [{ type: 'text', text: `sourceId=${deletion.sourceId} status=forgotten` }],
+      structuredContent: deletion
     };
   }
 );

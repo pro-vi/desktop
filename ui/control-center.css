@@ -117,13 +117,52 @@ body {
   padding: 12px;
 }
 
-.cardTitle { font-weight: 700; margin-bottom: 10px; }
+.cardTitle { font-size: inherit; font-weight: 700; margin: 0 0 10px; }
 .compatibilityVerdict { font-size: 14px; font-weight: 650; }
 .compatibilityVerdict.ok { color: #bbf7d0; }
 .compatibilityVerdict.warn { color: #fde68a; }
 .compatibilityVerdict.fail { color: #fecaca; }
 .compatibilityCapabilities { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .compatibilityCapabilities .badge { margin-left: 0; }
+.libraryLead { margin-bottom: 10px; }
+.libraryInputs { grid-template-columns: 1fr 1fr; }
+.libraryActions { justify-content: flex-start; flex-wrap: wrap; }
+.librarySection { margin-top: 16px; }
+.librarySectionTitle {
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0;
+  color: rgba(233,236,242,0.78);
+  letter-spacing: 0.25px;
+  text-transform: uppercase;
+}
+.libraryStatus.ok { color: #bbf7d0; }
+.libraryStatus.warn { color: #fde68a; }
+.libraryStatus.fail { color: #fecaca; }
+.libraryStatus.info { color: #bfdbfe; }
+.librarySectionError {
+  margin-bottom: 8px;
+  border-left: 2px solid rgba(245, 158, 11, 0.65);
+  padding: 7px 9px;
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.2);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.libraryItem.isBusy {
+  border-color: rgba(59, 130, 246, 0.32);
+  background: rgba(30, 64, 175, 0.12);
+}
+.libraryDisabledReason { color: #bfdbfe !important; }
+.privacyNote {
+  margin-top: 16px;
+  border-left: 2px solid rgba(59,130,246,0.5);
+  padding-left: 10px;
+  color: rgba(233,236,242,0.72);
+  font-size: 12px;
+  line-height: 1.4;
+}
 
 .grid {
   display: grid;
@@ -193,6 +232,16 @@ input::placeholder { color: rgba(233,236,242,0.45); }
 }
 .btn.primary:hover { background: rgba(37,99,235,0.32); }
 .btn.secondary { opacity: 0.92; }
+.btn:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid rgba(96,165,250,0.9);
+  outline-offset: 2px;
+}
+.btn[disabled] {
+  opacity: 0.58;
+  cursor: default;
+}
 .iconBtn {
   min-width: 38px;
   width: 38px;
@@ -259,7 +308,11 @@ input::placeholder { color: rgba(233,236,242,0.45); }
 }
 
 .hint { font-size: 12px; color: rgba(233,236,242,0.66); line-height: 1.35; margin-top: 8px; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 .footer {
   border-top: 1px solid rgba(255,255,255,0.08);
@@ -281,5 +334,8 @@ input::placeholder { color: rgba(233,236,242,0.45); }
   .headerBtn {
     padding: 7px 9px;
     font-size: 12px;
+  }
+  .libraryInputs {
+    grid-template-columns: 1fr;
   }
 }

@@ -17,6 +17,23 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_query'"), 'expected agentify_query tool');
   assert.ok(src.includes("'agentify_research'"), 'expected agentify_research tool');
   assert.ok(src.includes("'agentify_read_conversation'"), 'expected agentify_read_conversation tool');
+  assert.ok(src.includes("'agentify_track_transcript'"), 'expected agentify_track_transcript tool');
+  assert.ok(src.includes("'agentify_sync_transcript'"), 'expected agentify_sync_transcript tool');
+  assert.ok(src.includes("'agentify_list_transcripts'"), 'expected agentify_list_transcripts tool');
+  assert.ok(src.includes("'agentify_get_transcript'"), 'expected agentify_get_transcript tool');
+  assert.ok(src.includes("'agentify_forget_transcript'"), 'expected agentify_forget_transcript tool');
+  assert.ok(src.includes("'agentify_import_chatgpt_export'"), 'expected agentify_import_chatgpt_export tool');
+  assert.ok(src.includes("'agentify_verify_catalog_conversation'"), 'expected agentify_verify_catalog_conversation tool');
+  assert.ok(src.includes("'agentify_list_chatgpt_catalog'"), 'expected agentify_list_chatgpt_catalog tool');
+  assert.ok(src.includes("path: '/transcripts/track'"), 'expected transcript track forwarding');
+  assert.ok(src.includes("path: '/transcripts/sync'"), 'expected transcript sync forwarding');
+  assert.ok(src.includes("path: '/transcripts/list'"), 'expected transcript list forwarding');
+  assert.ok(src.includes("path: '/transcripts/get'"), 'expected transcript get forwarding');
+  assert.ok(src.includes("path: '/transcripts/forget'"), 'expected transcript forget forwarding');
+  assert.ok(src.includes("path: '/catalog/import'"), 'expected catalog import forwarding');
+  assert.ok(src.includes("path: '/catalog/verify'"), 'expected catalog verification forwarding');
+  assert.ok(src.includes("path: `/catalog/list${query.size ? `?${query}` : ''}`"), 'expected catalog list forwarding');
+  assert.ok(src.includes("throw transcriptMcpError('transcript_mcp_response_invalid')"), 'expected malformed transcript responses to fail closed');
   assert.ok(src.includes("'agentify_download_images'"), 'expected agentify_download_images tool');
   assert.ok(src.includes("'agentify_list_watch_folders'"), 'expected agentify_list_watch_folders tool');
   assert.ok(src.includes("'agentify_add_watch_folder'"), 'expected agentify_add_watch_folder tool');
@@ -44,6 +61,8 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(queryBlock, 'expected agentify_query registration block');
   assert.ok(queryBlock[0].includes('chatUrl: z.string().optional().describe('), 'expected chatUrl on agentify_query');
   assert.ok(queryBlock[0].includes('chatUrl,'), 'expected chatUrl forwarding on agentify_query');
+  assert.ok(queryBlock[0].includes('liveSourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).optional()'), 'expected optional liveSourceId on agentify_query');
+  assert.ok(queryBlock[0].includes('liveSourceId,'), 'expected liveSourceId forwarding on agentify_query');
   assert.ok(queryBlock[0].includes('modelIntent: z.string().optional().describe('), 'expected modelIntent on agentify_query');
   assert.ok(queryBlock[0].includes('modelIntent,'), 'expected modelIntent forwarding on agentify_query');
   assert.ok(imageGenBlock, 'expected agentify_image_gen registration block');
@@ -82,4 +101,11 @@ test('mcp-server registers agentify_* tools only', async () => {
 
   assert.ok(!src.includes('browser_'), 'should not contain browser_* tools/aliases');
   assert.ok(!src.includes('registerToolWithAliases'), 'should not contain alias helper');
+});
+
+test('mcp-server derives recovery-location ids from the shared local-id authority', async () => {
+  const src = await fs.readFile(path.join(__dirname, '..', 'mcp-server.mjs'), 'utf8');
+  assert.match(src, /value\.startsWith\('local-trash\/'\)/);
+  assert.match(src, /LIBRARY_LOCAL_ID_PATTERN\.test\(value\.slice\('local-trash\/'\.length\)\)/);
+  assert.doesNotMatch(src, /local-trash\\\/\[A-Za-z0-9\]/);
 });

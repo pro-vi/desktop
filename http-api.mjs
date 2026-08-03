@@ -17,8 +17,15 @@ import {
   derivedChatKey,
   locationFromConversationUrl,
   locationFromProjectUrl,
+  parseChatGptEntryTarget,
   projectUrlForLocation
 } from './chatgpt-location.mjs';
+import {
+  LIBRARY_LOCAL_ID_PATTERN,
+  identityFromOwnedLocation,
+  sameConversationIdentity
+} from './conversation-identity.mjs';
+import { parseTranscriptSourceKey } from './transcript-source-contract.mjs';
 import {
   ensureArtifactsDir,
   ensureRunArtifactsDir,
@@ -105,6 +112,7 @@ function mapErrorToHttp(error) {
   if (msg === 'missing_staged_prompt') return { code: 409, body: { error: 'missing_staged_prompt', data: error?.data || null } };
   if (msg === 'send_not_triggered') return { code: 409, body: { error: 'send_not_triggered', data: error?.data || null } };
   if (msg === 'shared_chat_materialization_failed') return { code: 409, body: { error: 'shared_chat_materialization_failed', data: error?.data || null } };
+  if (msg === 'conversation-not-live-bound') return { code: 409, body: { error: 'conversation-not-live-bound' } };
   if (msg === 'missing_tabId') return { code: 400, body: { error: 'missing_tabId' } };
   if (msg === 'missing_key') return { code: 400, body: { error: 'missing_key' } };
   if (msg === 'missing_run_id') return { code: 400, body: { error: 'missing_run_id' } };
@@ -128,6 +136,206 @@ function mapErrorToHttp(error) {
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
   if (msg === 'model_intent_activation_failed') return { code: 409, body: { error: 'model_intent_activation_failed', data: error?.data || null } };
   return null;
+}
+
+const TRANSCRIPT_REQUEST_KEYS = Object.freeze({
+  track: Object.freeze(['label', 'tags', 'key', 'profileScopeId']),
+  sync: Object.freeze(['sourceId']),
+  get: Object.freeze(['identity', 'snapshot', 'cursor', 'limit', 'includePaths']),
+  forget: Object.freeze(['sourceId', 'confirm'])
+});
+
+const CATALOG_REQUEST_KEYS = Object.freeze({
+  import: Object.freeze(['grantId', 'profileScopeId']),
+  verify: Object.freeze(['identity', 'key']),
+  reassign: Object.freeze(['importId', 'newProfileScopeId', 'confirm'])
+});
+
+function isExactRecord(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function transcriptHttpError(error) {
+  const code = String(error?.code || error?.message || '');
+  if (code === 'body_too_large') return { code: 413, body: { error: code } };
+  if (
+    [
+      'invalid_json',
+      'invalid_profile_scope_id',
+      'invalid_conversation_identity',
+      'invalid_provider_conversation_id',
+      'transcript_request_invalid',
+      'transcript_source_invalid',
+      'transcript_track_invalid',
+      'transcript_page_limit'
+    ].includes(code)
+  ) {
+    return { code: 400, body: { error: code } };
+  }
+  if (code === 'transcript_confirmation_required') {
+    return { code: 400, body: { error: code } };
+  }
+  if (['tab_not_found', 'transcript_source_not_found', 'transcript_identity_not_found', 'transcript_snapshot_not_found'].includes(code)) {
+    return { code: 404, body: { error: code } };
+  }
+  if (
+    [
+      'key_vendor_mismatch',
+      'owned_conversation_required',
+      'tab_closed',
+      'transcript_source_disabled',
+      'transcript_source_exists',
+      'transcript_source_key_exists',
+      'transcript_sync_active',
+      'transcript_no_complete_snapshot',
+      'transcript_snapshot_identity_mismatch',
+      'transcript_cursor_mismatch'
+    ].includes(code)
+  ) {
+    return { code: 409, body: { error: code } };
+  }
+  if (
+    [
+      'transcript_store_corrupt_state',
+      'transcript_store_schema_unsupported',
+      'transcript_store_io',
+      'transcript_store_reload_required',
+      'transcript_store_size_limit',
+      'transcript_import_index_invalid',
+      'library_blob_corrupt',
+      'library_blob_io',
+      'library_blob_not_found',
+      'library_blob_schema_unsupported'
+    ].includes(code)
+  ) {
+    return { code: 500, body: { error: code } };
+  }
+  if (code === 'transcript_page_character_limit') {
+    return { code: 413, body: { error: code } };
+  }
+  return { code: 500, body: { error: 'internal_error' } };
+}
+
+async function sendTranscriptResponse(res, operation) {
+  try {
+    return sendJson(res, 200, await operation());
+  } catch (error) {
+    const mapped = transcriptHttpError(error);
+    return sendJson(res, mapped.code, mapped.body);
+  }
+}
+
+const CATALOG_HTTP_BAD_REQUEST_ERRORS = new Set([
+  'catalog_archive_record_invalid',
+  'catalog_batch_invalid',
+  'catalog_change_listener_invalid',
+  'catalog_clock_invalid',
+  'catalog_import_grant_invalid',
+  'catalog_import_id_invalid',
+  'catalog_import_invalid',
+  'catalog_import_outcome_invalid',
+  'catalog_import_request_invalid',
+  'catalog_profile_hint_invalid',
+  'catalog_profile_hints_invalid',
+  'catalog_reassign_request_invalid',
+  'catalog_request_invalid',
+  'catalog_route_invalid',
+  'catalog_scope_confirmation_required',
+  'catalog_scope_invalid',
+  'catalog_verification_key_invalid',
+  'catalog_verification_timeout_invalid',
+  'invalid_catalog_contract',
+  'invalid_conversation_identity',
+  'invalid_json',
+  'invalid_profile_scope_id',
+  'invalid_provider_conversation_id'
+]);
+
+const CATALOG_HTTP_INTERNAL_ERRORS = new Set([
+  'catalog_import_interrupted',
+  'catalog_raw_blob_invalid',
+  'catalog_snapshot_blob_invalid',
+  'catalog_snapshot_mismatch',
+  'catalog_store_blobs_required',
+  'catalog_store_clock_invalid',
+  'catalog_store_corrupt_state',
+  'catalog_store_io',
+  'catalog_store_reload_required',
+  'catalog_store_required',
+  'catalog_store_schema_unsupported',
+  'catalog_store_size_limit',
+  'catalog_store_state_dir_required',
+  'library_blob_corrupt',
+  'library_blob_hash_collision',
+  'library_blob_hash_failure',
+  'library_blob_invalid_raw_record',
+  'library_blob_invalid_ref',
+  'library_blob_invalid_snapshot',
+  'library_blob_io',
+  'library_blob_non_json_value',
+  'library_blob_not_found',
+  'library_blob_schema_unsupported',
+  'library_blob_size_limit',
+  'library_blob_snapshot_hash_mismatch',
+  'library_blob_state_dir_required'
+]);
+
+function catalogHttpError(error) {
+  const code = String(error?.code || error?.message || '');
+  if (code === 'body_too_large') return { code: 413, body: { error: code } };
+  if (CATALOG_HTTP_INTERNAL_ERRORS.has(code)) {
+    return { code: 500, body: { error: code } };
+  }
+  if (CATALOG_HTTP_BAD_REQUEST_ERRORS.has(code)) {
+    return { code: 400, body: { error: code } };
+  }
+  if (
+    ['catalog_conversation_not_found', 'catalog_import_not_found', 'catalog_import_grant_unavailable'].includes(code)
+  ) {
+    return { code: 404, body: { error: code } };
+  }
+  if (
+    [
+      'catalog_import_active',
+      'catalog_import_manifest_conflict',
+      'catalog_import_replay_conflict',
+      'catalog_import_cursor_mismatch',
+      'catalog_import_not_open',
+      'catalog_import_outcome_mismatch',
+      'catalog_record_index_mismatch',
+      'catalog_scope_conflict',
+      'catalog_cursor_mismatch',
+      'catalog_route_identity_mismatch',
+      'catalog_verification_identity_mismatch'
+    ].includes(code)
+  ) {
+    return { code: 409, body: { error: code } };
+  }
+  return { code: 500, body: { error: 'internal_error' } };
+}
+
+async function sendCatalogResponse(res, operation) {
+  try {
+    return sendJson(res, 200, await operation());
+  } catch (error) {
+    const mapped = catalogHttpError(error);
+    return sendJson(res, mapped.code, mapped.body);
+  }
+}
+
+function catalogRequestError(code = 'catalog_request_invalid') {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function transcriptRequestError(code = 'transcript_request_invalid') {
+  const error = new Error(code);
+  error.code = code;
+  return error;
 }
 
 function getTabIdFromUrl(url) {
@@ -758,7 +966,10 @@ export function startHttpApi({
   getCompatibilityStatus = () => null,
   getSettings,
   onRuntimeChanged,
-  onRunsChanged
+  onRunsChanged,
+  transcriptSync,
+  transcriptRead,
+  catalogSync
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
@@ -786,6 +997,154 @@ export function startHttpApi({
   }
   function getPersistedKeyMeta(key) {
     return key ? normalizePersistedChatGptKeyMeta(keyMetaByKey[key]) : null;
+  }
+
+  function liveContinuationError() {
+    const error = new Error('conversation-not-live-bound');
+    error.code = 'conversation-not-live-bound';
+    return error;
+  }
+
+  function assertLiveContinuationSelectors(body, requestUrl) {
+    const hasSelector = (value) => value !== null && value !== undefined && String(value).trim() !== '';
+    if (
+      hasSelector(body?.tabId) ||
+      hasSelector(body?.model) ||
+      hasSelector(body?.vendorId) ||
+      hasSelector(body?.projectUrl) ||
+      body?.imageGeneration === true ||
+      getTabIdFromUrl(requestUrl)
+    ) {
+      throw liveContinuationError();
+    }
+  }
+
+  function assertLiveContinuationTab(source, tabMeta) {
+    if (
+      !source ||
+      !tabMeta ||
+      tabMeta.key !== source.key ||
+      normalizeVendorToken(tabMeta.vendorId || '') !== 'chatgpt'
+    ) {
+      throw liveContinuationError();
+    }
+  }
+
+  function assertLiveContinuationTabInventory(source) {
+    const rows = tabs.listTabs?.();
+    if (!Array.isArray(rows)) throw liveContinuationError();
+    const matches = rows.filter((tab) => tab?.key === source?.key);
+    if (matches.length > 1) throw liveContinuationError();
+    if (matches.length === 1) assertLiveContinuationTab(source, matches[0]);
+  }
+
+  function assertLiveContinuationServedRoute(source, requestedUrl, servedUrl) {
+    try {
+      const sourceIdentity = identityFromOwnedLocation(
+        source.identity.profileScopeId,
+        source.target.location
+      );
+      const requestedIdentity = identityFromOwnedLocation(
+        source.identity.profileScopeId,
+        locationFromConversationUrl(requestedUrl)
+      );
+      const servedIdentity = identityFromOwnedLocation(
+        source.identity.profileScopeId,
+        locationFromConversationUrl(servedUrl)
+      );
+      if (
+        sameConversationIdentity(sourceIdentity, source.identity) &&
+        sameConversationIdentity(requestedIdentity, source.identity) &&
+        sameConversationIdentity(servedIdentity, source.identity)
+      ) return;
+    } catch {}
+    throw liveContinuationError();
+  }
+
+  async function requireLiveContinuationBinding({ liveSourceId, key, conversationUrl } = {}) {
+    const sourceId = trimOrNull(liveSourceId);
+    const requestedUrl = trimOrNull(conversationUrl);
+    let sourceKey;
+    try {
+      sourceKey = parseTranscriptSourceKey(key);
+    } catch {
+      throw liveContinuationError();
+    }
+    if (
+      !sourceId ||
+      !LIBRARY_LOCAL_ID_PATTERN.test(sourceId) ||
+      !requestedUrl ||
+      !transcriptSync ||
+      typeof transcriptSync.list !== 'function'
+    ) {
+      throw liveContinuationError();
+    }
+    let requestedLocation;
+    try {
+      requestedLocation = locationFromConversationUrl(requestedUrl);
+    } catch {
+      throw liveContinuationError();
+    }
+    let sources;
+    try {
+      sources = await transcriptSync.list();
+    } catch {
+      throw liveContinuationError();
+    }
+    if (!Array.isArray(sources)) throw liveContinuationError();
+    const matches = sources.filter((source) => {
+      let storedSourceKey;
+      try {
+        storedSourceKey = parseTranscriptSourceKey(source?.key);
+      } catch {
+        return false;
+      }
+      if (
+        source?.id !== sourceId ||
+        source?.enabled !== true ||
+        storedSourceKey !== sourceKey ||
+        !source?.identity ||
+        source?.target?.kind !== 'owned-conversation' ||
+        !source.target.location
+      ) return false;
+      try {
+        const sourceIdentity = identityFromOwnedLocation(
+          source.identity.profileScopeId,
+          source.target.location
+        );
+        const requestedIdentity = identityFromOwnedLocation(
+          source.identity.profileScopeId,
+          requestedLocation
+        );
+        if (
+          !sameConversationIdentity(sourceIdentity, source.identity) ||
+          !sameConversationIdentity(requestedIdentity, source.identity)
+        ) return false;
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (matches.length !== 1) throw liveContinuationError();
+    return matches[0];
+  }
+
+  async function syncLiveTranscriptAfterQuery({ liveSourceId = null, key, conversationUrl, imageGeneration = false } = {}) {
+    if (
+      imageGeneration ||
+      !liveSourceId ||
+      typeof key !== 'string' ||
+      !key ||
+      typeof conversationUrl !== 'string' ||
+      !conversationUrl ||
+      !transcriptSync ||
+      typeof transcriptSync.sync !== 'function'
+    ) {
+      return;
+    }
+    try {
+      await transcriptSync.sync(liveSourceId, 'post-query');
+    } catch {}
   }
 
   function persistKeyLocation(key, { url = null, projectUrl = null, conversationUrl = null, sourceUrl = null } = {}) {
@@ -1161,6 +1520,9 @@ export function startHttpApi({
     timeoutMs: Number(timeoutMs) || null,
     source: String(source || 'http'),
     fireAndForget: !!fireAndForget,
+    ...(Object.prototype.hasOwnProperty.call(body || {}, 'liveSourceId')
+      ? { liveSourceId: String(body.liveSourceId || '').trim() }
+      : {}),
     key: body?.key ? String(body.key).trim() : null,
     tabId: body?.tabId ? String(body.tabId).trim() : null,
     vendorId: body?.vendorId ? String(body.vendorId).trim() : (body?.model ? String(body.model).trim() : null),
@@ -2258,9 +2620,18 @@ export function startHttpApi({
     const original = getRunRecordOrThrow(runId);
     const savedMeta = getPersistedKeyMeta(original.key);
     const imageGeneration = !!original?.logicalRequest?.imageGeneration;
+    const hasLiveContinuation = Object.prototype.hasOwnProperty.call(
+      original?.logicalRequest || {},
+      'liveSourceId'
+    );
+    const liveSourceId = trimOrNull(original?.logicalRequest?.liveSourceId);
+    const liveContinuationKey = trimOrNull(original?.logicalRequest?.key);
+    const liveContinuationUrl = trimOrNull(original?.logicalRequest?.chatUrl);
     const persistKeyLocationForRun = !imageGeneration;
     const originalProjectUrl = original.projectUrl || savedMeta?.projectUrl || null;
-    const originalConversationUrl = original.conversationUrl || (imageGeneration ? null : savedMeta?.conversationUrl || null);
+    const originalConversationUrl = hasLiveContinuation
+      ? liveContinuationUrl
+      : original.conversationUrl || (imageGeneration ? null : savedMeta?.conversationUrl || null);
     const originalModeIntent = original.modeIntent || original.logicalRequest?.modeIntent || savedMeta?.modeIntent || null;
     const originalModelIntent = original.modelIntent || original.logicalRequest?.modelIntent || null;
     const replay = original.materializedReplay || null;
@@ -2269,6 +2640,18 @@ export function startHttpApi({
     const effectiveTimeoutMs = nextKind === 'research'
       ? researchTimeoutMs(timeoutMs, replay.timeoutMs || 45 * 60_000)
       : positiveIntOr(timeoutMs, replay.timeoutMs || 10 * 60_000, 30 * 60_000);
+    let liveContinuationSource = null;
+    if (hasLiveContinuation) {
+      if (nextKind !== 'query' || liveContinuationKey !== trimOrNull(original.key)) {
+        throw liveContinuationError();
+      }
+      liveContinuationSource = await requireLiveContinuationBinding({
+        liveSourceId,
+        key: liveContinuationKey,
+        conversationUrl: liveContinuationUrl
+      });
+      assertLiveContinuationTabInventory(liveContinuationSource);
+    }
     const scope = original.key
       ? `key:${original.key}`
       : original.vendorId
@@ -2307,10 +2690,11 @@ export function startHttpApi({
         show
       });
       assertTabNotBusy(tabId);
+      let tabMeta = getTabMeta(tabs, tabId);
+      if (hasLiveContinuation) assertLiveContinuationTab(liveContinuationSource, tabMeta);
       const retryTabPatch = chatGptTabMetaPatch({ projectUrl: originalProjectUrl, modeIntent: originalModeIntent, modelIntent: originalModelIntent });
       if (Object.keys(retryTabPatch).length) tabs.updateTabMeta?.(tabId, retryTabPatch);
       op.tabId = tabId;
-      let tabMeta = getTabMeta(tabs, tabId);
       if (nextKind === 'research') {
         tabMeta = assertResearchTab(tabId);
         outputDir = await ensureRunArtifactsDir({
@@ -2404,6 +2788,17 @@ export function startHttpApi({
             conversationUrl: originalConversationUrl,
             projectUrl: originalProjectUrl
           });
+          if (hasLiveContinuation) {
+            const preSendSource = await requireLiveContinuationBinding({
+              liveSourceId,
+              key: liveContinuationKey,
+              conversationUrl: liveContinuationUrl
+            });
+            const servedUrl = typeof controller.getUrl === 'function'
+              ? await controller.getUrl().catch(() => null)
+              : null;
+            assertLiveContinuationServedRoute(preSendSource, liveContinuationUrl, servedUrl);
+          }
           return controller.query({
             prompt: String(replay.prompt || ''),
             attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
@@ -2421,6 +2816,13 @@ export function startHttpApi({
         const conversationUrl = typeof controller.getUrl === 'function'
           ? await controller.getUrl().catch(() => originalConversationUrl || null)
           : originalConversationUrl || null;
+        if (hasLiveContinuation) {
+          assertLiveContinuationServedRoute(
+            liveContinuationSource,
+            liveContinuationUrl,
+            conversationUrl
+          );
+        }
         if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
           persistKeyLocation(effectiveKey, { conversationUrl, projectUrl: originalProjectUrl });
         }
@@ -2473,7 +2875,17 @@ export function startHttpApi({
       }, executeRetry);
 
       if (fireAndForget) {
-        runRetryWithLease().catch((error) => {
+        runRetryWithLease().then(async (completed) => {
+          if (nextKind === 'query') {
+            await syncLiveTranscriptAfterQuery({
+              liveSourceId,
+              key: effectiveKey,
+              conversationUrl: completed?.conversationUrl || null,
+              imageGeneration
+            });
+          }
+          return completed;
+        }).catch((error) => {
           const outcome = outcomeFromError(error, op);
           setLastOutcome(tabId, outcome);
           return durableRunFinalizeFromOutcome(op.id, outcome);
@@ -2485,6 +2897,14 @@ export function startHttpApi({
       }
 
       const completed = await runRetryWithLease();
+      if (nextKind === 'query') {
+        await syncLiveTranscriptAfterQuery({
+          liveSourceId,
+          key: effectiveKey,
+          conversationUrl: completed?.conversationUrl || null,
+          imageGeneration
+        });
+      }
       return { ok: true, tabId, runId: op.id, retryOf: original.id, result: completed?.result || null };
     } catch (error) {
       if (tabId) {
@@ -2554,6 +2974,189 @@ export function startHttpApi({
 
       if (url.pathname === '/tabs' && req.method === 'GET') {
         return sendJson(res, 200, { ok: true, tabs: tabs.listTabs(), defaultTabId });
+      }
+      if (url.pathname === '/catalog/import' && req.method === 'POST') {
+        return await sendCatalogResponse(res, async () => {
+          if (url.search) throw catalogRequestError();
+          const body = await parseBody(req);
+          if (
+            !isExactRecord(body, CATALOG_REQUEST_KEYS.import) ||
+            typeof body.grantId !== 'string' || typeof body.profileScopeId !== 'string'
+          ) {
+            throw catalogRequestError();
+          }
+          if (!catalogSync || typeof catalogSync.importExport !== 'function') {
+            throw catalogRequestError('catalog_service_unavailable');
+          }
+          return await catalogSync.importExport(body);
+        });
+      }
+      if (url.pathname === '/catalog/verify' && req.method === 'POST') {
+        return await sendCatalogResponse(res, async () => {
+          if (url.search) throw catalogRequestError();
+          const body = await parseBody(req);
+          if (
+            !isExactRecord(body, CATALOG_REQUEST_KEYS.verify) ||
+            !body.identity || typeof body.key !== 'string'
+          ) {
+            throw catalogRequestError();
+          }
+          if (!catalogSync || typeof catalogSync.verifyByNavigation !== 'function') {
+            throw catalogRequestError('catalog_service_unavailable');
+          }
+          return await catalogSync.verifyByNavigation(body.identity, body.key);
+        });
+      }
+      if (url.pathname === '/catalog/reassign' && req.method === 'POST') {
+        return await sendCatalogResponse(res, async () => {
+          if (url.search) throw catalogRequestError();
+          const body = await parseBody(req);
+          if (
+            !isExactRecord(body, CATALOG_REQUEST_KEYS.reassign) ||
+            typeof body.importId !== 'string' || typeof body.newProfileScopeId !== 'string' ||
+            typeof body.confirm !== 'boolean'
+          ) {
+            throw catalogRequestError();
+          }
+          if (!catalogSync || typeof catalogSync.reassignImportScope !== 'function') {
+            throw catalogRequestError('catalog_service_unavailable');
+          }
+          return await catalogSync.reassignImportScope(body);
+        });
+      }
+      if (url.pathname === '/catalog/list' && req.method === 'GET') {
+        return await sendCatalogResponse(res, async () => {
+          if (!catalogSync || typeof catalogSync.list !== 'function') {
+            throw catalogRequestError('catalog_service_unavailable');
+          }
+          const allowed = new Set(['profileScopeId', 'cursor', 'limit']);
+          for (const key of url.searchParams.keys()) {
+            if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) throw catalogRequestError();
+          }
+          const request = {};
+          if (url.searchParams.has('profileScopeId')) request.profileScopeId = url.searchParams.get('profileScopeId');
+          if (url.searchParams.has('cursor')) request.cursor = url.searchParams.get('cursor');
+          if (url.searchParams.has('limit')) {
+            const rawLimit = url.searchParams.get('limit');
+            if (!/^[1-9]\d{0,2}$/.test(rawLimit || '')) throw catalogRequestError();
+            request.limit = Number(rawLimit);
+          }
+          return await catalogSync.list(request);
+        });
+      }
+      if (url.pathname === '/transcripts/track' && req.method === 'POST') {
+        return await sendTranscriptResponse(res, async () => {
+          if (url.search) throw transcriptRequestError();
+          const body = await parseBody(req);
+          if (
+            !isExactRecord(body, TRANSCRIPT_REQUEST_KEYS.track) ||
+            typeof body.label !== 'string' ||
+            typeof body.key !== 'string' ||
+            typeof body.profileScopeId !== 'string' ||
+            !Array.isArray(body.tags) ||
+            !body.key.trim()
+          ) {
+            throw transcriptRequestError();
+          }
+          if (!transcriptSync || typeof transcriptSync.track !== 'function') throw transcriptRequestError('transcript_service_unavailable');
+          const tabId = await resolveTab({
+            tabs,
+            defaultTabId,
+            body: { key: body.key },
+            url,
+            showTabsByDefault: governor.showTabsByDefault,
+            createIfMissing: false,
+            vendors
+          });
+          const controller = tabs.getControllerById(tabId);
+          const tabMeta = getTabMeta(tabs, tabId);
+          if (normalizeVendorToken(tabMeta?.vendorId) !== 'chatgpt') {
+            throw transcriptRequestError('owned_conversation_required');
+          }
+          if (
+            !controller ||
+            typeof controller.runExclusive !== 'function' ||
+            typeof controller.getUrl !== 'function'
+          ) {
+            throw transcriptRequestError('transcript_controller_unavailable');
+          }
+          const currentUrl = await runExclusive(controller, async () => await controller.getUrl());
+          let target;
+          try {
+            target = parseChatGptEntryTarget(currentUrl);
+          } catch {
+            throw transcriptRequestError('owned_conversation_required');
+          }
+          if (target?.kind !== 'canonical-conversation') {
+            throw transcriptRequestError('owned_conversation_required');
+          }
+          const location = locationFromConversationUrl(target.chatUrl);
+          const identity = identityFromOwnedLocation(body.profileScopeId, location);
+          return await transcriptSync.track({
+            label: body.label,
+            tags: body.tags,
+            key: body.key,
+            identity,
+            location
+          });
+        });
+      }
+      if (url.pathname === '/transcripts/sync' && req.method === 'POST') {
+        return await sendTranscriptResponse(res, async () => {
+          if (url.search) throw transcriptRequestError();
+          const body = await parseBody(req);
+          if (
+            !isExactRecord(body, TRANSCRIPT_REQUEST_KEYS.sync) ||
+            typeof body.sourceId !== 'string' ||
+            !LIBRARY_LOCAL_ID_PATTERN.test(body.sourceId)
+          ) {
+            throw transcriptRequestError();
+          }
+          if (!transcriptSync || typeof transcriptSync.sync !== 'function') throw transcriptRequestError('transcript_service_unavailable');
+          return await transcriptSync.sync(body.sourceId, 'manual');
+        });
+      }
+      if (url.pathname === '/transcripts/list' && req.method === 'GET') {
+        return await sendTranscriptResponse(res, async () => {
+          if (url.search) throw transcriptRequestError();
+          if (!transcriptSync || typeof transcriptSync.list !== 'function') throw transcriptRequestError('transcript_service_unavailable');
+          return await transcriptSync.list();
+        });
+      }
+      if (url.pathname === '/transcripts/get' && req.method === 'POST') {
+        return await sendTranscriptResponse(res, async () => {
+          if (url.search) throw transcriptRequestError();
+          const body = await parseBody(req);
+          if (
+            !body ||
+            typeof body !== 'object' ||
+            Array.isArray(body) ||
+            !Object.hasOwn(body, 'identity') ||
+            Object.keys(body).some((key) => !TRANSCRIPT_REQUEST_KEYS.get.includes(key))
+          ) {
+            throw transcriptRequestError();
+          }
+          if (!transcriptRead || typeof transcriptRead.get !== 'function') {
+            throw transcriptRequestError('transcript_service_unavailable');
+          }
+          return await transcriptRead.get(body);
+        });
+      }
+      if (url.pathname === '/transcripts/forget' && req.method === 'POST') {
+        return await sendTranscriptResponse(res, async () => {
+          if (url.search) throw transcriptRequestError();
+          const body = await parseBody(req);
+          if (
+            !isExactRecord(body, TRANSCRIPT_REQUEST_KEYS.forget) ||
+            typeof body.sourceId !== 'string' ||
+            !LIBRARY_LOCAL_ID_PATTERN.test(body.sourceId)
+          ) {
+            throw transcriptRequestError();
+          }
+          if (body.confirm !== true) throw transcriptRequestError('transcript_confirmation_required');
+          if (!transcriptSync || typeof transcriptSync.forget !== 'function') throw transcriptRequestError('transcript_service_unavailable');
+          return await transcriptSync.forget(body.sourceId);
+        });
       }
       if (url.pathname === '/bundles/list' && req.method === 'GET') {
         const bundles = await listBundles(stateDir);
@@ -2944,8 +3547,20 @@ export function startHttpApi({
         const imageGeneration = !!body.imageGeneration;
         const fireAndForget = !!body.fireAndForget;
         const suppliedChatUrl = trimOrNull(body.chatUrl);
+        const hasLiveSourceId = Object.prototype.hasOwnProperty.call(body, 'liveSourceId');
+        const liveSourceId = hasLiveSourceId ? trimOrNull(body.liveSourceId) : null;
+        let liveContinuationSource = null;
+        if (hasLiveSourceId) {
+          assertLiveContinuationSelectors(body, url);
+          liveContinuationSource = await requireLiveContinuationBinding({
+            liveSourceId,
+            key: body.key,
+            conversationUrl: suppliedChatUrl
+          });
+          assertLiveContinuationTabInventory(liveContinuationSource);
+        }
         if (imageGeneration && suppliedChatUrl) throw new Error('chat_url_unsupported_for_image');
-        const tabKey = (body.key ? String(body.key).trim() : '') ||
+        const tabKey = liveContinuationSource?.key || (body.key ? String(body.key).trim() : '') ||
           (!body?.tabId && suppliedChatUrl ? derivedChatKey(suppliedChatUrl) : null);
         const settings = await getSettings?.() || {};
         const vendor = resolveVendor({ body, vendors }) || defaultVendor(vendors);
@@ -3006,6 +3621,8 @@ export function startHttpApi({
           const resolutionBody = requestedKey && !tabKey ? { ...body, key: requestedKey } : body;
           tabId = await resolveTab({ tabs, defaultTabId, body: resolutionBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
+          const tabMeta = getTabMeta(tabs, tabId);
+          if (hasLiveSourceId) assertLiveContinuationTab(liveContinuationSource, tabMeta);
           const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
           if (chatProfile?.locationSource === 'explicit-chat') tabPatch.projectUrl = projectUrl || null;
           if (Object.keys(tabPatch).length) tabs.updateTabMeta?.(tabId, tabPatch);
@@ -3017,7 +3634,6 @@ export function startHttpApi({
             : {};
           if (requestedKey && Object.keys(queryPersistPatch).length) await persistKeyMeta(requestedKey, queryPersistPatch);
           op.tabId = tabId;
-          const tabMeta = getTabMeta(tabs, tabId);
           const effectiveKey = requestedKey || tabMeta?.key || null;
           const activeOp = {
             ...op,
@@ -3125,6 +3741,17 @@ export function startHttpApi({
                     projectUrl: effectiveProjectUrl
                   });
                 }
+                if (hasLiveSourceId) {
+                  const preSendSource = await requireLiveContinuationBinding({
+                    liveSourceId,
+                    key: effectiveKey,
+                    conversationUrl: suppliedChatUrl
+                  });
+                  const servedUrl = typeof controller.getUrl === 'function'
+                    ? await controller.getUrl().catch(() => null)
+                    : null;
+                  assertLiveContinuationServedRoute(preSendSource, suppliedChatUrl, servedUrl);
+                }
                 return controller.query({
                   prompt: packed.prompt,
                   attachments: packed.attachments,
@@ -3145,6 +3772,13 @@ export function startHttpApi({
                 const error = new Error('shared_chat_materialization_failed');
                 error.data = { sourceUrl: entryTarget.chatUrl, conversationUrl };
                 throw error;
+              }
+              if (hasLiveSourceId) {
+                assertLiveContinuationServedRoute(
+                  liveContinuationSource,
+                  suppliedChatUrl,
+                  conversationUrl
+                );
               }
               if (persistKeyLocationForRun && effectiveKey && conversationUrl) {
                 await persistKeyLocation(effectiveKey, {
@@ -3186,7 +3820,7 @@ export function startHttpApi({
               };
               setLastOutcome(tabId, outcome);
               await durableRunFinalizeFromOutcome(op.id, outcome);
-              return resultWithMeta;
+              return { result: resultWithMeta, conversationUrl };
             };
             const runQueryWithLease = async () => await withProviderSlot({
               op: activeOp,
@@ -3199,7 +3833,15 @@ export function startHttpApi({
 
             if (fireAndForget) {
               const tabMeta = getTabMeta(tabs, tabId);
-              runQueryWithLease().catch((error) => {
+              runQueryWithLease().then(async (completed) => {
+                await syncLiveTranscriptAfterQuery({
+                  liveSourceId,
+                  key: effectiveKey,
+                  conversationUrl: completed?.conversationUrl || null,
+                  imageGeneration
+                });
+                return completed;
+              }).catch((error) => {
                 const outcome = outcomeFromError(error, op);
                 setLastOutcome(tabId, outcome);
                 return durableRunFinalizeFromOutcome(op.id, outcome);
@@ -3218,12 +3860,18 @@ export function startHttpApi({
               });
             }
 
-            const result = await runQueryWithLease();
+            const completed = await runQueryWithLease();
+            await syncLiveTranscriptAfterQuery({
+              liveSourceId,
+              key: effectiveKey,
+              conversationUrl: completed?.conversationUrl || null,
+              imageGeneration
+            });
             return sendJson(res, 200, {
               ok: true,
               tabId,
               runId: op.id,
-              result,
+              result: completed.result,
               packedContext: packed.context,
               packedContextSummary: packed.context?.summary || null,
               packedContextBudget: effectiveBudget,

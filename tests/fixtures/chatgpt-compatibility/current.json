@@ -70,6 +70,16 @@
       "terminalMode": "receipt-backed"
     },
     {
+      "id": "transcript",
+      "anchorIds": [
+        "assistant-message",
+        "stop-button"
+      ],
+      "preconditionId": "owned-conversation",
+      "postconditionId": "complete-transcript",
+      "terminalMode": "predicate"
+    },
+    {
       "id": "research",
       "anchorIds": [
         "composer-menu-button",
@@ -172,7 +182,10 @@
     "controller-dom-039",
     "controller-dom-040",
     "controller-dom-041",
-    "controller-dom-042"
+    "controller-dom-042",
+    "controller-dom-043",
+    "controller-dom-044",
+    "controller-dom-045"
   ],
   "resolverFixture": {
     "anchorId": "prompt-textarea",

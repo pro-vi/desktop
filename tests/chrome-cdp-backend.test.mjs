@@ -234,6 +234,66 @@ test('chrome-cdp-backend: createSession closes target if initialization fails', 
   assert.equal(calls.some((item) => item.method === 'Target.closeTarget' && item.params?.targetId === 'target-1'), true);
 });
 
+test('chrome-cdp-backend: terminateEvaluation stops the owned renderer session', async () => {
+  const calls = [];
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });
+  backend.started = true;
+  backend.client = {
+    connected: true,
+    ws: {},
+    send: async (method, params = {}, sessionId) => {
+      calls.push({ method, params, sessionId });
+      if (method === 'Target.createTarget') return { targetId: 'target-1' };
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-1' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      return {};
+    }
+  };
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+
+  assert.equal(await session.page.terminateEvaluation(), true);
+  assert.equal(calls.some((item) =>
+    item.method === 'Runtime.terminateExecution' && item.sessionId === 'session-1'), true);
+});
+
+test('chrome-cdp-backend: navigation guard remembers a same-document route mismatch after returning', async () => {
+  const routeA = 'https://chatgpt.com/c/route-a';
+  const routeB = 'https://chatgpt.com/c/route-b';
+  const listeners = new Map();
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });
+  backend.started = true;
+  backend.client = {
+    connected: true,
+    ws: {},
+    on(method, handler) {
+      const values = listeners.get(method) || [];
+      values.push(handler);
+      listeners.set(method, values);
+      return () => listeners.set(method, (listeners.get(method) || []).filter((item) => item !== handler));
+    },
+    send: async (method) => {
+      if (method === 'Target.createTarget') return { targetId: 'target-1' };
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-1' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      if (method === 'Page.getFrameTree') {
+        return { frameTree: { frame: { id: 'frame-1', url: routeA } } };
+      }
+      return {};
+    }
+  };
+  const session = await backend.createSession({ url: routeA });
+
+  const guard = await session.page.beginNavigationGuard((url) => url === routeA);
+  for (const handler of listeners.get('Page.navigatedWithinDocument') || []) {
+    handler({ frameId: 'frame-1', url: routeB }, 'session-1');
+    handler({ frameId: 'frame-1', url: routeA }, 'session-1');
+  }
+
+  assert.equal(guard.isStable(), false);
+  await guard.dispose();
+  assert.equal(listeners.get('Page.navigatedWithinDocument')?.length || 0, 0);
+});
+
 test('chrome-cdp-backend: session close is best-effort when closeTarget fails', async () => {
   let closedCalls = 0;
   const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });

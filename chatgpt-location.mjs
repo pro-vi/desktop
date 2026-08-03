@@ -12,7 +12,13 @@ function parseUrl(value, { field = 'chatUrl' } = {}) {
     error.data = { field, reason: 'malformed_url' };
     throw error;
   }
-  if (parsed.protocol !== 'https:' || parsed.hostname !== CHATGPT_HOST || parsed.username || parsed.password) {
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.hostname !== CHATGPT_HOST ||
+    parsed.port ||
+    parsed.username ||
+    parsed.password
+  ) {
     const error = new Error('invalid_chatgpt_url');
     error.data = { field, reason: 'unsupported_origin' };
     throw error;

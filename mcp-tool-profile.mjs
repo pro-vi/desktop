@@ -13,6 +13,16 @@ const CORE_TOOLS = [
 
 export const MCP_TOOL_PROFILES = Object.freeze({
   core: Object.freeze(CORE_TOOLS),
+  library: Object.freeze([
+    'agentify_import_chatgpt_export',
+    'agentify_verify_catalog_conversation',
+    'agentify_list_chatgpt_catalog',
+    'agentify_track_transcript',
+    'agentify_sync_transcript',
+    'agentify_list_transcripts',
+    'agentify_get_transcript',
+    'agentify_forget_transcript'
+  ]),
   browser: Object.freeze([
     'agentify_read_page',
     'agentify_read_conversation',

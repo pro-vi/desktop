@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "contractVersion": "2026-07-26",
-  "capturedAt": "2026-07-26T00:00:00.000Z",
+  "contractVersion": "2026-07-30",
+  "capturedAt": "2026-07-30T00:00:00.000Z",
   "vendorId": "chatgpt",
   "capabilities": [
     {
@@ -72,6 +72,16 @@
       "preconditionId": "after-submit",
       "postconditionId": "stable-response",
       "terminalMode": "receipt-backed"
+    },
+    {
+      "id": "transcript",
+      "anchorIds": [
+        "assistant-message",
+        "stop-button"
+      ],
+      "preconditionId": "owned-conversation",
+      "postconditionId": "complete-transcript",
+      "terminalMode": "predicate"
     },
     {
       "id": "research",
@@ -1797,11 +1807,35 @@
   },
   {
     "id": "controller-dom-042",
-    "capabilityId": "response",
+    "capabilityId": "transcript",
     "kind": "dependency",
-    "dependency": "static-selector-042",
+    "dependency": "transcript-message-id",
     "reason": "provider-visible conversation transcript capture uses a stable message identifier for virtualized-turn de-duplication",
     "selector": "[data-message-id]"
+  },
+  {
+    "id": "controller-dom-043",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "transcript-message",
+    "reason": "provider-visible conversation transcript capture reads ordered role-bearing message turns",
+    "selector": "[data-message-author-role]"
+  },
+  {
+    "id": "controller-dom-044",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "transcript-generation-indicator",
+    "reason": "provider-visible generation chrome prevents an in-progress response from becoming a complete transcript",
+    "selector": "[class*=\"think\"], [data-testid*=\"think\"], [aria-label*=\"think\"], [class*=\"research\"], [data-testid*=\"research\"], [aria-label*=\"research\"], [class*=\"search\"], [data-testid*=\"search\"], [aria-label*=\"search\"], [class*=\"source\"], [data-testid*=\"source\"], [aria-label*=\"source\"], [class*=\"clarif\"], [data-testid*=\"clarif\"], [aria-label*=\"clarif\"], .sr-only, [role=\"status\"], [aria-live]"
+  },
+  {
+    "id": "controller-dom-045",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "transcript-turn-ordinal",
+    "reason": "provider-visible conversation turn ancestors expose an ordinal for fail-closed virtualized transcript stitching",
+    "selector": "[data-testid^=\"conversation-turn-\"]"
   }
 ]
 }

@@ -70,6 +70,1360 @@ test('http-api: rejects unauthorized', async (t) => {
   assert.equal(data.error, 'unauthorized');
 });
 
+async function startTranscriptHttp(t, {
+  transcriptSync,
+  transcriptRead,
+  currentUrl = 'https://chatgpt.com/c/thread-123',
+  tabVendorId = 'chatgpt'
+} = {}) {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-transcripts-'));
+  const state = { currentUrl, exclusiveCalls: 0, ensureTabCalls: 0 };
+  const controller = {
+    runExclusive: async (fn) => {
+      state.exclusiveCalls += 1;
+      return await fn();
+    },
+    getUrl: async () => state.currentUrl
+  };
+  const tabs = {
+    listTabs: () => [{ id: 'tab-thread', key: 'thread-key', vendorId: tabVendorId, vendorName: 'ChatGPT' }],
+    ensureTab: async () => {
+      state.ensureTabCalls += 1;
+      return 'unexpected-created-tab';
+    },
+    createTab: async () => 'unexpected-created-tab',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 'tab-thread',
+    serverId: 'sid-transcripts',
+    stateDir,
+    transcriptSync,
+    transcriptRead,
+    getSettings: async () => ({ showTabsByDefault: false })
+  });
+  t.after(() => server.close());
+  return { port: server.address().port, state, tabs };
+}
+
+async function startCatalogHttp(t, catalogSync) {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-catalog-'));
+  const tabs = {
+    listTabs: () => [],
+    ensureTab: async () => 'unused-tab',
+    createTab: async () => 'unused-tab',
+    closeTab: async () => true,
+    getControllerById: () => ({})
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 'unused-tab',
+    serverId: 'sid-catalog',
+    stateDir,
+    catalogSync,
+    getSettings: async () => ({ showTabsByDefault: false })
+  });
+  t.after(async () => {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  return { port: server.address().port };
+}
+
+test('http-api: transcript routes require auth and return exact service contracts', async (t) => {
+  const calls = [];
+  const trackedSource = { id: 'source-1', state: 'tracked' };
+  const syncResult = { status: 'complete', source: trackedSource };
+  const listed = [trackedSource];
+  const deletion = { sourceId: 'source-1', recoverable: true, recoveryLocation: 'local-trash/deleted-1' };
+  const transcriptSync = {
+    track: async (input) => {
+      calls.push(['track', input]);
+      return trackedSource;
+    },
+    sync: async (sourceId, trigger) => {
+      calls.push(['sync', sourceId, trigger]);
+      return syncResult;
+    },
+    list: async () => {
+      calls.push(['list']);
+      return listed;
+    },
+    forget: async (sourceId) => {
+      calls.push(['forget', sourceId]);
+      return deletion;
+    }
+  };
+  const { port, state } = await startTranscriptHttp(t, {
+    transcriptSync,
+    currentUrl: 'https://chatgpt.com/g/g-p-project/c/thread-123?temporary=ignored'
+  });
+
+  for (const request of [
+    { method: 'GET', pth: '/transcripts/list' },
+    { method: 'POST', pth: '/transcripts/track', body: { label: 'x', tags: [], key: 'thread-key', profileScopeId: 'scope' } },
+    { method: 'POST', pth: '/transcripts/sync', body: { sourceId: 'source-1' } },
+    { method: 'POST', pth: '/transcripts/forget', body: { sourceId: 'source-1', confirm: true } }
+  ]) {
+    const unauthorized = await req({ port, ...request });
+    assert.equal(unauthorized.res.status, 401, request.pth);
+    assert.deepEqual(unauthorized.data, { error: 'unauthorized' }, request.pth);
+  }
+  assert.deepEqual(calls, []);
+
+  const track = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/track',
+    body: { label: 'Disposable thread', tags: ['acceptance'], key: 'thread-key', profileScopeId: 'profile-main' }
+  });
+  assert.equal(track.res.status, 200);
+  assert.deepEqual(track.data, trackedSource);
+  assert.equal(state.exclusiveCalls, 1);
+  assert.equal(state.ensureTabCalls, 0);
+  assert.deepEqual(calls[0], ['track', {
+    label: 'Disposable thread',
+    tags: ['acceptance'],
+    key: 'thread-key',
+    identity: {
+      provider: 'chatgpt',
+      profileScopeId: 'profile-main',
+      providerConversationId: 'thread-123'
+    },
+    location: {
+      kind: 'project-conversation',
+      projectUrl: 'https://chatgpt.com/g/g-p-project/project',
+      conversationUrl: 'https://chatgpt.com/g/g-p-project/c/thread-123'
+    }
+  }]);
+
+  const sync = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/sync',
+    body: { sourceId: 'source-1' }
+  });
+  assert.equal(sync.res.status, 200);
+  assert.deepEqual(sync.data, syncResult);
+  assert.deepEqual(calls[1], ['sync', 'source-1', 'manual']);
+
+  const list = await req({ port, token: 'secret', method: 'GET', pth: '/transcripts/list' });
+  assert.equal(list.res.status, 200);
+  assert.deepEqual(list.data, listed);
+
+  const forget = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/forget',
+    body: { sourceId: 'source-1', confirm: true }
+  });
+  assert.equal(forget.res.status, 200);
+  assert.deepEqual(forget.data, deletion);
+  assert.deepEqual(calls.at(-1), ['forget', 'source-1']);
+});
+
+test('http-api: transcript retrieval is authenticated and round-trips the exact page contract', async (t) => {
+  const calls = [];
+  const page = {
+    schemaVersion: 1,
+    identity: { provider: 'chatgpt', profileScopeId: 'profile-main', providerConversationId: 'thread-123' },
+    snapshot: { kind: 'snapshot', algorithm: 'sha256', hash: 'a'.repeat(64), contentHash: 'b'.repeat(64), byteLength: 123 },
+    normalizationVersion: 1,
+    capturedAt: '2026-07-30T12:00:00.000Z',
+    startOrdinal: 0,
+    endOrdinal: 1,
+    totalTurns: 1,
+    text: 'User\nfixture',
+    structuredTurns: [],
+    citations: [],
+    nextCursor: null,
+    liveSourceId: 'source-1',
+    sourceKey: 'thread-key',
+    conversationUrl: 'https://chatgpt.com/c/thread-123',
+    paths: null
+  };
+  const transcriptRead = {
+    get: async (request) => {
+      calls.push(request);
+      return page;
+    }
+  };
+  const { port } = await startTranscriptHttp(t, { transcriptRead });
+  const body = {
+    identity: page.identity,
+    snapshot: page.snapshot,
+    cursor: { schemaVersion: 1, snapshotHash: 'a'.repeat(64), afterTurnId: 'provider:message-1' },
+    limit: 10,
+    includePaths: false
+  };
+
+  const unauthorized = await req({ port, method: 'POST', pth: '/transcripts/get', body });
+  assert.equal(unauthorized.res.status, 401);
+  assert.deepEqual(calls, []);
+
+  const response = await req({ port, token: 'secret', method: 'POST', pth: '/transcripts/get', body });
+  assert.equal(response.res.status, 200);
+  assert.deepEqual(response.data, page);
+  assert.deepEqual(calls, [body]);
+});
+
+test('http-api: transcript requests reject non-exact schemas and require literal confirmation', async (t) => {
+  let calls = 0;
+  const transcriptSync = {
+    track: async () => { calls += 1; },
+    sync: async () => { calls += 1; },
+    list: async () => [],
+    forget: async () => { calls += 1; }
+  };
+  const { port } = await startTranscriptHttp(t, { transcriptSync });
+
+  const cases = [
+    ['/transcripts/track', { label: 'Thread', tags: [], key: 'thread-key', profileScopeId: 'profile-main', tabId: 'tab-thread' }, 'transcript_request_invalid'],
+    ['/transcripts/track', { label: 'Thread', tags: 'not-an-array', key: 'thread-key', profileScopeId: 'profile-main' }, 'transcript_request_invalid'],
+    ['/transcripts/sync', { sourceId: 'source-1', trigger: 'post-query' }, 'transcript_request_invalid'],
+    ['/transcripts/sync', { sourceId: 1 }, 'transcript_request_invalid'],
+    ['/transcripts/forget', { sourceId: 'source-1' }, 'transcript_request_invalid'],
+    ['/transcripts/forget', { sourceId: 'source-1', confirm: false }, 'transcript_confirmation_required'],
+    ['/transcripts/forget', { sourceId: 'source-1', confirm: 'true' }, 'transcript_confirmation_required']
+  ];
+  for (const [pth, body, error] of cases) {
+    const result = await req({ port, token: 'secret', method: 'POST', pth, body });
+    assert.equal(result.res.status, 400, pth);
+    assert.deepEqual(result.data, { error }, pth);
+  }
+  const queryExtra = await req({
+    port,
+    token: 'secret',
+    method: 'GET',
+    pth: '/transcripts/list?extra=true'
+  });
+  assert.equal(queryExtra.res.status, 400);
+  assert.deepEqual(queryExtra.data, { error: 'transcript_request_invalid' });
+  assert.equal(calls, 0);
+});
+
+test('http-api: transcript sync and forget reject unsafe source ids without exposing them', async (t) => {
+  const calls = [];
+  const transcriptSync = {
+    track: async () => null,
+    sync: async (sourceId) => { calls.push(['sync', sourceId]); },
+    list: async () => [],
+    forget: async (sourceId) => { calls.push(['forget', sourceId]); }
+  };
+  const { port } = await startTranscriptHttp(t, { transcriptSync });
+  const unsafeSourceId = '../../bad/private-export.zip';
+
+  for (const [pth, body] of [
+    ['/transcripts/sync', { sourceId: unsafeSourceId }],
+    ['/transcripts/forget', { sourceId: unsafeSourceId, confirm: true }]
+  ]) {
+    const result = await req({ port, token: 'secret', method: 'POST', pth, body });
+    assert.equal(result.res.status, 400, pth);
+    assert.deepEqual(result.data, { error: 'transcript_request_invalid' }, pth);
+    assert.doesNotMatch(JSON.stringify(result.data), /\.\.\/|private-export\.zip/i, pth);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('http-api: transcript track requires an open keyed ChatGPT tab on an owned canonical route', async (t) => {
+  let trackCalls = 0;
+  const transcriptSync = {
+    track: async () => { trackCalls += 1; },
+    sync: async () => null,
+    list: async () => [],
+    forget: async () => null
+  };
+  const started = await startTranscriptHttp(t, { transcriptSync });
+  const trackBody = { label: 'Thread', tags: [], key: 'thread-key', profileScopeId: 'profile-main' };
+
+  for (const currentUrl of [
+    'https://chatgpt.com/share/public-snapshot',
+    'https://chatgpt.com/',
+    'https://example.test/c/thread-123'
+  ]) {
+    started.state.currentUrl = currentUrl;
+    const result = await req({
+      port: started.port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/transcripts/track',
+      body: trackBody
+    });
+    assert.equal(result.res.status, 409);
+    assert.deepEqual(result.data, { error: 'owned_conversation_required' });
+  }
+  assert.equal(trackCalls, 0);
+
+  const missing = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/track',
+    body: { ...trackBody, key: 'not-open' }
+  });
+  assert.equal(missing.res.status, 404);
+  assert.deepEqual(missing.data, { error: 'tab_not_found' });
+  assert.equal(started.state.ensureTabCalls, 0);
+
+  const foreign = await startTranscriptHttp(t, { transcriptSync, tabVendorId: 'claude' });
+  const foreignResult = await req({
+    port: foreign.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/track',
+    body: trackBody
+  });
+  assert.equal(foreignResult.res.status, 409);
+  assert.deepEqual(foreignResult.data, { error: 'owned_conversation_required' });
+  assert.equal(trackCalls, 0);
+});
+
+test('http-api: transcript service states have stable content-free HTTP mappings', async (t) => {
+  function fail(code) {
+    const error = new Error(code);
+    error.code = code;
+    error.data = { hidden: 'must-not-cross-http' };
+    throw error;
+  }
+  const transcriptSync = {
+    track: async ({ label }) => fail(label),
+    sync: async (sourceId) => fail(sourceId),
+    list: async () => [],
+    forget: async (sourceId) => fail(sourceId)
+  };
+  const transcriptRead = {
+    get: async ({ identity }) => fail(identity.profileScopeId)
+  };
+  const { port } = await startTranscriptHttp(t, { transcriptSync, transcriptRead });
+  const trackBase = { tags: [], key: 'thread-key', profileScopeId: 'profile-main' };
+  const getBody = (profileScopeId) => ({
+    identity: { provider: 'chatgpt', profileScopeId, providerConversationId: 'thread-123' }
+  });
+  const cases = [
+    ['/transcripts/track', { ...trackBase, label: 'transcript_source_exists' }, 409, 'transcript_source_exists'],
+    ['/transcripts/track', { ...trackBase, label: 'transcript_source_key_exists' }, 409, 'transcript_source_key_exists'],
+    ['/transcripts/sync', { sourceId: 'transcript_sync_active' }, 409, 'transcript_sync_active'],
+    ['/transcripts/sync', { sourceId: 'transcript_source_disabled' }, 409, 'transcript_source_disabled'],
+    ['/transcripts/sync', { sourceId: 'transcript_source_not_found' }, 404, 'transcript_source_not_found'],
+    ['/transcripts/forget', { sourceId: 'transcript_sync_active', confirm: true }, 409, 'transcript_sync_active'],
+    ['/transcripts/get', getBody('transcript_identity_not_found'), 404, 'transcript_identity_not_found'],
+    ['/transcripts/get', getBody('transcript_no_complete_snapshot'), 409, 'transcript_no_complete_snapshot'],
+    ['/transcripts/get', getBody('transcript_cursor_mismatch'), 409, 'transcript_cursor_mismatch'],
+    ['/transcripts/get', getBody('transcript_snapshot_identity_mismatch'), 409, 'transcript_snapshot_identity_mismatch'],
+    ['/transcripts/get', getBody('transcript_page_limit'), 400, 'transcript_page_limit'],
+    ['/transcripts/get', getBody('transcript_page_character_limit'), 413, 'transcript_page_character_limit'],
+    ['/transcripts/get', getBody('library_blob_corrupt'), 500, 'library_blob_corrupt']
+  ];
+  for (const [pth, body, status, error] of cases) {
+    const result = await req({ port, token: 'secret', method: 'POST', pth, body });
+    assert.equal(result.res.status, status, error);
+    assert.deepEqual(result.data, { error }, error);
+  }
+
+  const durableError = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/sync',
+    body: { sourceId: 'transcript_store_reload_required' }
+  });
+  assert.equal(durableError.res.status, 500);
+  assert.deepEqual(durableError.data, { error: 'transcript_store_reload_required' });
+});
+
+test('http-api: transcript routes redact unknown exception messages and data', async (t) => {
+  const transcriptSync = {
+    track: async () => null,
+    sync: async () => {
+      const error = new Error('private transcript text /Users/private/export.zip <div data-message-id="secret">');
+      error.data = { path: '/Users/private/export.zip', dom: '<div>secret</div>' };
+      throw error;
+    },
+    list: async () => [],
+    forget: async () => null
+  };
+  const { port } = await startTranscriptHttp(t, { transcriptSync });
+  const result = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/sync',
+    body: { sourceId: 'source-1' }
+  });
+  assert.equal(result.res.status, 500);
+  assert.deepEqual(result.data, { error: 'internal_error' });
+  const serialized = JSON.stringify(result.data);
+  assert.doesNotMatch(serialized, /private|export\.zip|data-message-id|secret/i);
+});
+
+test('http-api: catalog routes require auth and round-trip every closed outcome unchanged', async (t) => {
+  const catalogIdentity = {
+    provider: 'chatgpt',
+    profileScopeId: 'profile-main',
+    providerConversationId: 'catalog-thread-123'
+  };
+  const rawRecord = {
+    kind: 'raw',
+    algorithm: 'sha256',
+    hash: 'a'.repeat(64),
+    byteLength: 321
+  };
+  const snapshot = {
+    kind: 'snapshot',
+    algorithm: 'sha256',
+    hash: 'b'.repeat(64),
+    contentHash: 'c'.repeat(64),
+    byteLength: 654
+  };
+  const importOutcomes = new Map([
+    ['grant-complete', {
+      status: 'complete',
+      importId: 'import-complete',
+      counts: { recordsSeen: 1, cataloged: 1, snapshots: 1, problems: 0 }
+    }],
+    ['grant-partial', {
+      status: 'partial',
+      importId: 'import-partial',
+      counts: { recordsSeen: 2, cataloged: 1, snapshots: 1, problems: 1 },
+      problems: [{ recordIndex: 1, reason: 'provider-id-missing', identity: null }],
+      resume: { schemaVersion: 1, recordIndex: 2 }
+    }],
+    ['grant-rejected', { status: 'rejected', reason: 'unsafe-archive' }]
+  ]);
+  const verificationOutcomes = new Map([
+    ['verify-key', {
+      status: 'verified',
+      identity: catalogIdentity,
+      canonicalUrl: 'https://chatgpt.com/c/catalog-thread-123',
+      evidence: 'direct-navigation'
+    }],
+    ['unavailable-key', {
+      status: 'unavailable',
+      identity: catalogIdentity,
+      observation: {
+        observedAt: '2026-07-31T12:00:00.000Z',
+        reason: 'not-found',
+        retryable: true
+      }
+    }],
+    ['failed-key', { status: 'failed', reason: 'challenge' }]
+  ]);
+  const page = {
+    items: [{
+      schemaVersion: 1,
+      identity: catalogIdentity,
+      title: 'Catalog fixture',
+      route: {
+        kind: 'unverified',
+        claimedConversationId: 'catalog-thread-123'
+      },
+      firstObservedAt: '2026-07-31T12:00:00.000Z',
+      lastObservedAt: '2026-07-31T12:00:00.000Z',
+      latestArchiveRecord: rawRecord,
+      latestImportedSnapshot: snapshot
+    }],
+    nextCursor: 'catalog-v1.next-page'
+  };
+  const reassignment = {
+    importId: 'import-complete',
+    changed: true,
+    previousProfileScopeId: 'profile-main',
+    profileScopeId: 'profile-other',
+    cursor: { schemaVersion: 1, recordIndex: 0 }
+  };
+  const calls = [];
+  const catalogSync = {
+    importExport: async (request) => {
+      calls.push(['import', request]);
+      return importOutcomes.get(request.grantId);
+    },
+    verifyByNavigation: async (identity, key) => {
+      calls.push(['verify', identity, key]);
+      return verificationOutcomes.get(key);
+    },
+    reassignImportScope: async (request) => {
+      calls.push(['reassign', request]);
+      return reassignment;
+    },
+    list: async (request) => {
+      calls.push(['list', request]);
+      return page;
+    }
+  };
+  const { port } = await startCatalogHttp(t, catalogSync);
+
+  const unauthorizedRequests = [
+    { method: 'POST', pth: '/catalog/import', body: { grantId: 'grant-complete', profileScopeId: 'profile-main' } },
+    { method: 'POST', pth: '/catalog/verify', body: { identity: catalogIdentity, key: 'verify-key' } },
+    { method: 'POST', pth: '/catalog/reassign', body: { importId: 'import-complete', newProfileScopeId: 'profile-other', confirm: true } },
+    { method: 'GET', pth: '/catalog/list?profileScopeId=profile-main' }
+  ];
+  for (const request of unauthorizedRequests) {
+    const result = await req({ port, ...request });
+    assert.equal(result.res.status, 401, request.pth);
+    assert.deepEqual(result.data, { error: 'unauthorized' }, request.pth);
+  }
+  assert.deepEqual(calls, []);
+
+  for (const [grantId, expected] of importOutcomes) {
+    const request = { grantId, profileScopeId: 'profile-main' };
+    const result = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/catalog/import',
+      body: request
+    });
+    assert.equal(result.res.status, 200, grantId);
+    assert.deepEqual(result.data, expected, grantId);
+    assert.deepEqual(calls.at(-1), ['import', request]);
+  }
+
+  for (const [key, expected] of verificationOutcomes) {
+    const result = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/catalog/verify',
+      body: { identity: catalogIdentity, key }
+    });
+    assert.equal(result.res.status, 200, key);
+    assert.deepEqual(result.data, expected, key);
+    assert.deepEqual(calls.at(-1), ['verify', catalogIdentity, key]);
+  }
+
+  const reassignRequest = {
+    importId: 'import-complete',
+    newProfileScopeId: 'profile-other',
+    confirm: true
+  };
+  const reassignResult = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/catalog/reassign',
+    body: reassignRequest
+  });
+  assert.equal(reassignResult.res.status, 200);
+  assert.deepEqual(reassignResult.data, reassignment);
+  assert.deepEqual(calls.at(-1), ['reassign', reassignRequest]);
+
+  const listResult = await req({
+    port,
+    token: 'secret',
+    method: 'GET',
+    pth: '/catalog/list?profileScopeId=profile-main&cursor=catalog-v1.page-1&limit=25'
+  });
+  assert.equal(listResult.res.status, 200);
+  assert.deepEqual(listResult.data, page);
+  assert.deepEqual(calls.at(-1), ['list', {
+    profileScopeId: 'profile-main',
+    cursor: 'catalog-v1.page-1',
+    limit: 25
+  }]);
+});
+
+test('http-api: catalog request bodies and list query parameters are exact', async (t) => {
+  const calls = [];
+  const catalogSync = {
+    importExport: async (request) => { calls.push(['import', request]); return { status: 'rejected', reason: 'not-a-zip' }; },
+    verifyByNavigation: async (identity, key) => { calls.push(['verify', identity, key]); return { status: 'failed', reason: 'transport' }; },
+    reassignImportScope: async (request) => {
+      calls.push(['reassign', request]);
+      if (request.confirm !== true) {
+        throw Object.assign(new Error('catalog_scope_confirmation_required'), { code: 'catalog_scope_confirmation_required' });
+      }
+      return { ok: true };
+    },
+    list: async (request) => { calls.push(['list', request]); return { items: [], nextCursor: null }; }
+  };
+  const { port } = await startCatalogHttp(t, catalogSync);
+  const catalogIdentity = {
+    provider: 'chatgpt',
+    profileScopeId: 'profile-main',
+    providerConversationId: 'catalog-thread-123'
+  };
+  const invalidRequests = [
+    ['/catalog/import', { grantId: 'grant-1' }],
+    ['/catalog/import', { grantId: 'grant-1', profileScopeId: 'profile-main', path: '/private/export.zip' }],
+    ['/catalog/import', { grantId: 1, profileScopeId: 'profile-main' }],
+    ['/catalog/verify', { identity: catalogIdentity }],
+    ['/catalog/verify', { identity: null, key: 'route-key' }],
+    ['/catalog/verify', { identity: catalogIdentity, key: 1 }],
+    ['/catalog/reassign', { importId: 'import-1', newProfileScopeId: 'profile-other' }],
+    ['/catalog/reassign', { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: 'true' }]
+  ];
+  for (const [pth, body] of invalidRequests) {
+    const result = await req({ port, token: 'secret', method: 'POST', pth, body });
+    assert.equal(result.res.status, 400, `${pth}:${JSON.stringify(body)}`);
+    assert.deepEqual(result.data, { error: 'catalog_request_invalid' });
+  }
+  for (const pth of [
+    '/catalog/import?extra=true',
+    '/catalog/verify?extra=true',
+    '/catalog/reassign?extra=true'
+  ]) {
+    const body = pth.startsWith('/catalog/import')
+      ? { grantId: 'grant-1', profileScopeId: 'profile-main' }
+      : pth.startsWith('/catalog/verify')
+        ? { identity: catalogIdentity, key: 'route-key' }
+        : { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: true };
+    const result = await req({ port, token: 'secret', method: 'POST', pth, body });
+    assert.equal(result.res.status, 400, pth);
+    assert.deepEqual(result.data, { error: 'catalog_request_invalid' }, pth);
+  }
+  for (const pth of [
+    '/catalog/list?extra=true',
+    '/catalog/list?limit=1&limit=2',
+    '/catalog/list?profileScopeId=one&profileScopeId=two',
+    '/catalog/list?limit=0',
+    '/catalog/list?limit=001',
+    '/catalog/list?limit=1000',
+    '/catalog/list?limit=1.5'
+  ]) {
+    const result = await req({ port, token: 'secret', method: 'GET', pth });
+    assert.equal(result.res.status, 400, pth);
+    assert.deepEqual(result.data, { error: 'catalog_request_invalid' }, pth);
+  }
+  assert.deepEqual(calls, []);
+
+  const falseConfirmation = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/catalog/reassign',
+    body: { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: false }
+  });
+  assert.equal(falseConfirmation.res.status, 400);
+  assert.deepEqual(falseConfirmation.data, { error: 'catalog_scope_confirmation_required' });
+  assert.deepEqual(calls, [[
+    'reassign',
+    { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: false }
+  ]]);
+
+  const emptyList = await req({ port, token: 'secret', method: 'GET', pth: '/catalog/list' });
+  assert.equal(emptyList.res.status, 200);
+  assert.deepEqual(emptyList.data, { items: [], nextCursor: null });
+  assert.deepEqual(calls.at(-1), ['list', {}]);
+});
+
+test('http-api: catalog service states have stable content-free status mappings', async (t) => {
+  const hidden = 'private transcript /Users/private/export.zip <div data-message-id="secret">';
+  const catalogSync = {
+    importExport: async ({ grantId }) => {
+      const error = new Error(`service failed: ${hidden}`);
+      error.code = grantId;
+      error.data = { path: '/Users/private/export.zip', transcript: hidden };
+      throw error;
+    },
+    verifyByNavigation: async () => ({ status: 'failed', reason: 'transport' }),
+    reassignImportScope: async () => ({ ok: true }),
+    list: async () => ({ items: [], nextCursor: null })
+  };
+  const { port } = await startCatalogHttp(t, catalogSync);
+  const cases = [
+    ['body_too_large', 413, 'body_too_large'],
+    ['invalid_catalog_contract', 400, 'invalid_catalog_contract'],
+    ['invalid_profile_scope_id', 400, 'invalid_profile_scope_id'],
+    ['catalog_import_grant_invalid', 400, 'catalog_import_grant_invalid'],
+    ['catalog_scope_confirmation_required', 400, 'catalog_scope_confirmation_required'],
+    ['catalog_import_grant_unavailable', 404, 'catalog_import_grant_unavailable'],
+    ['catalog_conversation_not_found', 404, 'catalog_conversation_not_found'],
+    ['catalog_scope_conflict', 409, 'catalog_scope_conflict'],
+    ['catalog_cursor_mismatch', 409, 'catalog_cursor_mismatch'],
+    ['catalog_verification_identity_mismatch', 409, 'catalog_verification_identity_mismatch'],
+    ['catalog_store_io', 500, 'catalog_store_io'],
+    ['catalog_raw_blob_invalid', 500, 'catalog_raw_blob_invalid'],
+    ['catalog_snapshot_blob_invalid', 500, 'catalog_snapshot_blob_invalid'],
+    ['catalog_import_interrupted', 500, 'catalog_import_interrupted'],
+    ['library_blob_corrupt', 500, 'library_blob_corrupt']
+  ];
+  for (const [code, status, expectedError] of cases) {
+    const result = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/catalog/import',
+      body: { grantId: code, profileScopeId: 'profile-main' }
+    });
+    assert.equal(result.res.status, status, code);
+    assert.deepEqual(result.data, { error: expectedError }, code);
+    assert.equal(JSON.stringify(result.data).includes(hidden), false, code);
+  }
+});
+
+test('http-api: catalog routes redact unknown exception messages and data', async (t) => {
+  const privateMarker = 'private transcript /Users/private/export.zip <div data-message-id="secret">';
+  const acceptedLookingCodes = new Map([
+    ['catalog-prefix', `catalog_store_${privateMarker}`],
+    ['library-prefix', `library_blob_${privateMarker}`],
+    ['invalid-suffix', `${privateMarker}_invalid`]
+  ]);
+  const catalogSync = {
+    importExport: async ({ grantId }) => {
+      const error = new Error(privateMarker);
+      if (acceptedLookingCodes.has(grantId)) error.code = acceptedLookingCodes.get(grantId);
+      error.data = { path: '/Users/private/export.zip', transcript: privateMarker };
+      throw error;
+    },
+    verifyByNavigation: async () => ({ status: 'failed', reason: 'transport' }),
+    reassignImportScope: async () => ({ ok: true }),
+    list: async () => ({ items: [], nextCursor: null })
+  };
+  const { port } = await startCatalogHttp(t, catalogSync);
+  for (const grantId of ['plain-private-error', ...acceptedLookingCodes.keys()]) {
+    const result = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/catalog/import',
+      body: { grantId, profileScopeId: 'profile-main' }
+    });
+    assert.equal(result.res.status, 500, grantId);
+    assert.deepEqual(result.data, { error: 'internal_error' }, grantId);
+    assert.doesNotMatch(JSON.stringify(result.data), /private|export\.zip|data-message-id|secret/i, grantId);
+  }
+});
+
+async function startContinuationHttp(t, {
+  observedUrl = 'https://chatgpt.com/c/thread-123',
+  queryError = null,
+  queryResultUrl = null,
+  syncImpl = async () => ({ status: 'complete' }),
+  maxInflightQueries = 2,
+  sourcePatch = {},
+  sourceTabPatch = {},
+  sourceList = null,
+  duplicateSource = false,
+  listError = null,
+  navigationResultUrl = null,
+  onList = null
+} = {}) {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-transcript-continuation-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const events = [];
+  let currentObservedUrl = observedUrl;
+  let latestRuns = [];
+  let statusAtSync = null;
+  let listCalls = 0;
+  let ensureTabCalls = 0;
+  let createTabCalls = 0;
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async ({ chatUrl }) => {
+      events.push(['prepare', chatUrl]);
+    },
+    query: async () => {
+      events.push(['query']);
+      if (queryError) throw queryError;
+      if (queryResultUrl) currentObservedUrl = queryResultUrl;
+      return { text: 'receipt-backed continuation', codeBlocks: [], meta: {} };
+    },
+    navigate: async (targetUrl) => {
+      events.push(['navigate', targetUrl]);
+      currentObservedUrl = navigationResultUrl || targetUrl;
+    },
+    getUrl: async () => {
+      events.push(['get-url', currentObservedUrl]);
+      return currentObservedUrl;
+    }
+  };
+  const listedTabs = [{
+    id: 'tab-thread',
+    key: 'thread-key',
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT',
+    ...sourceTabPatch
+  }];
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key, vendorId = null }) => {
+      ensureTabCalls += 1;
+      const existing = listedTabs.find((tab) => tab.key === key);
+      if (existing) {
+        if (vendorId && existing.vendorId !== vendorId) throw new Error('key_vendor_mismatch');
+        return existing.id;
+      }
+      const created = { id: `tab-${key}`, key, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+      listedTabs.push(created);
+      return created.id;
+    },
+    createTab: async ({ key = null } = {}) => {
+      createTabCalls += 1;
+      const created = { id: `tab-${listedTabs.length + 1}`, key, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+      listedTabs.push(created);
+      return created.id;
+    },
+    closeTab: async () => true,
+    getControllerById: () => controller,
+    updateTabMeta: (tabId, patch) => {
+      const tab = listedTabs.find(({ id }) => id === tabId);
+      if (tab) Object.assign(tab, patch || {});
+    }
+  };
+  const source = {
+    id: 'source-1',
+    identity: {
+      provider: 'chatgpt',
+      profileScopeId: 'profile-main',
+      providerConversationId: 'thread-123'
+    },
+    key: 'thread-key',
+    enabled: true,
+    target: {
+      kind: 'owned-conversation',
+      location: {
+        kind: 'standalone-conversation',
+        conversationUrl: 'https://chatgpt.com/c/thread-123'
+      }
+    },
+    ...sourcePatch
+  };
+  const transcriptSync = {
+    list: async () => {
+      listCalls += 1;
+      events.push(['list']);
+      if (listError) throw listError;
+      if (onList) {
+        await onList({
+          count: listCalls,
+          setObservedUrl: (value) => { currentObservedUrl = value; }
+        });
+      }
+      if (duplicateSource) return [source, structuredClone(source)];
+      return sourceList === null ? [source] : sourceList;
+    },
+    sync: async (sourceId, trigger) => {
+      statusAtSync = latestRuns.find((run) => run.status === 'success')?.status || null;
+      events.push(['sync', sourceId, trigger]);
+      return await syncImpl();
+    }
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 'tab-thread',
+    serverId: 'sid-transcript-continuation',
+    stateDir,
+    transcriptSync,
+    onRunsChanged: (runs) => { latestRuns = runs; },
+    getSettings: async () => ({
+      maxInflightQueries,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentObservedUrl, blocked: false, promptVisible: true, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  return {
+    port: server.address().port,
+    events,
+    source,
+    setObservedUrl: (value) => { currentObservedUrl = value; },
+    patchSourceTab: (patch) => Object.assign(listedTabs[0], patch || {}),
+    getTabWorkCalls: () => ({ ensureTabCalls, createTabCalls }),
+    getStatusAtSync: () => statusAtSync
+  };
+}
+
+test('http-api: receipt-backed continuation and retry invoke the same post-query sync without downgrading success', async (t) => {
+  const assertLiveSequence = (events) => {
+    const queryIndex = events.findIndex(([kind]) => kind === 'query');
+    const lastListIndex = events.findLastIndex(([kind], index) => kind === 'list' && index < queryIndex);
+    assert.equal(events.filter(([kind]) => kind === 'list').length, 2);
+    assert.ok(lastListIndex >= 0 && lastListIndex < queryIndex - 1);
+    assert.equal(events[queryIndex - 1][0], 'get-url');
+    assert.deepEqual(events.at(-1), ['sync', 'source-1', 'post-query']);
+  };
+  const privateSyncError = new Error('PRIVATE transcript /Users/private/export.zip <div>secret</div>');
+  privateSyncError.data = { path: '/Users/private/export.zip', transcript: 'PRIVATE' };
+  const started = await startContinuationHttp(t, {
+    syncImpl: async () => { throw privateSyncError; }
+  });
+  const query = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      source: 'mcp',
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'harmless continuation'
+    }
+  });
+  assert.equal(query.res.status, 200);
+  assert.equal(query.data.result.text, 'receipt-backed continuation');
+  assert.equal(started.getStatusAtSync(), 'success');
+  assertLiveSequence(started.events);
+  assert.equal(started.events.find(([kind]) => kind === 'prepare')[1], 'https://chatgpt.com/c/thread-123');
+  assert.doesNotMatch(JSON.stringify(query.data), /PRIVATE|export\.zip|\/Users\/private|<div>/);
+
+  const persisted = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: query.data.runId }
+  });
+  assert.equal(persisted.data.run.status, 'success');
+  assert.equal(persisted.data.run.completionReceipt.kind, 'assistant-response');
+
+  const beforeRetry = started.events.length;
+  const retried = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: query.data.runId, source: 'mcp' }
+  });
+  assert.equal(retried.res.status, 200);
+  assert.equal(retried.data.result.text, 'receipt-backed continuation');
+  assertLiveSequence(started.events.slice(beforeRetry));
+});
+
+test('http-api: explicit live continuation binding fails before any provider mutation', async (t) => {
+  const privateLookupError = new Error('PRIVATE transcript /Users/private/export.zip <div>secret</div>');
+  privateLookupError.data = { transcript: 'PRIVATE', path: '/Users/private/export.zip' };
+  const cases = [
+    ['unknown source', { liveSourceId: 'source-missing', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, {}],
+    ['disabled source', { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, { sourcePatch: { enabled: false } }],
+    ['key mismatch', { liveSourceId: 'source-1', key: 'wrong-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, {}],
+    ['padded request key', { liveSourceId: 'source-1', key: ' thread-key ', chatUrl: 'https://chatgpt.com/c/thread-123' }, {}],
+    ['control-bearing request key', { liveSourceId: 'source-1', key: 'thread-key\n', chatUrl: 'https://chatgpt.com/c/thread-123' }, {}],
+    ['corrupt stored key', { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, {
+      sourcePatch: { key: 'thread-key\n' },
+      sourceTabPatch: { key: 'thread-key\n' }
+    }],
+    ['URL mismatch', { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/different-thread' }, {}],
+    ['missing key', { liveSourceId: 'source-1', chatUrl: 'https://chatgpt.com/c/thread-123' }, {}],
+    ['source target mismatch', { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, {
+      sourcePatch: {
+        target: {
+          kind: 'owned-conversation',
+          location: {
+            kind: 'standalone-conversation',
+            conversationUrl: 'https://chatgpt.com/c/different-thread'
+          }
+        }
+      }
+    }],
+    ['duplicate exact source', { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, { duplicateSource: true }],
+    ['private lookup failure', { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123' }, { listError: privateLookupError }]
+  ];
+  for (const [name, binding, options] of cases) {
+    await t.test(name, async (subtest) => {
+      const started = await startContinuationHttp(subtest, options);
+      const response = await req({
+        port: started.port,
+        token: 'secret',
+        method: 'POST',
+        pth: '/query',
+        body: { ...binding, prompt: 'must not be sent' }
+      });
+
+      assert.equal(response.res.status, 409);
+      assert.deepEqual(response.data, { error: 'conversation-not-live-bound' });
+      assert.doesNotMatch(JSON.stringify(response.data), /PRIVATE|export\.zip|\/Users\/private|<div>/);
+      assert.equal(started.events.some(([kind]) => ['prepare', 'query', 'sync'].includes(kind)), false);
+      assert.deepEqual(started.getTabWorkCalls(), { ensureTabCalls: 0, createTabCalls: 0 });
+      const runs = await req({
+        port: started.port,
+        token: 'secret',
+        method: 'POST',
+        pth: '/runs/list',
+        body: { includeArchived: true }
+      });
+      assert.equal(runs.res.status, 200);
+      assert.deepEqual(runs.data.runs, []);
+    });
+  }
+});
+
+test('http-api: live continuation rejects competing route selectors before tab or run work', async (t) => {
+  const cases = [
+    ['body tab', '/query', { tabId: 'tab-other' }],
+    ['query-string tab', '/query?tabId=tab-other', {}],
+    ['model', '/query', { model: 'chatgpt' }],
+    ['vendor', '/query', { vendorId: 'chatgpt' }],
+    ['project', '/query', { projectUrl: 'https://chatgpt.com/g/g-project/project' }],
+    ['image generation', '/query', { imageGeneration: true }]
+  ];
+  for (const [name, pth, selector] of cases) {
+    await t.test(name, async (subtest) => {
+      const started = await startContinuationHttp(subtest);
+      const response = await req({
+        port: started.port,
+        token: 'secret',
+        method: 'POST',
+        pth,
+        body: {
+          liveSourceId: 'source-1',
+          key: 'thread-key',
+          chatUrl: 'https://chatgpt.com/c/thread-123',
+          prompt: 'must not cross route authority',
+          ...selector
+        }
+      });
+
+      assert.equal(response.res.status, 409);
+      assert.deepEqual(response.data, { error: 'conversation-not-live-bound' });
+      assert.deepEqual(started.events, []);
+      assert.deepEqual(started.getTabWorkCalls(), { ensureTabCalls: 0, createTabCalls: 0 });
+      const runs = await req({
+        port: started.port,
+        token: 'secret',
+        method: 'POST',
+        pth: '/runs/list',
+        body: { includeArchived: true }
+      });
+      assert.deepEqual(runs.data.runs, []);
+    });
+  }
+});
+
+test('http-api: live continuation rejects a non-ChatGPT tab occupying the source key before run or provider work', async (t) => {
+  const started = await startContinuationHttp(t, {
+    sourceTabPatch: { vendorId: 'claude', vendorName: 'Claude' }
+  });
+  const response = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'must stay on the tracked ChatGPT key'
+    }
+  });
+
+  assert.equal(response.res.status, 409);
+  assert.deepEqual(response.data, { error: 'conversation-not-live-bound' });
+  assert.equal(started.events.some(([kind]) => ['prepare', 'query', 'sync'].includes(kind)), false);
+  assert.deepEqual(started.getTabWorkCalls(), { ensureTabCalls: 0, createTabCalls: 0 });
+  const runs = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/list',
+    body: { includeArchived: true }
+  });
+  assert.deepEqual(runs.data.runs, []);
+});
+
+test('http-api: live continuation rechecks the served route before provider send', async (t) => {
+  const started = await startContinuationHttp(t, {
+    observedUrl: 'https://chatgpt.com/c/different-thread'
+  });
+  const response = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'must not cross the redirect'
+    }
+  });
+
+  assert.equal(response.res.status, 409);
+  assert.deepEqual(response.data, { error: 'conversation-not-live-bound' });
+  assert.equal(started.events.some(([kind]) => kind === 'prepare'), true);
+  assert.equal(started.events.some(([kind]) => kind === 'query' || kind === 'sync'), false);
+});
+
+test('http-api: live continuation reads the served route after the final source recheck', async (t) => {
+  const started = await startContinuationHttp(t, {
+    onList: async ({ count, setObservedUrl }) => {
+      if (count === 2) setObservedUrl('https://chatgpt.com/c/different-thread');
+    }
+  });
+  const response = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'must not cross a concurrent route change'
+    }
+  });
+
+  assert.equal(response.res.status, 409);
+  assert.deepEqual(response.data, { error: 'conversation-not-live-bound' });
+  const secondListIndex = started.events.findLastIndex(([kind]) => kind === 'list');
+  const servedReadIndex = started.events.findLastIndex(([kind]) => kind === 'get-url');
+  assert.ok(secondListIndex >= 0 && servedReadIndex > secondListIndex);
+  assert.equal(started.events.some(([kind]) => kind === 'query' || kind === 'sync'), false);
+});
+
+test('http-api: retry persists and revalidates an explicit live continuation binding', async (t) => {
+  const started = await startContinuationHttp(t);
+  const query = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'valid live continuation'
+    }
+  });
+  assert.equal(query.res.status, 200);
+  const persisted = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: query.data.runId }
+  });
+  assert.equal(persisted.data.run.logicalRequest.liveSourceId, 'source-1');
+
+  started.source.enabled = false;
+  started.events.length = 0;
+  const retry = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: query.data.runId }
+  });
+
+  assert.equal(retry.res.status, 409);
+  assert.deepEqual(retry.data, { error: 'conversation-not-live-bound' });
+  assert.equal(started.events.some(([kind]) => ['prepare', 'query', 'sync'].includes(kind)), false);
+});
+
+test('http-api: retry rejects a non-ChatGPT tab occupying the durable source key before tab or run work', async (t) => {
+  const started = await startContinuationHttp(t);
+  const query = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'valid live continuation'
+    }
+  });
+  assert.equal(query.res.status, 200);
+
+  started.patchSourceTab({ vendorId: 'claude', vendorName: 'Claude' });
+  started.events.length = 0;
+  const tabWorkBefore = started.getTabWorkCalls();
+  const retry = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: query.data.runId }
+  });
+
+  assert.equal(retry.res.status, 409);
+  assert.deepEqual(retry.data, { error: 'conversation-not-live-bound' });
+  assert.deepEqual(started.events, [['list']]);
+  assert.deepEqual(started.getTabWorkCalls(), tabWorkBefore);
+  const runs = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/list',
+    body: { includeArchived: true }
+  });
+  assert.equal(runs.data.runs.length, 1);
+});
+
+test('http-api: retry rechecks the served route before provider send', async (t) => {
+  const started = await startContinuationHttp(t, {
+    navigationResultUrl: 'https://chatgpt.com/c/different-thread'
+  });
+  const query = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'valid live continuation'
+    }
+  });
+  assert.equal(query.res.status, 200);
+
+  started.setObservedUrl('https://chatgpt.com/');
+  started.events.length = 0;
+  const retry = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: query.data.runId }
+  });
+
+  assert.equal(retry.res.status, 409);
+  assert.deepEqual(retry.data, { error: 'conversation-not-live-bound' });
+  assert.equal(started.events.some(([kind]) => kind === 'navigate'), true);
+  assert.equal(started.events.some(([kind]) => kind === 'query' || kind === 'sync'), false);
+});
+
+test('http-api: a live continuation refuses post-send route drift before recording success or syncing', async (t) => {
+  const started = await startContinuationHttp(t, {
+    queryResultUrl: 'https://chatgpt.com/c/different-thread'
+  });
+  const response = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'route-bound continuation'
+    }
+  });
+
+  assert.equal(response.res.status, 409);
+  assert.deepEqual(response.data, { error: 'conversation-not-live-bound' });
+  assert.equal(started.events.some(([kind]) => kind === 'query'), true);
+  assert.equal(started.events.some(([kind]) => kind === 'sync'), false);
+  const runs = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/list',
+    body: { includeArchived: true }
+  });
+  assert.equal(runs.data.runs.length, 1);
+  assert.equal(runs.data.runs[0].status, 'error');
+});
+
+test('http-api: generic queries preserve non-library behavior and provider failures never sync', async (t) => {
+  const generic = await startContinuationHttp(t, {
+    observedUrl: 'https://chatgpt.com/c/different-thread'
+  });
+  const response = await req({
+    port: generic.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'must stay exact'
+    }
+  });
+  assert.equal(response.res.status, 200);
+  assert.equal(generic.events.some(([kind]) => kind === 'list' || kind === 'sync'), false);
+  const genericRun = await req({
+    port: generic.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: response.data.runId }
+  });
+  assert.equal(Object.hasOwn(genericRun.data.run.logicalRequest, 'liveSourceId'), false);
+
+  const providerError = new Error('timeout_waiting_for_response');
+  const failed = await startContinuationHttp(t, { queryError: providerError });
+  const failedResponse = await req({
+    port: failed.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'provider failure'
+    }
+  });
+  assert.equal(failedResponse.res.status, 408);
+  assert.equal(failed.events.some(([kind]) => kind === 'list' || kind === 'sync'), false);
+});
+
+test('http-api: post-query sync keeps its key reserved after releasing the provider slot', async (t) => {
+  let releaseSync;
+  let syncStarted = false;
+  const syncGate = new Promise((resolve) => { releaseSync = resolve; });
+  const started = await startContinuationHttp(t, {
+    maxInflightQueries: 1,
+    syncImpl: async () => {
+      syncStarted = true;
+      await syncGate;
+      return { status: 'complete' };
+    }
+  });
+  const submitted = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'async continuation',
+      fireAndForget: true
+    }
+  });
+  assert.equal(submitted.res.status, 202);
+  await waitFor(() => syncStarted);
+
+  const conflicting = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'must wait'
+    }
+  });
+  assert.equal(conflicting.res.status, 409);
+  assert.equal(conflicting.data.error, 'tab_busy');
+
+  const otherTab = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'other-key', prompt: 'independent provider work' }
+  });
+  assert.equal(otherTab.res.status, 200);
+  assert.equal(otherTab.data.result.text, 'receipt-backed continuation');
+
+  releaseSync();
+  await waitFor(async () => {
+    const status = await req({ port: started.port, token: 'secret', method: 'GET', pth: '/status' });
+    return status.data.activeQuery === null;
+  });
+});
+
 test('http-api: status returns getStatus output', async (t) => {
   const tabs = { listTabs: () => [], ensureTab: async () => 't1', createTab: async () => 't1', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
@@ -1808,6 +3162,10 @@ test('http-api: research bundle resolution fails asynchronously after run creati
 test('http-api: research reserves the underlying tab against concurrent query calls', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-lock-'));
   let releaseResearch = null;
+  let markResearchEntered;
+  const researchEntered = new Promise((resolve) => {
+    markResearchEntered = resolve;
+  });
   const listedTabs = [{ id: 't1', key: 'proj', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -1815,6 +3173,7 @@ test('http-api: research reserves the underlying tab against concurrent query ca
     research: async () => {
       await new Promise((resolve) => {
         releaseResearch = resolve;
+        markResearchEntered();
       });
       return {
         text: 'done',
@@ -1867,6 +3226,18 @@ test('http-api: research reserves the underlying tab against concurrent query ca
   });
   assert.equal(started.res.status, 202);
 
+  let researchEntryTimer;
+  try {
+    await Promise.race([
+      researchEntered,
+      new Promise((_, reject) => {
+        researchEntryTimer = setTimeout(() => reject(new Error('research_entry_timeout')), 10_000);
+      })
+    ]);
+  } finally {
+    clearTimeout(researchEntryTimer);
+  }
+
   await waitFor(async () => {
     const status = await req({ port, token: 'secret', method: 'GET', pth: '/status?tabId=t1' });
     return status.data.activeQuery?.kind === 'research' ? status : null;
@@ -1885,11 +3256,38 @@ test('http-api: research reserves the underlying tab against concurrent query ca
   assert.equal(blocked.res.status, 409);
   assert.equal(blocked.data.error, 'tab_busy');
 
-  releaseResearch?.();
-  await waitFor(async () => {
-    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
-    return run.data.run?.status === 'success' ? run : null;
-  }, { timeoutMs: 6_000, intervalMs: 20 });
+  const activeRun = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: started.data.runId }
+  });
+  assert.equal(activeRun.data.run.status, 'running');
+  assert.equal(typeof releaseResearch, 'function');
+  releaseResearch();
+  let finished = activeRun;
+  const liveStatuses = new Set(['queued', 'running', 'blocked']);
+  for (let transition = 0; transition < 128 && liveStatuses.has(finished.data.run.status); transition += 1) {
+    const priorRevision = finished.data.run.revision;
+    finished = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/runs/wait',
+      body: {
+        runId: started.data.runId,
+        afterRevision: priorRevision,
+        waitTimeoutMs: 30_000
+      }
+    });
+    assert.ok(
+      !liveStatuses.has(finished.data.run.status) || finished.data.run.revision > priorRevision,
+      'run wait must reach a terminal state or a newer durable revision'
+    );
+  }
+  assert.equal(finished.res.status, 200);
+  assert.equal(finished.data.run.status, 'success');
 });
 
 test('http-api: research without tab/key does not lock an unrelated default non-chatgpt tab', async (t) => {

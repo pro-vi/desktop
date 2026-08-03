@@ -106,6 +106,54 @@
           <div id="compatibilityCapabilities" class="compatibilityCapabilities"></div>
         </section>
 
+        <section id="transcriptLibraryCard" class="card libraryCard">
+          <h2 class="cardTitle">Transcript Library</h2>
+          <div class="hint libraryLead">
+            Keep exact ChatGPT conversations in private local storage. Imports and tracked sources are matched only by profile scope plus provider conversation ID.
+          </div>
+          <div class="grid libraryInputs">
+            <label class="field">
+              <div class="label">ChatGPT profile scope</div>
+              <input id="libraryProfileScope" type="text" placeholder="e.g. chatgpt-personal" autocomplete="off" />
+              <div class="fieldHelp">A stable local name for this signed-in ChatGPT account. Reuse the same value over time.</div>
+            </label>
+            <label class="field">
+              <div class="label">Verification tab key</div>
+              <input id="libraryVerifyKey" type="text" placeholder="e.g. transcript-verification" autocomplete="off" />
+              <div class="fieldHelp">The Agentify tab key used for direct route checks. No sidebar scan is performed.</div>
+            </label>
+          </div>
+          <div class="row libraryActions">
+            <button id="btnImportChatGptExport" class="btn primary">Choose ZIP and import</button>
+            <button id="btnRefreshLibrary" class="btn secondary">Refresh library</button>
+          </div>
+          <div id="libraryActionStatus" class="hint" role="status" aria-live="polite">Choose a profile scope to begin.</div>
+
+          <div class="librarySection">
+            <h3 id="libraryImportsHeading" class="librarySectionTitle">Imports</h3>
+            <div id="libraryImportsEmpty" class="empty">No export imports yet. Choose a ChatGPT export ZIP to build the local catalog.</div>
+            <div id="libraryImportsList" class="tabs" role="list" aria-labelledby="libraryImportsHeading"></div>
+          </div>
+
+          <div class="librarySection">
+            <h3 id="librarySourcesHeading" class="librarySectionTitle">Tracked live sources</h3>
+            <div id="librarySourcesEmpty" class="empty">No live conversations are tracked locally.</div>
+            <div id="librarySourcesList" class="tabs" role="list" aria-labelledby="librarySourcesHeading"></div>
+          </div>
+
+          <div class="librarySection">
+            <h3 id="libraryCatalogHeading" class="librarySectionTitle">Catalog</h3>
+            <div id="libraryCatalogEmpty" class="empty">No conversations in the selected profile scope.</div>
+            <div id="libraryCatalogList" class="tabs" role="list" aria-labelledby="libraryCatalogHeading"></div>
+            <div id="libraryCatalogPageHint" class="hint"></div>
+          </div>
+
+          <div class="privacyNote">
+            ZIP access is one-use. Raw records and snapshots stay under the local state folder with private file permissions. Forget removes only Agentify’s local source record; it never deletes the provider conversation.
+          </div>
+          <div id="libraryStorageLocation" class="hint mono">Local transcript storage lives inside Agentify’s private state folder.</div>
+        </section>
+
         <section class="card">
           <div class="cardTitle">Tabs</div>
           <div id="tabsEmpty" class="empty">No tabs listed yet. Open the default tab or create a new vendor tab to start working.</div>

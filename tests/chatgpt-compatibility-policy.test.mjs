@@ -109,6 +109,22 @@ test('compatibility policy: operation errors retain identity and incomplete appa
   assert.equal(observations[1].verdict, 'incomplete');
 });
 
+test('compatibility policy: transcript callers can fail closed on unresolved compatibility apparatus', async () => {
+  const observations = [];
+  const { controller } = makeController({ raw: null, observations });
+  const complete = { status: 'complete', marker: 'preserved' };
+  const actual = await controller.runCompatibilityCapability('transcript', async () => complete, {
+    anchorId: 'assistant-message',
+    postcondition: (value) => value.status === 'complete',
+    mapResult: (value, resolution) => resolution.kind === 'apparatus'
+      ? { ...value, status: 'partial', reason: 'compatibility_drift' }
+      : value
+  });
+
+  assert.deepEqual(actual, { status: 'partial', marker: 'preserved', reason: 'compatibility_drift' });
+  assert.equal(observations.find(({ kind }) => kind === 'capability').status, 'fail');
+});
+
 test('compatibility policy: production observations parse and persist exactly once through the real store', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-policy-store-'));
   const store = createCompatibilityStore(stateDir, {

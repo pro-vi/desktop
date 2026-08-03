@@ -37,6 +37,7 @@ const ANCHOR_PRIMITIVE_IDS = Object.freeze([
 const PRECONDITION_IDS = Object.freeze([
   'always',
   'after-submit',
+  'owned-conversation',
   'when-attachment-requested',
   'when-mode-or-model-requested',
   'when-research-requested',
@@ -50,6 +51,7 @@ const POSTCONDITION_IDS = Object.freeze([
   'attachment-accepted',
   'mode-model-confirmed',
   'stable-response',
+  'complete-transcript',
   'research-completed',
   'image-artifacts-saved',
   'file-exported'
