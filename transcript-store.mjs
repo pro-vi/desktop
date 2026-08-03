@@ -24,6 +24,12 @@ import {
 
 export const TRANSCRIPT_STORE_SCHEMA_VERSION = 1;
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
+// Public source summaries expose only the latest attempt. Retaining 64 terminal
+// attempts per source leaves a useful local diagnostic window while preventing
+// repeated manual/post-query syncs from growing the single state file forever.
+// A persisted base snapshot carries the complete-history invariant across the
+// compacted prefix; open attempts are never removed.
+const MAX_RETAINED_TERMINAL_ATTEMPTS = 64;
 const MAX_SNAPSHOT_REF = Object.freeze({
   kind: 'snapshot',
   algorithm: 'sha256',
@@ -43,10 +49,11 @@ export const TRANSCRIPT_SYNC_FAILURE_REASONS = Object.freeze([
 ]);
 
 const STATE_KEYS = Object.freeze(['schemaVersion', 'revision', 'sources', 'attempts', 'deletedSources']);
-const SOURCE_KEYS = Object.freeze([
+const LEGACY_SOURCE_KEYS = Object.freeze([
   'schemaVersion', 'id', 'identity', 'label', 'tags', 'key', 'target', 'enabled',
   'latestLiveSnapshot', 'lastAttemptId', 'createdAt', 'updatedAt'
 ]);
+const SOURCE_KEYS = Object.freeze([...LEGACY_SOURCE_KEYS, 'historyBaseSnapshot']);
 const ATTEMPT_KEYS = Object.freeze([
   'schemaVersion', 'id', 'sourceId', 'trigger', 'startedAt', 'finishedAt', 'outcome'
 ]);
@@ -176,17 +183,22 @@ function parseAttempt(value) {
 }
 
 function parseSource(value, { persisted = true } = {}) {
-  if (!isRecord(value) || !exactKeys(value, SOURCE_KEYS)) {
+  const expectedKeys = value?.historyBaseSnapshot === undefined ? LEGACY_SOURCE_KEYS : SOURCE_KEYS;
+  if (!isRecord(value) || !exactKeys(value, expectedKeys)) {
     throw storeError(persisted ? 'transcript_store_corrupt_state' : 'transcript_source_invalid');
   }
   if (value.schemaVersion !== TRANSCRIPT_STORE_SCHEMA_VERSION) throw storeError('transcript_store_schema_unsupported');
   let identity;
   let target;
   let tags;
+  let historyBaseSnapshot;
   try {
     identity = parseConversationIdentity(value.identity);
     target = parseTarget(value.target);
     tags = parseTranscriptSourceTags(value.tags);
+    historyBaseSnapshot = value.historyBaseSnapshot === undefined || value.historyBaseSnapshot === null
+      ? null
+      : parseSnapshotRef(value.historyBaseSnapshot);
   } catch (error) {
     if (persisted && error?.code !== 'transcript_store_schema_unsupported') {
       throw storeError('transcript_store_corrupt_state');
@@ -206,6 +218,7 @@ function parseSource(value, { persisted = true } = {}) {
     key: parseTranscriptSourceKey(value.key),
     target,
     enabled: value.enabled,
+    historyBaseSnapshot,
     latestLiveSnapshot: value.latestLiveSnapshot === null ? null : parseSnapshotRef(value.latestLiveSnapshot),
     lastAttemptId: value.lastAttemptId === null ? null : parseSafeId(value.lastAttemptId),
     createdAt: parseIsoDateTime(value.createdAt),
@@ -255,7 +268,7 @@ function validateSourceHistory(source, attempts) {
   if (attempts.some((attempt, index) => attempt.outcome === null && index !== attempts.length - 1)) {
     throw storeError('transcript_store_corrupt_state');
   }
-  let latest = null;
+  let latest = source.historyBaseSnapshot;
   for (const attempt of attempts) {
     if (attempt.outcome?.kind !== 'complete') continue;
     const expectedChanged = latest === null || latest.contentHash !== attempt.outcome.snapshot.contentHash;
@@ -265,6 +278,51 @@ function validateSourceHistory(source, attempts) {
   if (!sameSnapshotRef(source.latestLiveSnapshot, latest)) {
     throw storeError('transcript_store_corrupt_state');
   }
+}
+
+function compactSourceAttemptHistory(source, attempts, maxTerminalAttempts) {
+  const terminalCount = attempts.reduce((count, attempt) => count + (attempt.outcome === null ? 0 : 1), 0);
+  let terminalsToDrop = Math.max(0, terminalCount - maxTerminalAttempts);
+  if (terminalsToDrop === 0) return { source, attempts };
+  let historyBaseSnapshot = source.historyBaseSnapshot;
+  const retained = [];
+  for (const attempt of attempts) {
+    if (attempt.outcome !== null && terminalsToDrop > 0) {
+      terminalsToDrop -= 1;
+      if (attempt.outcome.kind === 'complete') historyBaseSnapshot = attempt.outcome.snapshot;
+      continue;
+    }
+    retained.push(attempt);
+  }
+  return {
+    source: { ...source, historyBaseSnapshot },
+    attempts: retained
+  };
+}
+
+function compactTerminalAttemptHistories(state, maxTerminalAttempts) {
+  const attemptsBySourceId = new Map(state.sources.map(({ id }) => [id, []]));
+  for (const attempt of state.attempts) attemptsBySourceId.get(attempt.sourceId).push(attempt);
+  const retainedAttemptIds = new Set();
+  const sources = state.sources.map((source) => {
+    const compacted = compactSourceAttemptHistory(
+      source,
+      attemptsBySourceId.get(source.id),
+      maxTerminalAttempts
+    );
+    for (const attempt of compacted.attempts) retainedAttemptIds.add(attempt.id);
+    return compacted.source;
+  });
+  const attempts = state.attempts.filter(({ id }) => retainedAttemptIds.has(id));
+  const deletedSources = state.deletedSources.map((tombstone) => {
+    const compacted = compactSourceAttemptHistory(
+      tombstone.source,
+      tombstone.attempts,
+      maxTerminalAttempts
+    );
+    return { ...tombstone, source: compacted.source, attempts: compacted.attempts };
+  });
+  return { ...state, sources, attempts, deletedSources };
 }
 
 function parseState(value) {
@@ -383,6 +441,7 @@ function parseRegisterInput(value, randomId, now) {
     key: parseTranscriptSourceKey(value.key),
     target,
     enabled: true,
+    historyBaseSnapshot: null,
     latestLiveSnapshot: null,
     lastAttemptId: null,
     createdAt: now,
@@ -435,12 +494,19 @@ export function createTranscriptStore({
   fileSystem = privateFileSystem,
   clock = () => new Date().toISOString(),
   randomId = crypto.randomUUID,
-  maxStateBytes = MAX_STATE_BYTES
+  maxStateBytes = MAX_STATE_BYTES,
+  maxTerminalAttemptsPerSource = MAX_RETAINED_TERMINAL_ATTEMPTS
 } = {}) {
   if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) throw storeError('transcript_store_state_dir_required');
   if (!blobs || typeof blobs.getSnapshot !== 'function') throw storeError('transcript_store_blobs_required');
   if (!Number.isSafeInteger(maxStateBytes) || maxStateBytes < 1 || maxStateBytes > MAX_STATE_BYTES) {
     throw storeError('transcript_store_size_limit_invalid');
+  }
+  if (
+    !Number.isSafeInteger(maxTerminalAttemptsPerSource) || maxTerminalAttemptsPerSource < 1 ||
+    maxTerminalAttemptsPerSource > MAX_RETAINED_TERMINAL_ATTEMPTS
+  ) {
+    throw storeError('transcript_store_attempt_retention_invalid');
   }
   const root = path.join(stateDir, 'transcript-library', 'live');
   const filePath = path.join(root, 'state.json');
@@ -532,10 +598,14 @@ export function createTranscriptStore({
   }
 
   async function persist(candidate) {
-    const parsed = parseState({ ...candidate, revision: durableState.revision + 1 });
+    const validated = parseState({ ...candidate, revision: durableState.revision + 1 });
+    const parsed = parseState(compactTerminalAttemptHistories(validated, maxTerminalAttemptsPerSource));
     const bytes = encodeState(parsed);
     if (bytes.length > maxStateBytes) throw storeError('transcript_store_size_limit');
-    const terminalBytes = encodeState(terminalAttemptProjection(parsed));
+    const terminalBytes = encodeState(compactTerminalAttemptHistories(
+      terminalAttemptProjection(parsed),
+      maxTerminalAttemptsPerSource
+    ));
     if (terminalBytes.length > maxStateBytes) throw storeError('transcript_store_size_limit');
     try {
       await fileSystem.replaceFile(filePath, bytes, { boundaryPath: stateDir });

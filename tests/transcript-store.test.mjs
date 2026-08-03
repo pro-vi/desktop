@@ -42,6 +42,11 @@ function ids(prefix = 'test') {
   return () => `${prefix}-${++next}`;
 }
 
+function fixedIds(prefix = 'fixed') {
+  let next = 0;
+  return () => `${prefix}-${String(++next).padStart(4, '0')}`;
+}
+
 function sourceInput({
   thread = 'state-thread',
   key = 'state-key',
@@ -479,6 +484,168 @@ test('transcript store: local forget moves metadata to a recoverable tombstone a
   assert.equal(deleted[0].source.id, source.id);
   assert.equal(deleted[0].attempts[0].outcome.kind, 'complete');
   assert.deepEqual(await blobs.getSnapshot(ref), snapshot);
+});
+
+test('transcript store: terminal history compacts with a verifiable snapshot base and preserves every open attempt', async (t) => {
+  const stateDir = await tempState(t, 'attempt-compaction');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = createTranscriptStore({
+    stateDir,
+    blobs,
+    clock: clockAt(),
+    randomId: ids('attempt-compaction'),
+    maxTerminalAttemptsPerSource: 3
+  });
+  const source = await store.register(sourceInput());
+  const captures = [
+    completeCapture({ capturedAt: '2026-07-30T12:01:00.000Z', firstText: 'Alpha' }),
+    completeCapture({ capturedAt: '2026-07-30T12:02:00.000Z', firstText: 'Alpha' }),
+    completeCapture({ capturedAt: '2026-07-30T12:03:00.000Z', firstText: 'Beta' }),
+    completeCapture({ capturedAt: '2026-07-30T12:04:00.000Z', firstText: 'Beta' }),
+    completeCapture({ capturedAt: '2026-07-30T12:05:00.000Z', firstText: 'Alpha' })
+  ];
+  const attempts = [];
+  const refs = [];
+  const changed = [];
+  for (const capture of captures) {
+    const snapshot = snapshotFor(capture);
+    const ref = await blobs.putSnapshot(snapshot);
+    const attempt = await store.beginAttempt(source.id);
+    const result = await store.commitComplete(attempt.id, ref, snapshot.contentHash);
+    attempts.push(attempt);
+    refs.push(ref);
+    changed.push(result.outcome.changed);
+  }
+  assert.deepEqual(changed, [true, false, true, false, true]);
+
+  let durable = JSON.parse(await fs.readFile(store.statePath, 'utf8'));
+  let durableSource = durable.sources.find(({ id }) => id === source.id);
+  assert.equal(durable.attempts.length, 3);
+  assert.deepEqual(durable.attempts.map(({ id }) => id), attempts.slice(-3).map(({ id }) => id));
+  assert.equal(durableSource.historyBaseSnapshot.hash, refs[1].hash);
+  assert.equal(durableSource.latestLiveSnapshot.hash, refs[4].hash);
+
+  const restarted = createTranscriptStore({
+    stateDir,
+    blobs,
+    clock: clockAt(100),
+    randomId: ids('restart-compaction'),
+    maxTerminalAttemptsPerSource: 3
+  });
+  assert.equal((await restarted.getSource(source.id)).latestLiveSnapshot.hash, refs[4].hash);
+  const firstOpen = await restarted.beginAttempt(source.id);
+  const secondSource = await restarted.register(sourceInput({
+    thread: 'second-compaction-thread',
+    key: 'second-compaction-key',
+    label: 'Second compaction fixture'
+  }));
+  const secondOpen = await restarted.beginAttempt(secondSource.id);
+
+  const afterCrash = createTranscriptStore({
+    stateDir,
+    blobs,
+    clock: clockAt(120),
+    randomId: ids('recover-compaction'),
+    maxTerminalAttemptsPerSource: 3
+  });
+  assert.equal(await afterCrash.recoverInterrupted(), 2);
+  assert.equal((await afterCrash.getSource(source.id)).lastAttempt.id, firstOpen.id);
+  assert.equal((await afterCrash.getSource(secondSource.id)).lastAttempt.id, secondOpen.id);
+  assert.equal((await afterCrash.getSource(source.id)).latestLiveSnapshot.hash, refs[4].hash);
+
+  durable = JSON.parse(await fs.readFile(afterCrash.statePath, 'utf8'));
+  durableSource = durable.sources.find(({ id }) => id === source.id);
+  assert.equal(durable.attempts.filter(({ sourceId }) => sourceId === source.id).length, 3);
+  assert.equal(durable.attempts.filter(({ sourceId }) => sourceId === secondSource.id).length, 1);
+  assert.equal(durableSource.historyBaseSnapshot.hash, refs[2].hash);
+
+  await afterCrash.forget(source.id);
+  await afterCrash.forget(secondSource.id);
+  const deleted = await afterCrash.listDeleted();
+  assert.equal(deleted.length, 2, 'recoverable tombstones are never evicted by attempt compaction');
+  const compactedTombstone = deleted.find(({ source: deletedSource }) => deletedSource.id === source.id);
+  assert.equal(compactedTombstone.attempts.length, 3);
+  assert.equal(compactedTombstone.source.historyBaseSnapshot.hash, refs[2].hash);
+  assert.equal(compactedTombstone.source.latestLiveSnapshot.hash, refs[4].hash);
+  assert.deepEqual(await blobs.getSnapshot(refs[4]), snapshotFor(captures[4]));
+
+  const forgottenRestart = createTranscriptStore({
+    stateDir,
+    blobs,
+    maxTerminalAttemptsPerSource: 3
+  });
+  assert.equal((await forgottenRestart.listDeleted()).length, 2);
+});
+
+test('transcript store: compacted attempts keep a reduced state budget reusable across restart', async (t) => {
+  async function runPartialAttempts(store, sourceId, count) {
+    let largestState = 0;
+    for (let index = 0; index < count; index += 1) {
+      const attempt = await store.beginAttempt(sourceId);
+      largestState = Math.max(largestState, (await fs.stat(store.statePath)).size);
+      await store.finishIncomplete(attempt.id, {
+        kind: 'partial',
+        reason: 'conversation_generation_active'
+      });
+      largestState = Math.max(largestState, (await fs.stat(store.statePath)).size);
+    }
+    return largestState;
+  }
+
+  const probeStateDir = await tempState(t, 'attempt-budget-probe');
+  const probeBlobs = createPrivateLibraryBlobStore({ stateDir: probeStateDir });
+  const probe = createTranscriptStore({
+    stateDir: probeStateDir,
+    blobs: probeBlobs,
+    clock: clockAt(),
+    randomId: fixedIds('probe'),
+    maxTerminalAttemptsPerSource: 2
+  });
+  const probeSource = await probe.register(sourceInput());
+  const reducedByteLimit = await runPartialAttempts(probe, probeSource.id, 12) + 1_024;
+
+  const stateDir = await tempState(t, 'attempt-budget-limited');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const limited = createTranscriptStore({
+    stateDir,
+    blobs,
+    clock: clockAt(),
+    randomId: fixedIds('limit'),
+    maxStateBytes: reducedByteLimit,
+    maxTerminalAttemptsPerSource: 2
+  });
+  const source = await limited.register(sourceInput());
+  await runPartialAttempts(limited, source.id, 12);
+  assert.ok((await fs.stat(limited.statePath)).size <= reducedByteLimit);
+
+  const restarted = createTranscriptStore({
+    stateDir,
+    blobs,
+    clock: clockAt(100),
+    randomId: fixedIds('again'),
+    maxStateBytes: reducedByteLimit,
+    maxTerminalAttemptsPerSource: 2
+  });
+  assert.equal((await restarted.getSource(source.id)).state, 'partial');
+  await runPartialAttempts(restarted, source.id, 12);
+  const durable = JSON.parse(await fs.readFile(restarted.statePath, 'utf8'));
+  assert.equal(durable.attempts.length, 2);
+  assert.ok((await fs.stat(restarted.statePath)).size <= reducedByteLimit);
+});
+
+test('transcript store: legacy sources without a history base migrate on their next write', async (t) => {
+  const { stateDir, blobs, store, source, attempt, snapshot, ref } = await setupOpenAttempt(t, 'history-base-legacy');
+  await store.commitComplete(attempt.id, ref, snapshot.contentHash);
+  const legacy = JSON.parse(await fs.readFile(store.statePath, 'utf8'));
+  delete legacy.sources[0].historyBaseSnapshot;
+  await fs.writeFile(store.statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+  const restarted = createTranscriptStore({ stateDir, blobs, clock: clockAt(140) });
+  assert.equal((await restarted.getSource(source.id)).latestLiveSnapshot.hash, ref.hash);
+  await restarted.setEnabled(source.id, false);
+  const migrated = JSON.parse(await fs.readFile(restarted.statePath, 'utf8'));
+  assert.equal(migrated.sources[0].historyBaseSnapshot, null);
+  assert.equal(migrated.sources[0].latestLiveSnapshot.hash, ref.hash);
 });
 
 test('transcript store: a real subprocess crash after blob publication recovers an interrupted attempt', async (t) => {
