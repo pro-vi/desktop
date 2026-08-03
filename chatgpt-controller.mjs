@@ -1029,7 +1029,8 @@ export class ChatGPTController {
         }
         return value;
       };
-      const unresolvedMessageKeys = new Set();
+      const unresolvedMessageSignatures = new Map();
+      const unresolvedProviderMessageAnchors = new Map();
       const unresolvedTurnOwnerShells = new Set();
       const turnOwnerShellCleanObservationCounts = new Map();
       const provenAbsentProviderOrdinals = new Set();
@@ -1175,6 +1176,18 @@ export class ChatGPTController {
           }
         }
       };
+      const unresolvedMessageRecord = (message) => ({
+        providerMessageId: message.providerMessageId,
+        providerTurnIndex: message.providerTurnIndex,
+        providerTurnPartIndex: message.providerTurnPartIndex,
+        role: message.role
+      });
+      const unresolvedMessageAnchor = (message) => Number.isSafeInteger(message.providerTurnIndex) &&
+          Number.isSafeInteger(message.providerTurnPartIndex)
+        ? 'position:' + message.providerTurnIndex + ':' + message.providerTurnPartIndex
+        : message.providerMessageId
+          ? 'id:' + message.providerMessageId
+          : 'unpositioned';
       const readMessages = () => {
         observeTurnOwnerShells();
         const records = Array.from(document.querySelectorAll(messageSelector))
@@ -1222,25 +1235,47 @@ export class ChatGPTController {
               text: message.text
             };
           });
-        const resolved = [];
+        const providerMessageIdCounts = new Map();
+        const messageAnchorCounts = new Map();
         for (const message of positioned) {
-          const positionKey = Number.isSafeInteger(message.providerTurnIndex) &&
-              Number.isSafeInteger(message.providerTurnPartIndex)
-            ? 'position:' + message.providerTurnIndex + ':' + message.providerTurnPartIndex
-            : null;
-          const messageKey = message.providerMessageId
-            ? 'id:' + message.providerMessageId
-            : positionKey
-              ? 'idless-empty:' + positionKey
-              : null;
-          if (typeof message.text !== 'string' || !message.text.trim().length) {
-            unresolvedMessageKeys.add(messageKey || 'unpositioned');
+          if (message.providerMessageId) {
+            providerMessageIdCounts.set(
+              message.providerMessageId,
+              (providerMessageIdCounts.get(message.providerMessageId) || 0) + 1
+            );
+          }
+          const anchor = unresolvedMessageAnchor(message);
+          messageAnchorCounts.set(anchor, (messageAnchorCounts.get(anchor) || 0) + 1);
+        }
+        for (const message of positioned) {
+          const anchor = unresolvedMessageAnchor(message);
+          const signature = JSON.stringify(unresolvedMessageRecord(message));
+          const unique = messageAnchorCounts.get(anchor) === 1 && (
+            !message.providerMessageId || providerMessageIdCounts.get(message.providerMessageId) === 1
+          );
+          const empty = typeof message.text !== 'string' || !message.text.trim().length;
+          if (anchor === 'unpositioned') {
+            if (empty) unresolvedMessageSignatures.set(anchor, signature);
             continue;
           }
-          if (message.providerMessageId) unresolvedMessageKeys.delete(messageKey);
-          resolved.push(message);
+          if (!unique) continue;
+          const priorAnchor = message.providerMessageId
+            ? unresolvedProviderMessageAnchors.get(message.providerMessageId)
+            : null;
+          if (priorAnchor && priorAnchor !== anchor) mappedInputInvalid = true;
+          const priorSignature = unresolvedMessageSignatures.get(anchor);
+          if (priorSignature && priorSignature !== signature) mappedInputInvalid = true;
+          if (empty) {
+            if (!priorSignature) unresolvedMessageSignatures.set(anchor, signature);
+            if (message.providerMessageId && !priorAnchor) {
+              unresolvedProviderMessageAnchors.set(message.providerMessageId, anchor);
+            }
+          }
         }
-        return resolved;
+        // Keep empty records inside the capture walk so their provider identity,
+        // position, and ordering remain evidence-bearing. They are filtered only
+        // from the published raw turns after the capture is proven partial.
+        return positioned;
       };
       const messageNodes = () => Array.from(document.querySelectorAll(messageSelector));
       const messageNodeForProviderId = (providerMessageId) => messageNodes()
@@ -1291,12 +1326,52 @@ export class ChatGPTController {
         }
         return keys;
       };
+      const orderedCaptureStructure = () => {
+        if (!transcript.every(hasProviderPosition)) return null;
+        const turns = [...transcript];
+        const positions = new Set(turns.map(providerPositionKey));
+        for (const signature of unresolvedMessageSignatures.values()) {
+          let unresolved;
+          try {
+            unresolved = JSON.parse(signature);
+          } catch {
+            return null;
+          }
+          if (!hasProviderPosition(unresolved)) return null;
+          const { providerTurnIndex, providerTurnPartIndex } = unresolved;
+          const positionKey = providerTurnIndex + ':' + providerTurnPartIndex;
+          if (positions.has(positionKey)) continue;
+          positions.add(positionKey);
+          turns.push({ providerTurnIndex, providerTurnPartIndex });
+        }
+        return turns.sort(compareProviderPosition);
+      };
       const sameTurn = (left, right) => {
         if (token(left) !== token(right)) return false;
         return left.providerTurnIndex === right.providerTurnIndex &&
           left.providerTurnPartIndex === right.providerTurnPartIndex &&
           left.providerMessageId === right.providerMessageId &&
           left.role === right.role && left.text === right.text;
+      };
+      const isExactUnavailableTextHydration = (turn) => {
+        if (
+          !hasProviderPosition(turn) ||
+          !turn.providerMessageId ||
+          typeof turn.text !== 'string' ||
+          !turn.text.trim().length
+        ) return false;
+        const anchor = unresolvedMessageAnchor(turn);
+        return unresolvedMessageSignatures.get(anchor) === JSON.stringify(unresolvedMessageRecord(turn)) &&
+          unresolvedProviderMessageAnchors.get(turn.providerMessageId) === anchor;
+      };
+      const acceptUnavailableTextHydrations = (window) => {
+        for (const turn of window) {
+          if (!isExactUnavailableTextHydration(turn)) continue;
+          if (!transcript.some((candidate) => sameTurn(candidate, turn))) continue;
+          const anchor = unresolvedMessageAnchor(turn);
+          unresolvedMessageSignatures.delete(anchor);
+          unresolvedProviderMessageAnchors.delete(turn.providerMessageId);
+        }
       };
       const sameSlice = (left, leftStart, right, rightStart, length) => {
         for (let index = 0; index < length; index += 1) {
@@ -1348,6 +1423,10 @@ export class ChatGPTController {
       const providerOwnerObservationSignatures = new Map();
       const providerOwnerObservationCounts = new Map();
       const unsettledProviderOwners = new Set();
+      const hasUnresolvedStructuralState = () => mappedInputInvalid ||
+        unresolvedTurnOwnerShells.size > 0 ||
+        unsettledProviderPositions.size > 0 ||
+        unsettledProviderOwners.size > 0;
       const providerOwnerGroups = (window) => {
         const groups = new Map();
         for (const turn of window) {
@@ -1487,6 +1566,7 @@ export class ChatGPTController {
             unsettledProviderPositions.add(positionKey);
           }
         }
+        acceptUnavailableTextHydrations(window);
         return true;
       };
       const mergeWindow = (window, direction, { allowTextRefresh = false } = {}) => {
@@ -1555,7 +1635,11 @@ export class ChatGPTController {
             windowProviderPositions.set(positionKey, turn);
             const priorPosition = providerPositionTurns.get(positionKey);
             if (priorPosition && !sameTurn(priorPosition, turn)) {
+              const exactUnavailableTextHydration =
+                !String(priorPosition.text || '').trim().length &&
+                isExactUnavailableTextHydration(turn);
               const textRefresh = (
+                exactUnavailableTextHydration ||
                 allowTextRefresh ||
                 !lockedProviderPositions.has(positionKey) ||
                 (providerPositionObservationCounts.get(positionKey) || 0) < providerPositionStabilityObservations
@@ -1729,6 +1813,7 @@ export class ChatGPTController {
 
       const merge = (window, direction, options = {}) => {
         const result = mergeWindow(window, direction, options);
+        if (result.ok) acceptUnavailableTextHydrations(window);
         return { ...result, observedWindow: window };
       };
       const visibleWindowHasUnsettledProviderState = (window) => window.some((turn) => {
@@ -1838,7 +1923,7 @@ export class ChatGPTController {
         const generationActiveAfter = generationIsActive();
         return {
           status: 'partial',
-          reason: mappedInputInvalid
+          reason: mappedInputInvalid || unresolvedTurnOwnerShells.size > 0
             ? 'compatibility_drift'
             : generationActiveBefore || generationActiveAfter
             ? 'conversation_generation_active'
@@ -2425,23 +2510,13 @@ export class ChatGPTController {
         topBoundary = false;
         reason = reason || 'conversation_top_not_reached';
       }
-      if (!reason && unresolvedMessageKeys.size > 0) {
-        reason = 'compatibility_drift';
-      }
-      if (!reason && unresolvedTurnOwnerShells.size > 0) {
-        reason = 'compatibility_drift';
-      }
-      if (!reason && unsettledProviderPositions.size > 0) {
-        reason = 'compatibility_drift';
-      }
-      if (!reason && unsettledProviderOwners.size > 0) {
-        reason = 'compatibility_drift';
-      }
-      if (!reason && transcript.every(hasProviderPosition)) {
-        let providerPositionsComplete = startsAtProvenProviderBoundary(transcript[0]);
-        for (let index = 1; providerPositionsComplete && index < transcript.length; index += 1) {
-          const previous = transcript[index - 1];
-          const turn = transcript[index];
+      if (!reason && hasUnresolvedStructuralState()) reason = 'compatibility_drift';
+      const captureStructure = !reason ? orderedCaptureStructure() : null;
+      if (!reason && captureStructure) {
+        let providerPositionsComplete = startsAtProvenProviderBoundary(captureStructure[0]);
+        for (let index = 1; providerPositionsComplete && index < captureStructure.length; index += 1) {
+          const previous = captureStructure[index - 1];
+          const turn = captureStructure[index];
           if (!followsProviderPosition(previous, turn)) {
             providerPositionsComplete = false;
           }
@@ -2452,26 +2527,33 @@ export class ChatGPTController {
       } else if (!reason) {
         reason = 'compatibility_drift';
       }
+      if (!reason && unresolvedMessageSignatures.size > 0) reason = 'conversation_message_text_unavailable';
       if (!reason && (!topBoundary || !bottomBoundary)) {
         reason = !topBoundary ? 'conversation_top_not_reached' : 'conversation_scroll_stalled';
       }
       const generationActiveAfter = generationIsActive();
       if (generationActiveBefore || generationActiveAfter) reason = 'conversation_generation_active';
-      const rawTurns = transcript.map((turn, ordinal) => ({
-        ordinal,
-        providerMessageId: turn.providerMessageId,
-        role: turn.role,
-        text: turn.text
-      }));
+      const rawTurns = transcript
+        .filter((turn) => typeof turn.text === 'string' && turn.text.trim().length > 0)
+        .map((turn, ordinal) => ({
+          ordinal,
+          providerMessageId: turn.providerMessageId,
+          role: turn.role,
+          text: turn.text
+        }));
+      const publishedByteCount = rawTurns.reduce((total, turn) => total + turnBytes(turn), 0);
       const evidence = {
         topBoundary,
         bottomBoundary,
-        orderedWindowStitching: reason !== 'ambiguous_message_overlap' && reason !== 'compatibility_drift',
+        orderedWindowStitching: ![
+          'ambiguous_message_overlap',
+          'compatibility_drift'
+        ].includes(reason),
         scrollPasses,
         windowCount: Math.max(1, windowCount),
         messageCount: rawTurns.length,
         providerIdCount: rawTurns.filter((turn) => turn.providerMessageId !== null).length,
-        byteCount
+        byteCount: publishedByteCount
       };
       const captureWindow = reason
         ? { status: 'partial', reason, rawTurns, evidence }

@@ -308,6 +308,7 @@ function slidingConversationPage(messages, {
   initialStart = 4,
   anchorScroll = true,
   providerIds = true,
+  providerIdForMessage = (_message, index) => `sliding-${index}`,
   providerOrdinals = true,
   providerOrdinalForMessage = (_message, index) => index + 1,
   turnOwnerForMessage = null,
@@ -366,7 +367,9 @@ function slidingConversationPage(messages, {
         },
         getAttribute(name) {
           if (name === 'data-message-author-role') return message.role;
-          if (name === 'data-message-id') return providerIds ? `sliding-${index}` : null;
+          if (name === 'data-message-id') return providerIds
+            ? providerIdForMessage(message, index, visibleStart)
+            : null;
           if (name === 'data-testid') {
             const ordinal = providerOrdinalForMessage(message, index, visibleStart);
             return providerOrdinals && ordinal !== null && ordinal !== undefined
@@ -4369,7 +4372,7 @@ test('chatgpt-controller: captureConversation preserves consecutive messages own
   })));
 });
 
-test('chatgpt-controller: empty messages within a compound provider turn remain partial', async (t) => {
+test('chatgpt-controller: empty mapped messages remain partial without reporting compatibility drift', async (t) => {
   for (const emptyIndex of [1, 2]) {
     await t.test(emptyIndex === 1 ? 'leading compound part' : 'trailing compound part', async () => {
       const sharedTurnOwner = {
@@ -4391,7 +4394,101 @@ test('chatgpt-controller: empty messages within a compound provider turn remain 
         initialStart: 0,
         providerOrdinalForMessage: (_message, index) => index <= 1 ? index + 1 : index,
         turnOwnerForMessage: (_message, index) => index === 1 || index === 2 ? sharedTurnOwner : null,
-        textForMessage: (message, index) => index === emptyIndex ? '' : message.text
+        childNodesForMessage: (_message, index) => index === emptyIndex
+          ? [{
+              nodeType: 1,
+              tagName: 'IMG',
+              childNodes: [],
+              hidden: false,
+              getAttribute(name) {
+                return name === 'alt' ? 'Changing image metadata is not transcript text' : null;
+              }
+            }]
+          : undefined
+      });
+      const controller = new ChatGPTController({ page, selectors: {} });
+
+      const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+      assert.equal(capture.status, 'partial');
+      assert.equal(capture.reason, 'conversation_message_text_unavailable');
+      assert.equal(capture.evidence.orderedWindowStitching, true);
+      assert.equal(capture.rawTurns.some(({ text }) => text.length === 0), false);
+    });
+  }
+});
+
+test('chatgpt-controller: an all-image mapped window reports unavailable text instead of missing messages', async () => {
+  const page = slidingConversationPage([
+    { role: 'user', text: 'Layout fallback must not become transcript evidence' }
+  ], {
+    windowSize: 1,
+    initialStart: 0,
+    childNodesForMessage: () => [{
+      nodeType: 1,
+      tagName: 'IMG',
+      childNodes: [],
+      hidden: false,
+      getAttribute(name) {
+        return name === 'alt' ? 'Changing image metadata is not transcript text' : null;
+      }
+    }]
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+  assert.deepEqual(capture.rawTurns, []);
+});
+
+test('chatgpt-controller: image-only input without provider positions remains compatibility drift', async () => {
+  const page = slidingConversationPage([
+    { role: 'user', text: 'Layout fallback must not become transcript evidence' }
+  ], {
+    windowSize: 1,
+    initialStart: 0,
+    providerOrdinals: false,
+    childNodesForMessage: () => [{
+      nodeType: 1,
+      tagName: 'IMG',
+      childNodes: [],
+      hidden: false,
+      getAttribute() { return null; }
+    }]
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'compatibility_drift');
+  assert.equal(capture.evidence.orderedWindowStitching, false);
+});
+
+test('chatgpt-controller: empty mapped messages cannot hide duplicate or reordered provider structure', async (t) => {
+  const cases = [
+    ['duplicate provider id', (_message, index) => index === 1 || index === 2 ? 'duplicate-id' : `message-${index}`, (_message, index) => index + 1],
+    ['duplicate provider position', (_message, index) => `message-${index}`, (_message, index) => index === 2 ? 2 : index + 1],
+    ['duplicate provider id and position', (_message, index) => index === 1 || index === 2 ? 'duplicate-id' : `message-${index}`, (_message, index) => index === 2 ? 2 : index + 1],
+    ['reordered provider position', (_message, index) => `message-${index}`, (_message, index) => index === 1 ? 3 : index === 2 ? 2 : index + 1]
+  ];
+  for (const [name, providerIdForMessage, providerOrdinalForMessage] of cases) {
+    await t.test(name, async () => {
+      const page = slidingConversationPage([
+        { role: 'user', text: 'Opening prompt' },
+        { role: 'assistant', text: 'Image-only turn' },
+        { role: 'user', text: 'Follow-up prompt' },
+        { role: 'assistant', text: 'Final reply' }
+      ], {
+        windowSize: 4,
+        initialStart: 0,
+        providerIdForMessage,
+        providerOrdinalForMessage,
+        childNodesForMessage: (_message, index) => index === 1
+          ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+          : undefined
       });
       const controller = new ChatGPTController({ page, selectors: {} });
 
@@ -4399,10 +4496,158 @@ test('chatgpt-controller: empty messages within a compound provider turn remain 
 
       assert.equal(capture.status, 'partial');
       assert.equal(capture.reason, 'compatibility_drift');
-      assert.equal(capture.evidence.orderedWindowStitching, false);
-      assert.equal(capture.rawTurns.some(({ text }) => text.length === 0), false);
     });
   }
+});
+
+test('chatgpt-controller: an empty mapped position cannot hydrate under a different provider id', async () => {
+  let emptyTurnObservations = 0;
+  const page = slidingConversationPage([
+    { role: 'user', text: 'Opening prompt' },
+    { role: 'assistant', text: 'Hydrated visual reply' },
+    { role: 'user', text: 'Follow-up prompt' },
+    { role: 'assistant', text: 'Final reply' }
+  ], {
+    windowSize: 4,
+    initialStart: 0,
+    providerIdForMessage: (_message, index) => {
+      if (index !== 1) return `message-${index}`;
+      emptyTurnObservations += 1;
+      return emptyTurnObservations === 1 ? 'image-before-hydration' : 'image-after-hydration';
+    },
+    childNodesForMessage: (message, index) => index !== 1
+      ? undefined
+      : emptyTurnObservations === 0
+        ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+        : [{ nodeType: 3, nodeValue: message.text }]
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.ok(emptyTurnObservations > 1);
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'compatibility_drift');
+});
+
+test('chatgpt-controller: empty mapped fingerprints clear only after exact identified hydration', async (t) => {
+  await t.test('exact hydration completes', async () => {
+    let imageObservations = 0;
+    const messages = [
+      { role: 'user', text: 'Opening prompt' },
+      { role: 'assistant', text: 'Hydrated visual reply' },
+      { role: 'user', text: 'Follow-up prompt' },
+      { role: 'assistant', text: 'Final reply' }
+    ];
+    const page = slidingConversationPage(messages, {
+      windowSize: 4,
+      initialStart: 0,
+      providerIdForMessage: (_message, index) => {
+        if (index === 1) imageObservations += 1;
+        return `message-${index}`;
+      },
+      childNodesForMessage: (message, index) => index !== 1
+        ? undefined
+        : imageObservations === 0
+          ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+          : [{ nodeType: 3, nodeValue: message.text }]
+    });
+    const controller = new ChatGPTController({ page, selectors: {} });
+
+    const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+    assert.equal(capture.status, 'complete');
+    assert.deepEqual(capture.rawTurns.map(({ text }) => text), messages.map(({ text }) => text));
+  });
+
+  await t.test('exact hydration completes after the empty position locks', async () => {
+    let imageObservations = 0;
+    const messages = [
+      { role: 'user', text: 'Opening prompt' },
+      { role: 'assistant', text: 'Late hydrated visual reply' },
+      { role: 'user', text: 'Follow-up prompt' },
+      { role: 'assistant', text: 'Final reply' }
+    ];
+    const page = slidingConversationPage(messages, {
+      windowSize: 4,
+      initialStart: 0,
+      providerIdForMessage: (_message, index) => {
+        if (index === 1) imageObservations += 1;
+        return `message-${index}`;
+      },
+      childNodesForMessage: (message, index) => index !== 1
+        ? undefined
+        : imageObservations <= 10
+          ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+          : [{ nodeType: 3, nodeValue: message.text }]
+    });
+    const controller = new ChatGPTController({ page, selectors: {} });
+
+    const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+    assert.ok(imageObservations > 10);
+    assert.equal(capture.status, 'complete');
+    assert.deepEqual(capture.rawTurns.map(({ text }) => text), messages.map(({ text }) => text));
+  });
+
+  await t.test('changed provider position remains drift', async () => {
+    let imageObservations = 0;
+    const page = slidingConversationPage([
+      { role: 'user', text: 'Opening prompt' },
+      { role: 'assistant', text: 'Hydrated visual reply' },
+      { role: 'user', text: 'Follow-up prompt' },
+      { role: 'assistant', text: 'Final reply' }
+    ], {
+      windowSize: 4,
+      initialStart: 0,
+      providerIdForMessage: (_message, index) => {
+        if (index === 1) imageObservations += 1;
+        return `message-${index}`;
+      },
+      providerOrdinalForMessage: (_message, index) => index === 1
+        ? imageObservations === 0 ? 2 : 3
+        : index === 0 ? 1 : index + 2,
+      childNodesForMessage: (message, index) => index !== 1
+        ? undefined
+        : imageObservations === 0
+          ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+          : [{ nodeType: 3, nodeValue: message.text }]
+    });
+    const controller = new ChatGPTController({ page, selectors: {} });
+
+    const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+    assert.equal(capture.status, 'partial');
+    assert.equal(capture.reason, 'compatibility_drift');
+  });
+
+  await t.test('identified unmount stays sticky partial', async () => {
+    let imageObservations = 0;
+    const page = slidingConversationPage([
+      { role: 'user', text: 'Opening prompt' },
+      { role: 'assistant', text: 'Image-only reply' },
+      { role: 'user', text: 'Follow-up prompt' },
+      { role: 'assistant', text: 'Final reply' }
+    ], {
+      windowSize: 4,
+      initialStart: 0,
+      providerIdForMessage: (_message, index) => {
+        if (index === 1) imageObservations += 1;
+        return `message-${index}`;
+      },
+      visibleIndicesForTop: () => imageObservations === 0 ? [0, 1, 2, 3] : [0, 2, 3],
+      childNodesForMessage: (_message, index) => index === 1
+        ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+        : undefined
+    });
+    const controller = new ChatGPTController({ page, selectors: {} });
+
+    const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+    assert.equal(capture.status, 'partial');
+    assert.equal(capture.reason, 'conversation_message_text_unavailable');
+    assert.equal(capture.rawTurns.some(({ providerMessageId }) => providerMessageId === 'message-1'), false);
+  });
 });
 
 test('chatgpt-controller: a newly reached compound part settles before its provider position locks', async () => {
@@ -5376,7 +5621,7 @@ test('chatgpt-controller: review regression excludes CSS-hidden transcript desce
   assert.deepEqual(capture.rawTurns.map(({ text }) => text), ['Visible prompt', 'Visible reply']);
 });
 
-test('chatgpt-controller: review regression rejects an id-less empty compound part that transiently unmounts', async () => {
+test('chatgpt-controller: an id-less empty compound part stays partial after it transiently unmounts', async () => {
   let trailingPartObservations = 0;
   const sharedTurnOwner = {
     getAttribute(name) {
@@ -5414,8 +5659,8 @@ test('chatgpt-controller: review regression rejects an id-less empty compound pa
 
   assert.ok(trailingPartObservations > 1, 'the populated part must be observed before and after the leading part unmounts');
   assert.equal(capture.status, 'partial');
-  assert.equal(capture.reason, 'compatibility_drift');
-  assert.equal(capture.evidence.orderedWindowStitching, false);
+  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+  assert.equal(capture.evidence.orderedWindowStitching, true);
   assert.deepEqual(capture.rawTurns.map(({ providerMessageId, role, text }) => ({ providerMessageId, role, text })), [
     { providerMessageId: null, role: 'user', text: 'Opening prompt' },
     { providerMessageId: null, role: 'assistant', text: 'Only populated part of the shared turn' },
@@ -5484,6 +5729,9 @@ test('chatgpt-controller: review regression fails closed on a stable empty inter
     clientHeight: 240,
     initialStart: 0,
     providerOrdinalForMessage: (_message, index) => providerOrdinals[index],
+    childNodesForMessage: (_message, index) => index === 1
+      ? [{ nodeType: 1, tagName: 'IMG', childNodes: [], hidden: false, getAttribute() { return null; } }]
+      : undefined,
     rectangleForMessage: ({ offset, rowHeight }) => ({
       top: offset * rowHeight,
       bottom: (offset + 1) * rowHeight,

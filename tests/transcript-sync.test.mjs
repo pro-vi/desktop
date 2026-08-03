@@ -325,6 +325,23 @@ test('transcript sync: partial capture is durable and never publishes a snapshot
   assert.equal(putCalls, 0);
 });
 
+test('transcript sync: unavailable message text stays partial and preserves the prior complete snapshot', async (t) => {
+  const captures = [
+    completeCapture(),
+    partialCapture('conversation_message_text_unavailable')
+  ];
+  const { service } = await realParts(t, 'message-text-unavailable', async () => captures.shift());
+  const source = await service.track(trackInput());
+
+  const complete = await service.sync(source.id);
+  const partial = await service.sync(source.id);
+
+  assert.equal(partial.status, 'partial');
+  assert.equal(partial.outcome.reason, 'conversation_message_text_unavailable');
+  assert.equal(partial.source.latestLiveSnapshot.hash, complete.outcome.snapshot.hash);
+  assert.equal(partial.source.latestLiveSnapshot.contentHash, complete.outcome.snapshot.contentHash);
+});
+
 test('transcript sync: provider and capture failures become closed content-free outcomes', async (t) => {
   const failures = [
     [Object.assign(new Error('private words'), { data: { kind: 'login', excerpt: 'private words' } }), 'login'],

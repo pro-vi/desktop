@@ -293,6 +293,7 @@ test('transcript contract: legacy projection exhaustively closes structured reas
     ['conversation_generation_active', 'conversation_capture_invalid'],
     ['conversation_capture_limit_reached', 'conversation_scroll_limit_reached'],
     ['max_capture_bytes', 'max_chars'],
+    ['conversation_message_text_unavailable', 'conversation_capture_invalid'],
     ['ambiguous_message_overlap', 'conversation_capture_invalid'],
     ['compatibility_drift', 'conversation_capture_invalid']
   ]);
@@ -305,7 +306,11 @@ test('transcript contract: legacy projection exhaustively closes structured reas
       evidence: evidence([{ ordinal: 0, providerMessageId: 'm-1', role: 'user', text: 'Visible' }], {
         topBoundary: false,
         bottomBoundary: false,
-        orderedWindowStitching: reason !== 'ambiguous_message_overlap' && reason !== 'compatibility_drift'
+        orderedWindowStitching: ![
+          'conversation_message_text_unavailable',
+          'ambiguous_message_overlap',
+          'compatibility_drift'
+        ].includes(reason)
       })
     };
     const capture = {

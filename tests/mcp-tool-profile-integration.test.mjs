@@ -118,6 +118,24 @@ function transcriptSyncFixtureForSource(sourceId) {
   return response;
 }
 
+function transcriptPartialSyncFixture(sourceId) {
+  const source = transcriptSourceFixture();
+  const attempt = {
+    schemaVersion: 1,
+    id: 'attempt-image-only',
+    sourceId,
+    trigger: 'manual',
+    startedAt: '2026-07-30T12:00:00.000Z',
+    finishedAt: '2026-07-30T12:00:01.000Z',
+    outcome: { kind: 'partial', reason: 'conversation_message_text_unavailable' }
+  };
+  source.id = sourceId;
+  source.state = 'partial';
+  source.lastAttempt = attempt;
+  source.updatedAt = attempt.finishedAt;
+  return { source, attempt, status: 'partial', outcome: attempt.outcome };
+}
+
 function transcriptPageFixture() {
   const identity = {
     provider: 'chatgpt',
@@ -689,7 +707,11 @@ test('mcp transcript tools forward authenticated HTTP and return only safe metad
     const body = req.method === 'POST' ? await readJsonBody(req) : undefined;
     requests.push({ method: req.method, path: req.url, authorization: req.headers.authorization, body });
     if (req.url === '/transcripts/track') return sendJson(res, transcriptSourceFixture());
-    if (req.url === '/transcripts/sync') return sendJson(res, transcriptSyncFixture());
+    if (req.url === '/transcripts/sync') {
+      return sendJson(res, body.sourceId === 'source-image-only'
+        ? transcriptPartialSyncFixture(body.sourceId)
+        : transcriptSyncFixture());
+    }
     if (req.url === '/transcripts/list') return sendJson(res, [transcriptSourceFixture({ complete: true })]);
     if (req.url === '/transcripts/get') return sendJson(res, transcriptPageFixture());
     if (req.url === '/transcripts/forget') {
@@ -727,6 +749,10 @@ test('mcp transcript tools forward authenticated HTTP and return only safe metad
     results.sync = await client.callTool({
       name: 'agentify_sync_transcript',
       arguments: { sourceId: 'source-1' }
+    });
+    results.partialSync = await client.callTool({
+      name: 'agentify_sync_transcript',
+      arguments: { sourceId: 'source-image-only' }
     });
     results.list = await client.callTool({ name: 'agentify_list_transcripts', arguments: {} });
     results.get = await client.callTool({
@@ -788,6 +814,12 @@ test('mcp transcript tools forward authenticated HTTP and return only safe metad
       body: { sourceId: 'source-1' }
     },
     {
+      method: 'POST',
+      path: '/transcripts/sync',
+      authorization: `Bearer ${token}`,
+      body: { sourceId: 'source-image-only' }
+    },
+    {
       method: 'GET',
       path: '/transcripts/list',
       authorization: `Bearer ${token}`,
@@ -815,6 +847,11 @@ test('mcp transcript tools forward authenticated HTTP and return only safe metad
   ]);
   assert.equal(results.track.content[0].text, 'sourceId=source-1 status=tracked');
   assert.equal(results.sync.content[0].text, 'sourceId=source-1 status=complete changed=true');
+  assert.equal(results.partialSync.content[0].text, 'sourceId=source-image-only status=partial');
+  assert.deepEqual(results.partialSync.structuredContent.outcome, {
+    kind: 'partial',
+    reason: 'conversation_message_text_unavailable'
+  });
   assert.equal(results.list.content[0].text, 'count=1');
   assert.equal(results.get.content[0].text, transcriptPageFixture().text);
   assert.deepEqual(results.get.structuredContent.citations, transcriptPageFixture().citations);

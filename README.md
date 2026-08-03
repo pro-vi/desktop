@@ -713,6 +713,7 @@ The supported product surface is the local browser-control + MCP workflow descri
 - **Perplexity selectors:** Perplexity support is best-effort and may require selector overrides in `~/.agentify-desktop/selectors.override.json` if UI changes.
 - **Gemini selectors:** Gemini support is best-effort and may require selector overrides in `~/.agentify-desktop/selectors.override.json` if UI changes.
 - **Completion detection:** waiting for “stop generating” to disappear + text stability works well, but can mis-detect on very long outputs or intermittent streaming pauses.
+- **Image-only transcript turns:** transcript capture never invents text from image pixels or changing image metadata. An otherwise structurally valid mapped message with no text makes sync partial (`conversation_message_text_unavailable`), so it cannot create or advance a complete tracked snapshot. Malformed, duplicate, or reordered provider structure still reports compatibility drift.
 - **Image downloads:** prefers `<img>` elements in the latest assistant message; some UI modes may render images via nonstandard elements.
 - **Parallelism model:** “tabs” are separate windows; they can run in parallel without stealing focus unless a human check is required.
 - **Security knobs:** default is loopback-only + bearer token; token rotation and shutdown are supported via MCP tools.

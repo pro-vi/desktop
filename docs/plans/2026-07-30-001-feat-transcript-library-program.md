@@ -81,6 +81,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   | 'conversation_generation_active'
 +   | 'conversation_capture_limit_reached'
 +   | 'max_capture_bytes'
++   | 'conversation_message_text_unavailable'
 +   | 'ambiguous_message_overlap'
 +   | 'compatibility_drift'
 +
@@ -88,6 +89,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   | { status: 'complete'; conversationUrl: CanonicalConversationUrl; capturedAt: ISODateTime; rawTurns: RawTranscriptTurn[]; evidence: CaptureEvidence }
 +   | { status: 'partial'; reason: CaptureReason; conversationUrl: CanonicalConversationUrl | null; capturedAt: ISODateTime; rawTurns: RawTranscriptTurn[]; evidence: CaptureEvidence }
     // discharges O1: completeness and its failures are one closed discriminated union
+    // contract: a structurally valid served mapped message with no transcript text remains partial without being classified as provider compatibility drift
 +
 + parseConversationCapture(value: unknown): ConversationCapture
 + normalizeLiveCapture(capture: Extract<ConversationCapture, {status:'complete'}>): NormalizedTranscript

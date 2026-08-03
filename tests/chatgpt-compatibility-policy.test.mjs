@@ -157,65 +157,72 @@ test('compatibility policy: captureConversation fails closed on unresolved trans
   assert.equal(observations.find(({ kind }) => kind === 'apparatus').verdict, 'incomplete');
 });
 
-test('compatibility policy: legitimate partial transcript capture stays partial without marking compatibility drift', async (t) => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-policy-partial-transcript-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
-  const store = createCompatibilityStore(stateDir, {
-    contractHash: profile.contractHash,
-    capabilityIds: profile.capabilities.map(({ id }) => id)
-  });
-  await store.load();
-  const rawTurns = [
-    { ordinal: 0, providerMessageId: 'message-user', role: 'user', text: 'Prompt' },
-    { ordinal: 1, providerMessageId: 'message-assistant', role: 'assistant', text: 'Reply in progress' }
-  ];
-  const partialCapture = {
-    status: 'partial',
-    reason: 'conversation_generation_active',
-    rawTurns,
-    evidence: {
-      topBoundary: true,
-      bottomBoundary: true,
-      orderedWindowStitching: true,
-      scrollPasses: 2,
-      windowCount: 1,
-      messageCount: rawTurns.length,
-      providerIdCount: rawTurns.length,
-      byteCount: rawTurns.reduce((total, turn) =>
-        total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0)
-    }
-  };
-  let evaluationCount = 0;
-  const page = {
-    async evaluate() {
-      evaluationCount += 1;
-      return evaluationCount === 1 ? resolvedRaw('assistant-message') : partialCapture;
-    },
-    async getUrl() {
-      return 'https://chatgpt.com/c/compatibility-partial';
-    }
-  };
-  const bridge = createProviderCompatibilityBridge({
-    vendorId: 'chatgpt', vendorName: 'ChatGPT', selectors, profile,
-    onCompatibilityObservation: async (row) => await store.record(row)
-  });
-  const controller = new ChatGPTController({
-    page,
-    selectors,
-    vendorId: 'chatgpt',
-    vendorName: 'ChatGPT',
-    ...bridge
-  });
+test('compatibility policy: expected partial transcript reasons do not mark compatibility drift', async (t) => {
+  for (const [reason, orderedWindowStitching] of [
+    ['conversation_generation_active', true],
+    ['conversation_message_text_unavailable', false]
+  ]) {
+    await t.test(reason, async (t) => {
+      const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-policy-partial-transcript-'));
+      t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+      const store = createCompatibilityStore(stateDir, {
+        contractHash: profile.contractHash,
+        capabilityIds: profile.capabilities.map(({ id }) => id)
+      });
+      await store.load();
+      const rawTurns = [
+        { ordinal: 0, providerMessageId: 'message-user', role: 'user', text: 'Prompt' },
+        { ordinal: 1, providerMessageId: 'message-assistant', role: 'assistant', text: 'Visible reply' }
+      ];
+      const partialCapture = {
+        status: 'partial',
+        reason,
+        rawTurns,
+        evidence: {
+          topBoundary: true,
+          bottomBoundary: true,
+          orderedWindowStitching,
+          scrollPasses: 2,
+          windowCount: 1,
+          messageCount: rawTurns.length,
+          providerIdCount: rawTurns.length,
+          byteCount: rawTurns.reduce((total, turn) =>
+            total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0)
+        }
+      };
+      let evaluationCount = 0;
+      const page = {
+        async evaluate() {
+          evaluationCount += 1;
+          return evaluationCount === 1 ? resolvedRaw('assistant-message') : partialCapture;
+        },
+        async getUrl() {
+          return 'https://chatgpt.com/c/compatibility-partial';
+        }
+      };
+      const bridge = createProviderCompatibilityBridge({
+        vendorId: 'chatgpt', vendorName: 'ChatGPT', selectors, profile,
+        onCompatibilityObservation: async (row) => await store.record(row)
+      });
+      const controller = new ChatGPTController({
+        page,
+        selectors,
+        vendorId: 'chatgpt',
+        vendorName: 'ChatGPT',
+        ...bridge
+      });
 
-  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+      const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
 
-  assert.equal(capture.status, 'partial');
-  assert.equal(capture.reason, 'conversation_generation_active');
-  assert.equal(evaluationCount, 2);
-  const state = store.getSnapshot();
-  assert.equal(state.capabilities.transcript.status, 'ok');
-  assert.equal(state.capabilities.transcript.reasonCode, 'postcondition-satisfied');
-  assert.equal(state.apparatus.verdict, 'ok');
+      assert.equal(capture.status, 'partial');
+      assert.equal(capture.reason, reason);
+      assert.equal(evaluationCount, 2);
+      const state = store.getSnapshot();
+      assert.equal(state.capabilities.transcript.status, 'ok');
+      assert.equal(state.capabilities.transcript.reasonCode, 'postcondition-satisfied');
+      assert.equal(state.apparatus.verdict, 'ok');
+    });
+  }
 });
 
 test('compatibility policy: production observations parse and persist exactly once through the real store', async () => {

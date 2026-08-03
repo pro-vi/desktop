@@ -21,6 +21,7 @@ import {
   sameConversationIdentity
 } from './conversation-identity.mjs';
 import {
+  TRANSCRIPT_CAPTURE_REASONS,
   TRANSCRIPT_PROVIDER_MESSAGE_ID_PATTERN,
   parseTranscriptTurn
 } from './transcript-contract.mjs';
@@ -151,17 +152,7 @@ const transcriptOutcomeSchema = z.discriminatedUnion('kind', [
   }).strict(),
   z.object({
     kind: z.literal('partial'),
-    reason: z.enum([
-      'conversation_messages_not_found',
-      'conversation_top_not_reached',
-      'conversation_scroll_stalled',
-      'conversation_capture_timeout',
-      'conversation_generation_active',
-      'conversation_capture_limit_reached',
-      'max_capture_bytes',
-      'ambiguous_message_overlap',
-      'compatibility_drift'
-    ])
+    reason: z.enum(TRANSCRIPT_CAPTURE_REASONS)
   }).strict(),
   z.object({
     kind: z.literal('failed'),

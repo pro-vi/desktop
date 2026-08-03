@@ -71,6 +71,47 @@ After the F1–F44 adjudication, a separate read-only state-machine review execu
 | G10 | Adding import-capacity rows without a store schema migration would reject every V1 catalog at startup. | Store schema V2 loads one internally consistent V1 state tree, preserves identity/raw/snapshot evidence, nulls only an old-valid ill-formed optional title, and migrates nested rows together. Compact encoding preserves the old exact terminal-recovery byte budget without raising the 64 MiB ceiling. Within-ceiling suspended imports require a full preflight reservation. Legacy imports proven above 20,000 records become terminal read-only history (complete stays complete; every other state becomes partial); an exact same-archive/same-scope preflight can set that marker without touching another import, and Control Center offers neither Resume nor Reassign. A nested-version matrix proves both directions for import, record, and route rows. |
 | G11 | Controller quarantine could make a second direct route-verification port call throw `tab_busy` outside its closed outcome union. | The route verifier catches outer exclusive-entry failures as `failed/transport`; a direct repeated-verification test proves the port stays closed while raw controller work remains busy. |
 | G12 | HTTP, MCP, and Control Center error allowlists drifted, hiding import inspection and legacy-capacity failures behind generic errors. | `library-http-errors.mjs` is the shared HTTP/MCP status and safety authority; authenticated loopback and real MCP stdio tests preserve exact `catalog_import_inspection_failed` and `catalog_import_capacity_required` symbols, while the renderer allowlist displays the latter without private detail. |
+| G13 | The accepted F11 rule still treated F10's expected empty mapped message as `compatibility_drift`, and the resulting image-only limitation was absent from the README. | The capture contract gains `conversation_message_text_unavailable`; otherwise structurally valid empty mapped messages remain partial and cannot advance latest state, but the compatibility capability stays healthy. Malformed, duplicate, or reordered structure remains drift. The README states the limitation explicitly. |
+
+## F10/F11 follow-up adjudication
+
+Finding: An empty served message is correctly excluded from transcript evidence, but its partial result is incorrectly classified as `compatibility_drift` and the limitation is not documented.
+
+Observation at review: `unresolvedMessageKeys` was populated when a mapped message had no extracted text, and the terminal reason assignment mapped that set to `compatibility_drift`.
+
+Claimed consequence: A normal image-only assistant turn prevents a complete snapshot, marks the ChatGPT compatibility capability as failed, and makes the compatibility map appear drifted even though the extractor is following its declared no-fabrication rule.
+
+Reviewer-proposed remedy: Give empty mapped input its own partial reason and state the image-only limitation in README.
+
+Evidence: The production controller path and the existing empty compound-message test reproduce the reason. The transcript capability postcondition accepts every partial reason except `compatibility_drift`, so the false drift result follows directly and is common-path reachable.
+
+Fact status: CONFIRMED; common path for a conversation containing an image-only mapped message.
+
+Invariant: When an otherwise structurally valid served mapped message has no transcript text, capture must remain partial without inventing evidence, and that expected content limitation must not report a provider compatibility-map disagreement. Malformed, duplicate, or reordered provider structure must still report compatibility drift.
+
+Invariant status: Violated by the reason classification and by the missing operator documentation.
+
+Change relationship: INTRODUCED by the V0 structured capture contract and left exposed by the narrower F11 correction.
+
+Smallest complete fix: Carry one explicit partial reason through the Program, transcript contract, legacy projection, controller, MCP schema, persistence validation, focused compatibility tests, and README limitation.
+
+Fix class: COORDINATED; it extends an existing closed union without changing capture lifecycle or snapshot publication.
+
+Risk if deferred: Common image-containing conversations continue to report false compatibility drift and cannot be tracked, with no user-facing explanation.
+
+Risk if fixed now: Low; every closed-union consumer is enumerable and focused contract/controller/MCP tests can prove the propagation.
+
+Merge impact: BLOCK for the claim that all V0 ship blockers are resolved; the already-pushed series needs this follow-up before release.
+
+Disposition: ACCEPT.
+
+Action: Add `conversation_message_text_unavailable`, keep capture partial and latest state unchanged, ensure compatibility health stays green for structurally valid empty input, retain compatibility drift for structural conflicts, document the limitation, and run focused plus full gates.
+
+Resolution: Implemented. Capture retains empty mapped records internally so duplicate IDs, duplicate positions, reordering, changed identity, and changed position remain observable structural failures. It validates provider-position coverage over captured turns plus retained unresolved positions before classifying missing text. It publishes only text-bearing structured turns, classifies unresolved otherwise-valid text as `conversation_message_text_unavailable`, and clears that partial state only after exact identified hydration at the same provider position has been accepted, including hydration after the position-stability lock. All-image windows use the new reason instead of appearing to contain no messages; unmounted unresolved messages remain sticky partial evidence. `orderedWindowStitching` remains the derived structural result rather than being forced false by the content-only reason.
+
+Verification: Focused controller tests cover all-image windows, missing provider positions, duplicate and reordered structure, changed identity and position, immediate and post-lock exact hydration, identified and id-less unmounts, derived stitching evidence, and mixed structural-shell cases. Contract, compatibility-policy, sync, and real MCP stdio tests cover the closed reason end to end. The final full-suite, package, and packaged-process results are recorded in the handoff report.
+
+Draft reviewer response: Confirmed. The no-fabrication decision remains correct, but otherwise-valid empty mapped content is an expected capture limitation rather than compatibility drift. The new closed reason preserves the partial result, keeps compatibility health accurate, documents that image-only turns prevent complete tracking, and leaves structural disagreement on the drift path.
 
 ## Count
 
