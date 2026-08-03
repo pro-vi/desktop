@@ -52,6 +52,21 @@ async function removeOwnedEvidenceDirectory(evidenceDir) {
   }
 }
 
+function assertCleanPrivacyEvidence(privacy) {
+  assert.equal(privacy.transcript_bodies_absent, true);
+  assert.equal(privacy.raw_archive_paths_absent, true);
+  assert.equal(privacy.forbidden_markers_absent, true);
+  for (const observation of Object.values(privacy.observations)) {
+    assert.deepEqual(observation, {
+      fixture_boundary_observed: true,
+      rendered_text_absent: true,
+      captured_console_error_output_absent: true,
+      renderer_console_error_absent: true,
+      process_output_absent: true
+    });
+  }
+}
+
 test('visual proof captures the actual Electron renderer states and emits review-gated manifests', { timeout: 90_000 }, async (t) => {
   let evidenceDir = null;
   t.after(async () => {
@@ -76,6 +91,8 @@ test('visual proof captures the actual Electron renderer states and emits review
   assert.equal(record.schema, 'transcript-library-visual-proof-capture/v1');
   assert.equal(record.status, 'captured-awaiting-pixel-review');
   assert.equal(record.evidence_dir, evidenceDir);
+  assert.equal(record.privacy.transcript_bodies_absent, true);
+  assert.equal(record.privacy.raw_archive_paths_absent, true);
   assert.equal(record.privacy.forbidden_markers_absent, true);
   assert.equal(record.provenance.git.head, (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' })).stdout.trim());
   assert.equal(record.provenance.git.branch, (await execFileAsync('git', ['branch', '--show-current'], { cwd: repoDir, encoding: 'utf8' })).stdout.trim());
@@ -105,6 +122,8 @@ test('visual proof captures the actual Electron renderer states and emits review
     );
     assert.equal(capture.inspection.objective.privacyMarkersAbsent, true);
     assert.equal(capture.runtime.process_output_private_markers_absent, true);
+    assert.equal(capture.runtime.renderer_diagnostics_private_markers_absent, true);
+    assertCleanPrivacyEvidence(capture.privacy);
     await assertPrivateFile(capture.screenshot.path);
     const screenshot = await fs.readFile(capture.screenshot.path);
     assert.equal(screenshot.subarray(0, 8).equals(pngSignature), true);
@@ -164,8 +183,37 @@ test('visual proof captures the actual Electron renderer states and emits review
     assert.equal(manifest.inspection.summary_verdict, 'fail');
     assert.equal(manifest.ac_mapping.length, 1);
     assert.equal(manifest.ac_mapping[0].verdict, 'fail');
-    assert.equal(manifest.privacy.transcript_bodies_absent, true);
-    assert.equal(manifest.privacy.raw_archive_paths_absent, true);
-    assert.equal(manifest.privacy.forbidden_markers_absent, true);
+    assertCleanPrivacyEvidence(manifest.privacy);
   }
+});
+
+test('visual proof privacy verdicts fail when a boundary sentinel reaches rendered text or captured diagnostics', { timeout: 60_000 }, async () => {
+  const renderedLeak = await runRunner(['capture', '--privacy-probe', 'rendered-transcript-body']);
+  assert.equal(renderedLeak.output.status, 'privacy-probe-observed');
+  assert.equal(renderedLeak.output.verdict, 'fail');
+  assert.equal(renderedLeak.output.machine_verdict, 'fail');
+  assert.equal(renderedLeak.output.privacy.transcript_bodies_absent, false);
+  assert.equal(renderedLeak.output.privacy.raw_archive_paths_absent, true);
+  assert.equal(renderedLeak.output.privacy.observations.transcript_body.fixture_boundary_observed, true);
+  assert.equal(renderedLeak.output.privacy.observations.transcript_body.rendered_text_absent, false);
+  assert.equal(forbiddenMarkers.some((marker) => renderedLeak.raw.includes(marker)), false);
+
+  const diagnosticLeak = await runRunner(['capture', '--privacy-probe', 'diagnostic-archive-path']);
+  assert.equal(diagnosticLeak.output.status, 'privacy-probe-observed');
+  assert.equal(diagnosticLeak.output.verdict, 'fail');
+  assert.equal(diagnosticLeak.output.machine_verdict, 'fail');
+  assert.equal(diagnosticLeak.output.privacy.transcript_bodies_absent, true);
+  assert.equal(diagnosticLeak.output.privacy.raw_archive_paths_absent, false);
+  assert.equal(diagnosticLeak.output.privacy.observations.raw_archive_path.fixture_boundary_observed, true);
+  assert.equal(diagnosticLeak.output.privacy.observations.raw_archive_path.captured_console_error_output_absent, false);
+  assert.equal(diagnosticLeak.output.privacy.observations.raw_archive_path.renderer_console_error_absent, false);
+  assert.equal(forbiddenMarkers.some((marker) => diagnosticLeak.raw.includes(marker)), false);
+
+  const basenameLeak = await runRunner(['capture', '--privacy-probe', 'diagnostic-archive-basename']);
+  assert.equal(basenameLeak.output.verdict, 'fail');
+  assert.equal(basenameLeak.output.machine_verdict, 'fail');
+  assert.equal(basenameLeak.output.privacy.transcript_bodies_absent, true);
+  assert.equal(basenameLeak.output.privacy.raw_archive_paths_absent, false);
+  assert.equal(basenameLeak.output.privacy.observations.raw_archive_path.renderer_console_error_absent, false);
+  assert.equal(forbiddenMarkers.some((marker) => basenameLeak.raw.includes(marker)), false);
 });

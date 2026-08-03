@@ -18,10 +18,19 @@ const RUNTIME_PREFIX = 'agentify-transcript-library-visual-proof-runtime-';
 const PROFILE_SCOPE_ID = 'visual-proof-scope';
 const VIEWPORT = Object.freeze({ width: 720, height: 1800, device: 'desktop' });
 const CDP_TIMEOUT_MS = 10_000;
-const FORBIDDEN_PRIVATE_MARKERS = Object.freeze([
-  'VISUAL_PROOF_PRIVATE_TRANSCRIPT_SENTINEL',
-  'VISUAL_PROOF_PRIVATE_ARCHIVE_SENTINEL',
-  'PRIVATE-ARCHIVE-PATH.zip'
+const PRIVACY_SENTINELS = Object.freeze({
+  transcriptBody: 'VISUAL_PROOF_PRIVATE_TRANSCRIPT_SENTINEL',
+  rawArchivePath: '/private/VISUAL_PROOF_PRIVATE_ARCHIVE_SENTINEL/PRIVATE-ARCHIVE-PATH.zip'
+});
+const PRIVACY_MARKERS = Object.freeze({
+  transcriptBody: Object.freeze([PRIVACY_SENTINELS.transcriptBody]),
+  rawArchivePath: Object.freeze([PRIVACY_SENTINELS.rawArchivePath, 'PRIVATE-ARCHIVE-PATH.zip'])
+});
+const FORBIDDEN_PRIVATE_MARKERS = Object.freeze(Object.values(PRIVACY_MARKERS).flat());
+const PRIVACY_PROBES = new Set([
+  'rendered-transcript-body',
+  'diagnostic-archive-path',
+  'diagnostic-archive-basename'
 ]);
 const SAFE_VISUAL_PROOF_OUTPUT_ERROR_CODES = new Set([
   'visual_proof_failed',
@@ -45,6 +54,8 @@ const SAFE_VISUAL_PROOF_OUTPUT_ERROR_CODES = new Set([
   'visual_proof_reviewer_invalid',
   'visual_proof_review_note_invalid',
   'visual_proof_screenshot_stale',
+  'visual_proof_privacy_probe_invalid',
+  'visual_proof_privacy_fixture_missing',
   'cdp_connect_failed',
   'cdp_protocol_error',
   'cdp_closed',
@@ -162,6 +173,56 @@ function safeOutputError(error) {
   return SAFE_VISUAL_PROOF_OUTPUT_ERROR_CODES.has(code) ? code : 'visual_proof_failed';
 }
 
+function createSentinelObserver() {
+  const observed = {
+    transcriptBody: false,
+    rawArchivePath: false
+  };
+  const longestSentinel = Math.max(...FORBIDDEN_PRIVATE_MARKERS.map((value) => value.length));
+  let tail = '';
+  return Object.freeze({
+    observe(value) {
+      const text = `${tail}${String(value ?? '')}`;
+      for (const [kind, markers] of Object.entries(PRIVACY_MARKERS)) {
+        if (markers.some((marker) => text.includes(marker))) observed[kind] = true;
+      }
+      tail = text.slice(-(longestSentinel - 1));
+    },
+    absent(kind) {
+      return observed[kind] === false;
+    }
+  });
+}
+
+function derivePrivacyEvidence({ boundary, rendered, diagnostics, processOutput }) {
+  const observation = (kind) => {
+    const fixtureBoundaryObserved = boundary?.[kind] === true;
+    const renderedTextAbsent = rendered?.[kind] === true;
+    const rendererConsoleErrorAbsent = diagnostics.absent(kind);
+    const processOutputAbsent = processOutput.every((observer) => observer.absent(kind));
+    return Object.freeze({
+      fixture_boundary_observed: fixtureBoundaryObserved,
+      rendered_text_absent: renderedTextAbsent,
+      captured_console_error_output_absent: rendererConsoleErrorAbsent && processOutputAbsent,
+      renderer_console_error_absent: rendererConsoleErrorAbsent,
+      process_output_absent: processOutputAbsent
+    });
+  };
+  const transcriptBody = observation('transcriptBody');
+  const rawArchivePath = observation('rawArchivePath');
+  const transcriptBodiesAbsent = Object.values(transcriptBody).every(Boolean);
+  const rawArchivePathsAbsent = Object.values(rawArchivePath).every(Boolean);
+  return Object.freeze({
+    transcript_bodies_absent: transcriptBodiesAbsent,
+    raw_archive_paths_absent: rawArchivePathsAbsent,
+    forbidden_markers_absent: transcriptBodiesAbsent && rawArchivePathsAbsent,
+    observations: Object.freeze({
+      transcript_body: transcriptBody,
+      raw_archive_path: rawArchivePath
+    })
+  });
+}
+
 function parseArgs(argv) {
   let mode = 'capture';
   let index = 0;
@@ -173,6 +234,7 @@ function parseArgs(argv) {
     mode,
     evidenceDir: null,
     electron: null,
+    privacyProbe: null,
     pixelReview: null,
     reviewer: null,
     reviewNote: null
@@ -182,6 +244,7 @@ function parseArgs(argv) {
     const field = new Map([
       ['--evidence-dir', 'evidenceDir'],
       ['--electron', 'electron'],
+      ['--privacy-probe', 'privacyProbe'],
       ['--pixel-review', 'pixelReview'],
       ['--reviewer', 'reviewer'],
       ['--review-note', 'reviewNote']
@@ -194,6 +257,9 @@ function parseArgs(argv) {
   }
   if (mode === 'capture' && (options.pixelReview || options.reviewer || options.reviewNote)) {
     throw proofError('visual_proof_capture_argument_invalid');
+  }
+  if (options.privacyProbe && (mode !== 'capture' || !PRIVACY_PROBES.has(options.privacyProbe) || options.evidenceDir)) {
+    throw proofError('visual_proof_privacy_probe_invalid');
   }
   if (mode === 'finalize' && (!options.evidenceDir || !options.pixelReview || !options.reviewer || !options.reviewNote)) {
     throw proofError('visual_proof_review_required');
@@ -362,6 +428,7 @@ class CdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.eventWaiters = new Map();
+    this.eventListeners = new Map();
   }
 
   async connect() {
@@ -390,6 +457,11 @@ class CdpClient {
       return;
     }
     if (!message.method) return;
+    for (const listener of this.eventListeners.get(message.method) || []) {
+      try {
+        listener(message.params || {});
+      } catch {}
+    }
     const waiters = this.eventWaiters.get(message.method);
     if (!waiters?.length) return;
     const waiter = waiters.shift();
@@ -410,6 +482,7 @@ class CdpClient {
       }
     }
     this.eventWaiters.clear();
+    this.eventListeners.clear();
   }
 
   async call(method, params = {}) {
@@ -450,6 +523,16 @@ class CdpClient {
     });
   }
 
+  onEvent(method, listener) {
+    const listeners = this.eventListeners.get(method) || new Set();
+    listeners.add(listener);
+    this.eventListeners.set(method, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.eventListeners.delete(method);
+    };
+  }
+
   close() {
     try {
       this.socket?.close();
@@ -473,7 +556,7 @@ async function connectControlCenter(debugPort) {
 function inspectionExpression(config) {
   return `(() => {
     const targets = ${JSON.stringify(config.targets)};
-    const forbiddenMarkers = ${JSON.stringify(FORBIDDEN_PRIVATE_MARKERS)};
+    const privacyMarkers = ${JSON.stringify(PRIVACY_MARKERS)};
     const parseColor = (value) => {
       const match = String(value || '').match(/rgba?\\(([^)]+)\\)/i);
       if (!match) return null;
@@ -608,7 +691,7 @@ function inspectionExpression(config) {
     }
     const cardRect = card.getBoundingClientRect();
     const main = document.querySelector('.main');
-    const privacyMarkersAbsent = !forbiddenMarkers.some((marker) => document.body.innerText.includes(marker));
+    const renderedText = document.body.innerText;
     return {
       regions,
       objective: {
@@ -632,7 +715,10 @@ function inspectionExpression(config) {
           height: window.innerHeight,
           scale: window.devicePixelRatio
         },
-        privacyMarkersAbsent
+        renderedPrivacy: {
+          transcriptBody: !privacyMarkers.transcriptBody.some((marker) => renderedText.includes(marker)),
+          rawArchivePath: !privacyMarkers.rawArchivePath.some((marker) => renderedText.includes(marker))
+        }
       },
       cardClip: {
         x: Math.max(0, Math.floor(cardRect.x + window.scrollX)),
@@ -641,6 +727,32 @@ function inspectionExpression(config) {
         height: Math.ceil(cardRect.height)
       }
     };
+  })()`;
+}
+
+function privacyBoundaryExpression(privacyProbe) {
+  return `(async () => {
+    const sentinels = ${JSON.stringify(PRIVACY_SENTINELS)};
+    const [state, sources] = await Promise.all([
+      window.agentifyDesktop.getState(),
+      window.agentifyDesktop.getTranscriptSources()
+    ]);
+    const transcriptBody = sources.find((source) => source?.fixturePrivate?.transcriptBody)?.fixturePrivate?.transcriptBody;
+    const rawArchivePath = state?.fixturePrivate?.rawArchivePath;
+    const observed = {
+      transcriptBody: transcriptBody === sentinels.transcriptBody,
+      rawArchivePath: rawArchivePath === sentinels.rawArchivePath
+    };
+    if (${JSON.stringify(privacyProbe)} === 'rendered-transcript-body') {
+      document.getElementById('libraryActionStatus').textContent = transcriptBody;
+    }
+    if (${JSON.stringify(privacyProbe)} === 'diagnostic-archive-path') {
+      console.error(rawArchivePath);
+    }
+    if (${JSON.stringify(privacyProbe)} === 'diagnostic-archive-basename') {
+      console.error(rawArchivePath.split('/').at(-1));
+    }
+    return observed;
   })()`;
 }
 
@@ -688,7 +800,7 @@ async function closeOwnedRuntime({ client, child, closed, runtimeDir }) {
   return exit;
 }
 
-async function captureScenario({ scenario, config, evidenceDir, electron }) {
+async function captureScenario({ scenario, config, evidenceDir, electron, privacyProbe = null }) {
   const debugPort = await reservePort();
   const runtimeDir = await fs.mkdtemp(path.join(await privateTemporaryRoot(), RUNTIME_PREFIX));
   await fs.chmod(runtimeDir, 0o700);
@@ -705,12 +817,11 @@ async function captureScenario({ scenario, config, evidenceDir, electron }) {
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let bytesScanned = 0;
-  let privateMarkerObserved = false;
-  for (const stream of [child.stdout, child.stderr]) {
+  const processOutput = [createSentinelObserver(), createSentinelObserver()];
+  for (const [index, stream] of [child.stdout, child.stderr].entries()) {
     stream.on('data', (chunk) => {
       bytesScanned += Buffer.byteLength(chunk);
-      const text = String(chunk);
-      if (FORBIDDEN_PRIVATE_MARKERS.some((marker) => text.includes(marker))) privateMarkerObserved = true;
+      processOutput[index].observe(chunk);
     });
   }
   const closed = new Promise((resolve, reject) => {
@@ -718,8 +829,16 @@ async function captureScenario({ scenario, config, evidenceDir, electron }) {
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
   let client = null;
+  const diagnostics = createSentinelObserver();
   try {
     client = await connectControlCenter(debugPort);
+    client.onEvent('Runtime.consoleAPICalled', ({ args = [] }) => {
+      for (const argument of args) diagnostics.observe(argument?.value ?? argument?.description ?? '');
+    });
+    client.onEvent('Runtime.exceptionThrown', ({ exceptionDetails }) => {
+      diagnostics.observe(exceptionDetails?.exception?.description ?? exceptionDetails?.text ?? '');
+    });
+    await client.call('Runtime.enable');
     await client.call('Page.enable');
     await client.call('Emulation.setDeviceMetricsOverride', {
       width: VIEWPORT.width,
@@ -745,6 +864,17 @@ async function captureScenario({ scenario, config, evidenceDir, electron }) {
       const selected = document.getElementById('libraryActionStatus')?.textContent.includes('Profile scope selected');
       return imports === ${config.expected.imports} && catalog === ${config.expected.catalog} && sources === ${config.expected.sources} && selected;
     })()`), { code: 'visual_proof_fixture_state_not_rendered' });
+
+    const boundary = await client.evaluate(privacyBoundaryExpression(privacyProbe));
+    if (boundary?.transcriptBody !== true || boundary?.rawArchivePath !== true) {
+      throw proofError('visual_proof_privacy_fixture_missing');
+    }
+    if (privacyProbe === 'diagnostic-archive-path' || privacyProbe === 'diagnostic-archive-basename') {
+      await waitFor(() => !diagnostics.absent('rawArchivePath'), {
+        timeoutMs: CDP_TIMEOUT_MS,
+        code: 'visual_proof_privacy_probe_invalid'
+      });
+    }
 
     let confirmation = null;
     if (scenario === 'forget') {
@@ -781,7 +911,32 @@ async function captureScenario({ scenario, config, evidenceDir, electron }) {
 
     await client.evaluate(`document.getElementById('transcriptLibraryCard').scrollIntoView({ block: 'start', inline: 'nearest' })`);
     const inspection = await client.evaluate(inspectionExpression(config));
+    const privacy = derivePrivacyEvidence({
+      boundary,
+      rendered: inspection.objective.renderedPrivacy,
+      diagnostics,
+      processOutput
+    });
+    inspection.objective.privacy = privacy.observations;
+    inspection.objective.privacyMarkersAbsent = privacy.forbidden_markers_absent;
     inspection.machineVerdict = machineVerdict(inspection);
+    const runtime = {
+      binary: executable,
+      binary_sha256: sha256(await fs.readFile(executable)),
+      driver: 'Electron DevTools Protocol',
+      process_output_bytes_scanned: bytesScanned,
+      process_output_private_markers_absent: processOutput.every((observer) =>
+        observer.absent('transcriptBody') && observer.absent('rawArchivePath')),
+      renderer_diagnostics_private_markers_absent: diagnostics.absent('transcriptBody') && diagnostics.absent('rawArchivePath')
+    };
+    if (privacyProbe) {
+      return {
+        scenario,
+        privacy,
+        runtime,
+        machine_verdict: inspection.machineVerdict
+      };
+    }
     if (inspection.machineVerdict !== 'pass') {
       await writePrivateJson(path.join(evidenceDir, `${scenario}.machine-failure.json`), {
         schema: 'transcript-library-visual-proof-machine-failure/v1',
@@ -790,7 +945,6 @@ async function captureScenario({ scenario, config, evidenceDir, electron }) {
       });
       throw proofError('visual_proof_machine_inspection_failed');
     }
-    if (privateMarkerObserved) throw proofError('visual_proof_private_marker_detected');
 
     const capture = await client.call('Page.captureScreenshot', {
       format: 'png',
@@ -826,15 +980,10 @@ async function captureScenario({ scenario, config, evidenceDir, electron }) {
         protocolVersion: browser.protocolVersion,
         userAgent: browser.userAgent
       },
-      runtime: {
-        binary: executable,
-        binary_sha256: sha256(await fs.readFile(executable)),
-        driver: 'Electron DevTools Protocol',
-        process_output_bytes_scanned: bytesScanned,
-        process_output_private_markers_absent: !privateMarkerObserved
-      },
+      runtime,
       confirmation,
-      inspection
+      inspection,
+      privacy
     };
   } finally {
     const exit = await closeOwnedRuntime({ client, child, closed, runtimeDir });
@@ -860,8 +1009,9 @@ async function capture(options) {
     provenance,
     captures,
     privacy: {
-      forbidden_markers_absent: captures.every(({ inspection, runtime }) =>
-        inspection.objective.privacyMarkersAbsent && runtime.process_output_private_markers_absent)
+      transcript_bodies_absent: captures.every(({ privacy }) => privacy.transcript_bodies_absent),
+      raw_archive_paths_absent: captures.every(({ privacy }) => privacy.raw_archive_paths_absent),
+      forbidden_markers_absent: captures.every(({ privacy }) => privacy.forbidden_markers_absent)
     }
   };
   const capturePath = path.join(evidenceDir, 'capture.json');
@@ -873,6 +1023,28 @@ async function capture(options) {
     capture: capturePath,
     screenshots: captures.map(({ screenshot }) => screenshot.path),
     next: `Inspect both PNGs, then run finalize with --evidence-dir, --pixel-review pass|fail, --reviewer, and --review-note.`
+  };
+}
+
+async function runPrivacyProbe(options) {
+  const capture = await captureScenario({
+    scenario: 'states',
+    config: SCENARIOS.states,
+    evidenceDir: null,
+    electron: options.electron,
+    privacyProbe: options.privacyProbe
+  });
+  return {
+    schemaVersion: 1,
+    status: 'privacy-probe-observed',
+    probe: options.privacyProbe,
+    verdict: capture.privacy.forbidden_markers_absent ? 'pass' : 'fail',
+    machine_verdict: capture.machine_verdict,
+    privacy: capture.privacy,
+    runtime: {
+      driver: capture.runtime.driver,
+      process_output_bytes_scanned: capture.runtime.process_output_bytes_scanned
+    }
   };
 }
 
@@ -921,7 +1093,8 @@ function objectiveChecks(inspection) {
     },
     {
       kind: 'private_marker_check',
-      forbidden_markers_absent: inspection.objective.privacyMarkersAbsent
+      forbidden_markers_absent: inspection.objective.privacyMarkersAbsent,
+      observations: inspection.objective.privacy
     }
   ];
 }
@@ -1002,11 +1175,7 @@ async function finalize(options) {
           ? 'Every named region and objective check passed, and the captured pixels received an explicit review.'
           : 'The explicit pixel review rejected this visual state.'
       }],
-      privacy: {
-        transcript_bodies_absent: true,
-        raw_archive_paths_absent: true,
-        forbidden_markers_absent: record.privacy.forbidden_markers_absent
-      }
+      privacy: captured.privacy
     };
     const manifestPath = path.join(evidenceDir, config.manifestName);
     await writePrivateJson(manifestPath, manifest);
@@ -1027,7 +1196,11 @@ async function finalize(options) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const result = options.mode === 'capture' ? await capture(options) : await finalize(options);
+  const result = options.privacyProbe
+    ? await runPrivacyProbe(options)
+    : options.mode === 'capture'
+      ? await capture(options)
+      : await finalize(options);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

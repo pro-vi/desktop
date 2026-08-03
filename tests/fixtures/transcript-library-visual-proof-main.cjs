@@ -7,6 +7,8 @@ const FIXTURE_STATE_DIR = '/tmp/agentify-transcript-library-visual-proof-state';
 const FIXTURE_DATE = '2026-07-31T09:00:00.000Z';
 const SNAPSHOT_HASH = 'a'.repeat(64);
 const CONTENT_HASH = 'b'.repeat(64);
+const PRIVATE_TRANSCRIPT_BODY_SENTINEL = 'VISUAL_PROOF_PRIVATE_TRANSCRIPT_SENTINEL';
+const PRIVATE_ARCHIVE_PATH_SENTINEL = '/private/VISUAL_PROOF_PRIVATE_ARCHIVE_SENTINEL/PRIVATE-ARCHIVE-PATH.zip';
 
 function parseScenario(argv) {
   const value = argv.find((argument) => argument.startsWith('--scenario='))?.slice('--scenario='.length);
@@ -49,7 +51,10 @@ function source({ id, label, state, attempt = null, snapshot = null }) {
     lastAttempt: attempt,
     state,
     createdAt: FIXTURE_DATE,
-    updatedAt: FIXTURE_DATE
+    updatedAt: FIXTURE_DATE,
+    fixturePrivate: {
+      transcriptBody: PRIVATE_TRANSCRIPT_BODY_SENTINEL
+    }
   };
 }
 
@@ -92,7 +97,10 @@ function registerFixtureIpc(scenario, getWindow) {
     vendors: [],
     tabs: [],
     runtime: { inflightQueries: 0, providerSlots: { max: 1, activeLeases: [], queued: [] }, activeQueries: [], lastOutcomes: [] },
-    compatibility: null
+    compatibility: null,
+    fixturePrivate: {
+      rawArchivePath: PRIVATE_ARCHIVE_PATH_SENTINEL
+    }
   }));
   ipcMain.handle('agentify:getSettings', async () => ({}));
   ipcMain.handle('agentify:getRuns', async () => ({ runs: [] }));
