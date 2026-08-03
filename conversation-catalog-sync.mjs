@@ -310,8 +310,12 @@ export function createConversationCatalogService({
         }
         await commitBatch();
       } catch {
-        const interrupted = await store.interruptImport(catalogImport.id).then(() => true, () => false);
-        if (interrupted) notifyChanged();
+        let interrupted = false;
+        for (let attempt = 0; attempt < 2 && !interrupted; attempt += 1) {
+          interrupted = await store.interruptImport(catalogImport.id).then(() => true, () => false);
+        }
+        if (!interrupted) throw serviceError('catalog_import_recovery_required');
+        notifyChanged();
         throw serviceError('catalog_import_interrupted');
       }
 

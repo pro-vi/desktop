@@ -170,6 +170,7 @@ const SAFE_CONTROL_CENTER_ERROR_CODES = new Set([
   'catalog_import_grant_unavailable',
   'catalog_import_inspection_failed',
   'catalog_import_interrupted',
+  'catalog_import_recovery_required',
   'catalog_import_manifest_conflict',
   'catalog_import_request_invalid',
   'catalog_import_state_missing',

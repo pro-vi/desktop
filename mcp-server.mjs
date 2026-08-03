@@ -175,6 +175,7 @@ for (const code of [
   'catalog_import_grant_invalid',
   'catalog_import_grant_unavailable',
   'catalog_import_interrupted',
+  'catalog_import_recovery_required',
   'catalog_import_active',
   'catalog_import_not_found',
   'catalog_import_manifest_conflict',

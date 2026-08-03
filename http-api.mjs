@@ -256,6 +256,7 @@ const CATALOG_HTTP_BAD_REQUEST_ERRORS = new Set([
 
 const CATALOG_HTTP_INTERNAL_ERRORS = new Set([
   'catalog_import_interrupted',
+  'catalog_import_recovery_required',
   'catalog_raw_blob_invalid',
   'catalog_snapshot_blob_invalid',
   'catalog_snapshot_mismatch',

@@ -12,6 +12,7 @@ import {
 import { createConversationCatalogService } from '../conversation-catalog-sync.mjs';
 import { createConversationCatalogStore } from '../conversation-catalog-store.mjs';
 import { createPrivateLibraryBlobStore } from '../library-blob-store.mjs';
+import { createPrivateFileSystem } from '../private-filesystem.mjs';
 import { TRANSCRIPT_TURN_MAX_TEXT_CHARS } from '../transcript-contract.mjs';
 import { buildZip, crc32 } from './fixtures/zip-archive.mjs';
 
@@ -102,6 +103,16 @@ function safeError(error, forbidden = []) {
   const exposed = `${error.message}\n${JSON.stringify(error.data ?? null)}`;
   for (const marker of forbidden) assert.equal(exposed.includes(marker), false);
   return true;
+}
+
+function proxiedOperations(overrides = {}) {
+  return new Proxy(fs, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = target[property];
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
 }
 
 async function temporaryDirectory(t, label) {
@@ -301,6 +312,83 @@ test('catalog service: extended-year timestamps cannot strand import preflight o
     'timestamp-create-fallback': CREATED_AT,
     'timestamp-epoch-fallback': '1970-01-01T00:00:00.000Z'
   });
+});
+
+test('catalog service: import interruption persistence retries once and reports unresolved recovery exactly', async (t) => {
+  for (const failureCount of [1, 2]) {
+    await t.test(`${failureCount}-replace-failure${failureCount === 1 ? '' : 's'}`, async (t) => {
+      const stateDir = await temporaryDirectory(t, `interrupt-persist-${failureCount}`);
+      let failuresRemaining = 0;
+      const operations = proxiedOperations({
+        async rename(...args) {
+          if (failuresRemaining > 0) {
+            failuresRemaining -= 1;
+            throw Object.assign(new Error('injected replace failure'), { code: 'EIO' });
+          }
+          return await fs.rename(...args);
+        }
+      });
+      const fileSystem = createPrivateFileSystem({ operations });
+      const blobs = createPrivateLibraryBlobStore({ stateDir, fileSystem });
+      const store = createConversationCatalogStore({
+        stateDir,
+        blobs,
+        fileSystem,
+        clock: () => VERIFIED_AT,
+        randomId: () => `interrupt-persist-${failureCount}`
+      });
+      let streamPass = 0;
+      const decoded = {
+        status: 'catalog-only',
+        reason: 'provider-id-missing',
+        identity: null,
+        title: null,
+        observedAt: OBSERVED_AT,
+        rawRecord: Buffer.from('{}')
+      };
+      const service = createConversationCatalogService({
+        store,
+        blobs,
+        grants: {
+          async consume() { return Object.freeze({}); },
+          async close() {}
+        },
+        exportReader: {
+          async inspect() {
+            return {
+              archiveHash: 'a'.repeat(64),
+              layout: 'single-conversations-json',
+              accountHint: null
+            };
+          },
+          async *streamConversations() {
+            streamPass += 1;
+            yield decoded;
+            if (streamPass === 2) {
+              failuresRemaining = failureCount;
+              throw new Error('injected archive interruption');
+            }
+          }
+        },
+        routeVerifier: { async verify() { throw new Error('not expected'); } },
+        clock: () => VERIFIED_AT
+      });
+
+      const expected = failureCount === 1
+        ? 'catalog_import_interrupted'
+        : 'catalog_import_recovery_required';
+      await assert.rejects(
+        () => service.importExport({ grantId: 'grant-interrupted', profileScopeId: PROFILE_SCOPE_ID }),
+        (error) => error?.code === expected
+      );
+      const [catalogImport] = await store.listImports();
+      assert.equal(catalogImport.status, failureCount === 1 ? 'partial' : 'open');
+      if (failureCount === 2) {
+        assert.equal((await store.recoverInterruptedImports()).length, 1);
+        assert.equal((await store.listImports())[0].status, 'partial');
+      }
+    });
+  }
 });
 
 test('catalog service: a real archive is committed in bounded batches', async (t) => {

@@ -745,6 +745,7 @@ test('http-api: catalog service states have stable content-free status mappings'
     ['catalog_raw_blob_invalid', 500, 'catalog_raw_blob_invalid'],
     ['catalog_snapshot_blob_invalid', 500, 'catalog_snapshot_blob_invalid'],
     ['catalog_import_interrupted', 500, 'catalog_import_interrupted'],
+    ['catalog_import_recovery_required', 500, 'catalog_import_recovery_required'],
     ['library_blob_corrupt', 500, 'library_blob_corrupt']
   ];
   for (const [code, status, expectedError] of cases) {
