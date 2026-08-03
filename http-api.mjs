@@ -2039,8 +2039,9 @@ export function startHttpApi({
     effectiveKey = null
   } = {}) => {
     let result;
+    let conversationUrl;
     try {
-      result = await runExclusive(controller, async () => {
+      const execution = await runExclusive(controller, async () => {
         await ensureRunLocation({
           controller,
           tabId,
@@ -2048,21 +2049,24 @@ export function startHttpApi({
           conversationUrl: existingConversationUrl,
           projectUrl
         });
-        return await controller.research({
+        const researchResult = await controller.research({
           prompt,
           attachments,
           timeoutMs,
           outDir,
           onProgress: (patch) => patchActiveQuery(tabId, patch)
         });
+        const servedUrl = typeof controller.getUrl === 'function'
+          ? await controller.getUrl().catch(() => existingConversationUrl || null)
+          : existingConversationUrl || null;
+        return { result: researchResult, conversationUrl: servedUrl };
       });
+      result = execution.result;
+      conversationUrl = execution.conversationUrl;
     } catch (error) {
       await finalizeCompatibilityTerminal(controller, 'research', { mode: 'receipt-backed', status: 'failed' });
       throw error;
     }
-    const conversationUrl = typeof controller.getUrl === 'function'
-      ? await controller.getUrl().catch(() => existingConversationUrl || null)
-      : existingConversationUrl || null;
     if (effectiveKey && conversationUrl) persistKeyLocation(effectiveKey, { conversationUrl, projectUrl });
     let outputManifest;
     try {
@@ -2799,7 +2803,7 @@ export function startHttpApi({
             effectiveKey
           });
         }
-        const result = await runExclusive(controller, async () => {
+        const execution = await runExclusive(controller, async () => {
           await ensureRunLocation({
             controller,
             tabId,
@@ -2818,7 +2822,7 @@ export function startHttpApi({
               : null;
             assertLiveContinuationServedRoute(preSendSource, liveContinuationUrl, servedUrl);
           }
-          return controller.query({
+          const queryResult = await controller.query({
             prompt: String(replay.prompt || ''),
             attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
             timeoutMs: effectiveTimeoutMs,
@@ -2828,13 +2832,16 @@ export function startHttpApi({
             modelIntent: originalModelIntent,
             durableObservation: true
           });
+          const servedUrl = typeof controller.getUrl === 'function'
+            ? await controller.getUrl().catch(() => originalConversationUrl || null)
+            : originalConversationUrl || null;
+          return { result: queryResult, conversationUrl: servedUrl };
         });
+        const result = execution.result;
         assertNoModeDowngrade({ modeIntent: originalModeIntent, result });
         const activeQuery = activeQueries.get(tabId);
         assertConfirmedModelIntent({ modelIntent: originalModelIntent, activeQuery });
-        const conversationUrl = typeof controller.getUrl === 'function'
-          ? await controller.getUrl().catch(() => originalConversationUrl || null)
-          : originalConversationUrl || null;
+        const conversationUrl = execution.conversationUrl;
         if (hasLiveContinuation) {
           assertLiveContinuationServedRoute(
             liveContinuationSource,
@@ -3745,7 +3752,7 @@ export function startHttpApi({
               packedContextBudget: effectiveBudget
             });
             const runQuery = async () => {
-              const result = await runExclusive(controller, async () => {
+              const execution = await runExclusive(controller, async () => {
                 if (entryTarget) {
                   patchActiveQuery(tabId, {
                     phase: entryTarget.kind === 'shared-snapshot' ? 'opening_shared_chat' : 'resuming_conversation'
@@ -3771,7 +3778,7 @@ export function startHttpApi({
                     : null;
                   assertLiveContinuationServedRoute(preSendSource, suppliedChatUrl, servedUrl);
                 }
-                return controller.query({
+                const queryResult = await controller.query({
                   prompt: packed.prompt,
                   attachments: packed.attachments,
                   timeoutMs,
@@ -3781,12 +3788,17 @@ export function startHttpApi({
                   modelIntent,
                   durableObservation: true
                 });
+                const servedUrl = typeof controller.getUrl === 'function'
+                  ? await controller.getUrl().catch(() => null)
+                  : null;
+                return { result: queryResult, conversationUrl: servedUrl };
               });
+              const result = execution.result;
               assertNoModeDowngrade({ modeIntent, result });
               const activeQuery = activeQueries.get(tabId);
               assertConfirmedModelIntent({ modelIntent, activeQuery });
               // Capture conversation URL after successful query
-              const conversationUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null;
+              const conversationUrl = execution.conversationUrl;
               if (entryTarget?.kind === 'shared-snapshot' && !extractConversationUrl(conversationUrl)) {
                 const error = new Error('shared_chat_materialization_failed');
                 error.data = { sourceUrl: entryTarget.chatUrl, conversationUrl };
@@ -4010,7 +4022,7 @@ export function startHttpApi({
           });
           runCreated = true;
           const controller = tabs.getControllerById(tabId);
-          const result = await withProviderSlot({
+          const execution = await withProviderSlot({
             op: activeOp,
             tabId,
             tabMeta,
@@ -4032,15 +4044,18 @@ export function startHttpApi({
                 projectUrl: chatProfile.projectUrl
               });
             }
-            return await controller.send({
+            const sendResult = await controller.send({
               text,
               timeoutMs,
               stopAfterSend,
               onProgress: (patch) => patchActiveQuery(tabId, patch)
             });
+            const servedUrl = sendResult?.conversationUrl ||
+              (typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null);
+            return { result: sendResult, conversationUrl: servedUrl };
           }));
-          const conversationUrl = result?.conversationUrl ||
-            (typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => null) : null);
+          const result = execution.result;
+          const conversationUrl = execution.conversationUrl;
           if (entryTarget?.kind === 'shared-snapshot' && !extractConversationUrl(conversationUrl)) {
             const error = new Error('shared_chat_materialization_failed');
             error.data = { sourceUrl: entryTarget.chatUrl, conversationUrl };

@@ -807,6 +807,7 @@ async function startContinuationHttp(t, {
   duplicateSource = false,
   listError = null,
   navigationResultUrl = null,
+  queuedNavigationUrl = null,
   onList = null
 } = {}) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-transcript-continuation-'));
@@ -818,8 +819,15 @@ async function startContinuationHttp(t, {
   let listCalls = 0;
   let ensureTabCalls = 0;
   let createTabCalls = 0;
+  let exclusiveTail = Promise.resolve();
   const controller = {
-    runExclusive: async (fn) => await fn(),
+    runExclusive: queuedNavigationUrl
+      ? async (fn) => {
+          const operation = exclusiveTail.catch(() => {}).then(fn);
+          exclusiveTail = operation.then(() => undefined, () => undefined);
+          return await operation;
+        }
+      : async (fn) => await fn(),
     prepareChatEntry: async ({ chatUrl }) => {
       events.push(['prepare', chatUrl]);
     },
@@ -827,6 +835,12 @@ async function startContinuationHttp(t, {
       events.push(['query']);
       if (queryError) throw queryError;
       if (queryResultUrl) currentObservedUrl = queryResultUrl;
+      if (queuedNavigationUrl) {
+        controller.runExclusive(async () => {
+          events.push(['queued-navigate', queuedNavigationUrl]);
+          currentObservedUrl = queuedNavigationUrl;
+        }).catch(() => {});
+      }
       return { text: 'receipt-backed continuation', codeBlocks: [], meta: {} };
     },
     navigate: async (targetUrl) => {
@@ -1077,6 +1091,41 @@ test('http-api: live continuation preserves safe transcript-store failures witho
   assert.deepEqual(response.data, { error: 'transcript_store_io' });
   assert.doesNotMatch(JSON.stringify(response.data), /PRIVATE|export\.zip|\/Users\/private|<div>/);
   assert.equal(started.events.some(([kind]) => ['prepare', 'query', 'sync'].includes(kind)), false);
+});
+
+test('http-api: queued same-tab navigation cannot replace the query route before durable affinity capture', async (t) => {
+  const ownedUrl = 'https://chatgpt.com/c/thread-123';
+  const foreignUrl = 'https://chatgpt.com/c/foreign-queued-route';
+  const started = await startContinuationHttp(t, {
+    observedUrl: ownedUrl,
+    queryResultUrl: ownedUrl,
+    queuedNavigationUrl: foreignUrl
+  });
+
+  const response = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: ownedUrl,
+      prompt: 'harmless continuation'
+    }
+  });
+
+  assert.equal(response.res.status, 200);
+  const persisted = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: response.data.runId }
+  });
+  assert.equal(persisted.data.run.conversationUrl, ownedUrl);
+  assert.equal(persisted.data.run.completionReceipt.conversationUrl, ownedUrl);
+  assert.deepEqual(started.events.find(([kind]) => kind === 'queued-navigate'), ['queued-navigate', foreignUrl]);
 });
 
 test('http-api: live continuation rejects competing route selectors before tab or run work', async (t) => {
