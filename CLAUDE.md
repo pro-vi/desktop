@@ -22,7 +22,13 @@ Claude Code session
 - No bundling — all pure `.mjs` loaded directly from disk.
 - ~95% of changes are Electron-side, so `agentify_shutdown` covers most cases.
 
-Changes to the `agentify_query` MCP schema (for example, adding `chatUrl`) require both reloads: restart the MCP server so the client sees the new tool schema, then run `agentify_shutdown` so Electron reloads the HTTP routing/controller implementation.
+Changes to an MCP tool schema (for example, adding `chatUrl` to `agentify_query` or `agentify_read_conversation`) require both reloads: restart the MCP server so the client sees the new tool schema, then run `agentify_shutdown` so Electron reloads the HTTP routing/controller implementation.
+
+### Do not trust the first call after `agentify_shutdown`
+
+The respawned Electron needs a few seconds before a page is capturable, and nothing blocks a read until it is. Observed 2026-08-03: an `agentify_read_conversation` issued ~3s after tab creation returned `messageCount: 0` while `agentify_status` showed the tab already sitting on the right conversation URL and `readiness` recorded `fail` / `anchor-postcondition-failed`. The identical call on the warm app returned all six messages. Navigation had succeeded; only the capture was early.
+
+This matters because the reload step above is exactly what you do before verifying a change, so a cold-start empty result reads as "my change is broken" when it is not. `readConversationText` has no readiness gate of its own, and `prepareChatEntry`'s readiness wait did not block here. Re-run the call once the app is warm before concluding anything, and prefer a warm run for any evidence you intend to report.
 
 ## Chat location vs coding workspace
 
