@@ -262,6 +262,29 @@ test('chatgpt export reader: inspects a real single-file ZIP and decodes only th
   assert.equal(decoded[0].rawTurns.some(({ text }) => text.includes('inactive branch')), false);
 });
 
+test('chatgpt export reader: extended-year timestamps fall through to canonical deterministic evidence', async (t) => {
+  const fallsBackToCreate = conversationRecord({ conversationId: 'conversation-extended-update' });
+  fallsBackToCreate.update_time = 300_000_000_000;
+  const fallsBackToEpoch = conversationRecord({ conversationId: 'conversation-extended-both' });
+  fallsBackToEpoch.update_time = 300_000_000_000;
+  fallsBackToEpoch.create_time = 300_000_000_000;
+  const canonicalFuture = conversationRecord({ conversationId: 'conversation-canonical-future' });
+  canonicalFuture.update_time = Date.parse('9999-01-01T00:00:00.000Z') / 1000;
+  const archive = await grantedArchive(t, buildZip([{
+    name: 'conversations.json',
+    data: recordsJson([fallsBackToCreate, fallsBackToEpoch, canonicalFuture]),
+    method: 'deflate'
+  }]));
+
+  const decoded = await collect(createChatGptExportReader().streamConversations(archive, PROFILE_SCOPE_ID));
+
+  assert.deepEqual(decoded.map(({ observedAt }) => observedAt), [
+    '2026-07-30T12:00:00.000Z',
+    '1970-01-01T00:00:00.000Z',
+    '9999-01-01T00:00:00.000Z'
+  ]);
+});
+
 test('chatgpt export reader: streams zero-based deflated shards in numeric order and resumes by global cursor', async (t) => {
   const first = conversationRecord({ conversationId: 'conversation-000' });
   const second = conversationRecord({ conversationId: 'conversation-001' });

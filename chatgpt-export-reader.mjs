@@ -6,6 +6,7 @@ import {
   MAX_CATALOG_IMPORT_PROBLEMS,
   initialImportCursor,
   parseImportCursor,
+  parseIsoDateTime,
   parseSha256
 } from './conversation-catalog-contract.mjs';
 import {
@@ -688,7 +689,7 @@ function observedAtFor(record) {
     const millis = seconds * 1000;
     if (!Number.isFinite(millis) || millis > 8_640_000_000_000_000) continue;
     try {
-      return new Date(millis).toISOString();
+      return parseIsoDateTime(new Date(millis).toISOString());
     } catch {}
   }
   return '1970-01-01T00:00:00.000Z';

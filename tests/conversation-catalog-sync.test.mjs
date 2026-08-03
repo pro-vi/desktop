@@ -17,7 +17,8 @@ import { buildZip, crc32 } from './fixtures/zip-archive.mjs';
 
 const PROFILE_SCOPE_ID = 'profile-main';
 const OTHER_PROFILE_SCOPE_ID = 'profile-other';
-const CREATED_AT_SECONDS = Date.parse('2026-07-31T12:00:00.000Z') / 1000;
+const CREATED_AT = '2026-07-31T12:00:00.000Z';
+const CREATED_AT_SECONDS = Date.parse(CREATED_AT) / 1000;
 const OBSERVED_AT = '2026-07-31T12:05:00.000Z';
 const OBSERVED_AT_SECONDS = Date.parse(OBSERVED_AT) / 1000;
 const VERIFIED_AT = '2026-07-31T12:10:00.000Z';
@@ -264,6 +265,42 @@ test('catalog service: real import stages exact raw/snapshot blobs and exact re-
   assert.deepEqual(repeatedPage.items[0].latestArchiveRecord, firstItem.latestArchiveRecord);
   assert.deepEqual(repeatedPage.items[0].latestImportedSnapshot, firstItem.latestImportedSnapshot);
   assert.equal((await fixture.service.listImports()).length, 1);
+});
+
+test('catalog service: extended-year timestamps cannot strand import preflight or publish invalid snapshots', async (t) => {
+  const fixture = await harness(t, 'timestamp-fallback');
+  const fallsBackToCreate = conversationRecord({ conversationId: 'timestamp-create-fallback' });
+  fallsBackToCreate.update_time = 300_000_000_000;
+  const fallsBackToEpoch = conversationRecord({ conversationId: 'timestamp-epoch-fallback' });
+  fallsBackToEpoch.update_time = 300_000_000_000;
+  fallsBackToEpoch.create_time = 300_000_000_000;
+
+  const outcome = await importArchive(t, fixture, [fallsBackToCreate, fallsBackToEpoch], {
+    grantId: 'grant-timestamp-fallback'
+  });
+
+  assert.deepEqual(outcome, {
+    status: 'complete',
+    importId: 'import-timestamp-fallback-1',
+    counts: { recordsSeen: 2, cataloged: 2, snapshots: 2, problems: 0 }
+  });
+  assert.deepEqual(fixture.commitBatchSizes, [2]);
+  const imports = await fixture.service.listImports();
+  assert.equal(imports.length, 1);
+  assert.equal(imports[0].status, 'complete');
+  assert.deepEqual(imports[0].cursor, { schemaVersion: 1, recordIndex: 2 });
+  assert.equal(imports[0].suspension, null);
+
+  const page = await fixture.service.list({ profileScopeId: PROFILE_SCOPE_ID, limit: 10 });
+  const capturedAtByIdentity = new Map();
+  for (const item of page.items) {
+    const snapshot = await fixture.blobs.getSnapshot(item.latestImportedSnapshot);
+    capturedAtByIdentity.set(item.identity.providerConversationId, snapshot.capturedAt);
+  }
+  assert.deepEqual(Object.fromEntries(capturedAtByIdentity), {
+    'timestamp-create-fallback': CREATED_AT,
+    'timestamp-epoch-fallback': '1970-01-01T00:00:00.000Z'
+  });
 });
 
 test('catalog service: a real archive is committed in bounded batches', async (t) => {
