@@ -2527,6 +2527,24 @@ export class ChatGPTController {
       } else if (!reason) {
         reason = 'compatibility_drift';
       }
+      // A few mapped messages with no transcript text are ordinary image-only
+      // turns. A fully served conversation where no mapped message produced any
+      // text is text extraction failing against changed provider markup, not a
+      // thread made entirely of images: a real conversation always carries at
+      // least one text turn. Require both boundaries and a minimum message count
+      // so a small or partially served window cannot manufacture drift.
+      const TEXTLESS_CONVERSATION_DRIFT_MIN_MESSAGES = 4;
+      const hasTranscriptText = (turn) => typeof turn.text === 'string' && turn.text.trim().length > 0;
+      const textBearingTurnCount = transcript.filter(hasTranscriptText).length;
+      if (
+        !reason &&
+        topBoundary &&
+        bottomBoundary &&
+        textBearingTurnCount === 0 &&
+        unresolvedMessageSignatures.size >= TEXTLESS_CONVERSATION_DRIFT_MIN_MESSAGES
+      ) {
+        reason = 'compatibility_drift';
+      }
       if (!reason && unresolvedMessageSignatures.size > 0) reason = 'conversation_message_text_unavailable';
       if (!reason && (!topBoundary || !bottomBoundary)) {
         reason = !topBoundary ? 'conversation_top_not_reached' : 'conversation_scroll_stalled';
@@ -2534,7 +2552,7 @@ export class ChatGPTController {
       const generationActiveAfter = generationIsActive();
       if (generationActiveBefore || generationActiveAfter) reason = 'conversation_generation_active';
       const rawTurns = transcript
-        .filter((turn) => typeof turn.text === 'string' && turn.text.trim().length > 0)
+        .filter(hasTranscriptText)
         .map((turn, ordinal) => ({
           ordinal,
           providerMessageId: turn.providerMessageId,

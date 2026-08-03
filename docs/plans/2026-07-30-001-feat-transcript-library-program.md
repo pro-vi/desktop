@@ -90,6 +90,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   | { status: 'partial'; reason: CaptureReason; conversationUrl: CanonicalConversationUrl | null; capturedAt: ISODateTime; rawTurns: RawTranscriptTurn[]; evidence: CaptureEvidence }
     // discharges O1: completeness and its failures are one closed discriminated union
     // contract: a structurally valid served mapped message with no transcript text remains partial without being classified as provider compatibility drift
+    // contract: a fully served conversation whose every mapped message lacks transcript text is drift, since text extraction, not an all-image thread, is the representable cause
 +
 + parseConversationCapture(value: unknown): ConversationCapture
 + normalizeLiveCapture(capture: Extract<ConversationCapture, {status:'complete'}>): NormalizedTranscript

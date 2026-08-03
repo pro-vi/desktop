@@ -4443,6 +4443,70 @@ test('chatgpt-controller: an all-image mapped window reports unavailable text in
   assert.deepEqual(capture.rawTurns, []);
 });
 
+const imageOnlyChildNodes = () => [{
+  nodeType: 1,
+  tagName: 'IMG',
+  childNodes: [],
+  hidden: false,
+  getAttribute(name) {
+    return name === 'alt' ? 'Changing image metadata is not transcript text' : null;
+  }
+}];
+
+const textlessConversation = (length) => Array.from({ length }, (_, index) => (
+  index % 2 === 0
+    ? { role: 'user', text: `Prompt ${index}` }
+    : { role: 'assistant', text: `Reply ${index}` }
+));
+
+test('chatgpt-controller: a fully served conversation with no transcript text anywhere reports compatibility drift', async () => {
+  const messages = textlessConversation(4);
+  const page = slidingConversationPage(messages, {
+    windowSize: messages.length,
+    initialStart: 0,
+    childNodesForMessage: imageOnlyChildNodes
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'compatibility_drift');
+  assert.deepEqual(capture.rawTurns, []);
+});
+
+test('chatgpt-controller: a short textless conversation stays unavailable text rather than drift', async () => {
+  const messages = textlessConversation(3);
+  const page = slidingConversationPage(messages, {
+    windowSize: messages.length,
+    initialStart: 0,
+    childNodesForMessage: imageOnlyChildNodes
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+  assert.deepEqual(capture.rawTurns, []);
+});
+
+test('chatgpt-controller: one surviving text turn keeps image-only turns out of compatibility drift', async () => {
+  const messages = textlessConversation(6);
+  const page = slidingConversationPage(messages, {
+    windowSize: messages.length,
+    initialStart: 0,
+    childNodesForMessage: (_message, index) => index === 0 ? undefined : imageOnlyChildNodes()
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+  assert.deepEqual(capture.rawTurns.map(({ text }) => text), ['Prompt 0']);
+});
+
 test('chatgpt-controller: image-only input without provider positions remains compatibility drift', async () => {
   const page = slidingConversationPage([
     { role: 'user', text: 'Layout fallback must not become transcript evidence' }
