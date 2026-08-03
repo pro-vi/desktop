@@ -134,11 +134,35 @@ export function createPrivateFileSystem({
   async function replaceFile(finalPath, bytes, { boundaryPath } = {}) {
     const tempPath = await writePrivateTemp(finalPath, bytes, { boundaryPath });
     try {
-      await operations.rename(tempPath, finalPath);
-      await operations.chmod(finalPath, PRIVATE_FILE_MODE);
-      await syncDirectory(path.dirname(finalPath));
+      try {
+        await operations.rename(tempPath, finalPath);
+        await operations.chmod(finalPath, PRIVATE_FILE_MODE);
+        await syncDirectory(path.dirname(finalPath));
+      } catch (error) {
+        let current;
+        try {
+          current = await readPrivateFile(finalPath, {
+            maxBytes: Math.max(bytes.length, 64 * 1024 * 1024),
+            boundaryPath
+          });
+        } catch (readError) {
+          if (readError?.code === 'ENOENT') {
+            throw privateFileError('private_replace_not_applied');
+          }
+          throw privateFileError('private_replace_uncertain');
+        }
+        if (current.length !== bytes.length || !crypto.timingSafeEqual(current, bytes)) {
+          throw privateFileError('private_replace_not_applied');
+        }
+        try {
+          await operations.chmod(finalPath, PRIVATE_FILE_MODE);
+          await syncDirectory(path.dirname(finalPath));
+        } catch {
+          throw privateFileError('private_replace_uncertain');
+        }
+      }
     } finally {
-      await ignoreMissing(async () => await operations.unlink(tempPath));
+      await ignoreMissing(async () => await operations.unlink(tempPath)).catch(() => {});
     }
   }
 

@@ -505,10 +505,19 @@ export function createTranscriptStore({
   }
 
   async function load() {
-    if (writeUncertain) throw storeError('transcript_store_reload_required');
+    if (writeUncertain) {
+      loadPromise = null;
+      try {
+        const reloaded = await loadOnce();
+        writeUncertain = false;
+        loadPromise = Promise.resolve(reloaded);
+      } catch {
+        loadPromise = null;
+        throw storeError('transcript_store_reload_required');
+      }
+    }
     if (!loadPromise) loadPromise = loadOnce();
     const loaded = await loadPromise;
-    if (writeUncertain) throw storeError('transcript_store_reload_required');
     return clone(loaded);
   }
 
@@ -530,8 +539,8 @@ export function createTranscriptStore({
     if (terminalBytes.length > maxStateBytes) throw storeError('transcript_store_size_limit');
     try {
       await fileSystem.replaceFile(filePath, bytes, { boundaryPath: stateDir });
-    } catch {
-      writeUncertain = true;
+    } catch (error) {
+      if (error?.code !== 'private_replace_not_applied') writeUncertain = true;
       throw storeError('transcript_store_io');
     }
     durableState = parsed;

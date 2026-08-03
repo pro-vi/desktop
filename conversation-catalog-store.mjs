@@ -549,7 +549,17 @@ export function createConversationCatalogStore({
   }
 
   async function ensureLoaded() {
-    if (writeUncertain) throw storeError('catalog_store_reload_required');
+    if (writeUncertain) {
+      loadPromise = null;
+      try {
+        await loadOnce();
+        writeUncertain = false;
+        loadPromise = Promise.resolve();
+      } catch {
+        loadPromise = null;
+        throw storeError('catalog_store_reload_required');
+      }
+    }
     if (!loadPromise) loadPromise = loadOnce();
     await loadPromise;
   }
@@ -577,8 +587,8 @@ export function createConversationCatalogStore({
     if (terminalBytes.length > maxStateBytes) throw storeError('catalog_store_size_limit');
     try {
       await fileSystem.replaceFile(filePath, bytes, { boundaryPath: stateDir });
-    } catch {
-      writeUncertain = true;
+    } catch (error) {
+      if (error?.code !== 'private_replace_not_applied') writeUncertain = true;
       throw storeError('catalog_store_io');
     }
     installDurableState(parsed);

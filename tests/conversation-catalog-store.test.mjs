@@ -718,7 +718,7 @@ test('catalog store: explicit scope reassignment rekeys raw catalog evidence and
   assert.equal((await store.get(oldIdentity)).route.kind, 'unverified');
 });
 
-test('catalog store: real replace failures require restart and can never split a batch from its cursor', async (t) => {
+test('catalog store: real replace failures reconcile or remain retryable without splitting batch and cursor', async (t) => {
   for (const failurePoint of ['before-rename', 'after-rename']) {
     await t.test(failurePoint, async (t) => {
       const stateDir = await tempState(t, `replace-${failurePoint}`);
@@ -757,28 +757,30 @@ test('catalog store: real replace failures require restart and can never split a
       });
       await failing.load();
       failNextRename = true;
-      await assert.rejects(
-        () => failing.commitPreparedRecords(
+      const operation = () => failing.commitPreparedRecords(
           started.id,
           prepared.map(({ record }) => record),
           { schemaVersion: 1, recordIndex: 2 }
-        ),
-        /catalog_store_io/
-      );
-      await assert.rejects(() => failing.listImports(), /catalog_store_reload_required/);
+        );
+      if (failurePoint === 'before-rename') await assert.rejects(operation, /catalog_store_io/);
+      else await operation();
 
-      const restarted = makeStore({ stateDir, blobs });
-      const durableImport = byImportId(await restarted.listImports(), started.id);
-      const visibility = await Promise.all(prepared.map(({ record }) => restarted.hasIdentity(record.identity)));
+      const durableImport = byImportId(await failing.listImports(), started.id);
+      const visibility = await Promise.all(prepared.map(({ record }) => failing.hasIdentity(record.identity)));
       if (failurePoint === 'before-rename') {
         assert.deepEqual(durableImport.cursor, initialImportCursor());
         assert.deepEqual(visibility, [false, false]);
+        await operation();
+        assert.deepEqual(byImportId(await failing.listImports(), started.id).cursor, {
+          schemaVersion: 1,
+          recordIndex: 2
+        });
       } else {
         assert.deepEqual(durableImport.cursor, { schemaVersion: 1, recordIndex: 2 });
         assert.deepEqual(visibility, [true, true]);
         for (const fixture of prepared) {
           assert.deepEqual(
-            await restarted.latestImportedSnapshot(fixture.record.identity),
+            await failing.latestImportedSnapshot(fixture.record.identity),
             fixture.importedSnapshot
           );
         }

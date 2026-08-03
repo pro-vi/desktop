@@ -262,7 +262,7 @@ test('transcript store: missing, corrupt, and wrong-identity blobs cannot enter 
   assert.equal((await store.getSource(source.id)).latestLiveSnapshot, null);
 });
 
-test('transcript store: rename failure before publication leaves an open attempt recoverable after restart', async (t) => {
+test('transcript store: rename failure before publication stays retryable in-process', async (t) => {
   const { stateDir, blobs, source, attempt, snapshot, ref } = await setupOpenAttempt(t, 'rename-before');
   let failRename = true;
   const operations = proxiedOperations({
@@ -283,22 +283,14 @@ test('transcript store: rename failure before publication leaves an open attempt
   });
 
   await assert.rejects(() => uncertain.commitComplete(attempt.id, ref, snapshot.contentHash), /transcript_store_io/);
-  await assert.rejects(() => uncertain.load(), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.list(), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.getSource(source.id), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.findSource(source.identity), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.listDeleted(), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.setEnabled(source.id, false), /transcript_store_reload_required/);
-
-  const restarted = createTranscriptStore({ stateDir, blobs, clock: clockAt(60), randomId: ids('restart') });
-  assert.equal((await restarted.getSource(source.id)).state, 'syncing');
-  assert.equal((await restarted.getSource(source.id)).latestLiveSnapshot, null);
-  assert.equal(await restarted.recoverInterrupted(), 1);
-  assert.equal((await restarted.getSource(source.id)).state, 'interrupted');
+  assert.equal((await uncertain.getSource(source.id)).state, 'syncing');
+  assert.equal((await uncertain.getSource(source.id)).latestLiveSnapshot, null);
+  assert.equal((await uncertain.commitComplete(attempt.id, ref, snapshot.contentHash)).status, 'complete');
+  assert.equal((await uncertain.getSource(source.id)).latestLiveSnapshot.hash, ref.hash);
   assert.deepEqual(await blobs.getSnapshot(ref), snapshot);
 });
 
-test('transcript store: a rename that lands before reporting failure is whole after restart', async (t) => {
+test('transcript store: a rename that lands before reporting failure is reconciled in-process', async (t) => {
   const { stateDir, blobs, source, attempt, snapshot, ref } = await setupOpenAttempt(t, 'rename-after');
   let inject = true;
   const operations = proxiedOperations({
@@ -317,19 +309,47 @@ test('transcript store: a rename that lands before reporting failure is whole af
     clock: clockAt(70),
     randomId: ids('uncertain')
   });
-  await assert.rejects(() => uncertain.commitComplete(attempt.id, ref, snapshot.contentHash), /transcript_store_io/);
-  await assert.rejects(() => uncertain.load(), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.list(), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.getSource(source.id), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.findSource(source.identity), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.listDeleted(), /transcript_store_reload_required/);
-  await assert.rejects(() => uncertain.setEnabled(source.id, false), /transcript_store_reload_required/);
-
-  const restarted = createTranscriptStore({ stateDir, blobs, clock: clockAt(80), randomId: ids('restart') });
-  const visible = await restarted.getSource(source.id);
+  const committed = await uncertain.commitComplete(attempt.id, ref, snapshot.contentHash);
+  assert.equal(committed.status, 'complete');
+  const visible = await uncertain.getSource(source.id);
   assert.equal(visible.state, 'complete');
   assert.equal(visible.latestLiveSnapshot.hash, ref.hash);
-  assert.equal((await restarted.commitComplete(attempt.id, ref, snapshot.contentHash)).status, 'complete');
+  assert.equal((await uncertain.commitComplete(attempt.id, ref, snapshot.contentHash)).status, 'complete');
+});
+
+test('transcript store: genuinely uncertain replacement reloads durable state on the next operation', async (t) => {
+  const { stateDir, blobs, source, attempt, snapshot, ref } = await setupOpenAttempt(t, 'reload-uncertain');
+  let injectRename = true;
+  let injectRead = false;
+  const operations = proxiedOperations({
+    async rename(...args) {
+      await fs.rename(...args);
+      if (injectRename) {
+        injectRename = false;
+        injectRead = true;
+        throw Object.assign(new Error('injected ambiguous rename'), { code: 'EIO' });
+      }
+    },
+    async lstat(...args) {
+      if (injectRead) {
+        injectRead = false;
+        throw Object.assign(new Error('injected reconciliation read failure'), { code: 'EIO' });
+      }
+      return await fs.lstat(...args);
+    }
+  });
+  const uncertain = createTranscriptStore({
+    stateDir,
+    blobs,
+    fileSystem: createPrivateFileSystem({ operations }),
+    clock: clockAt(75),
+    randomId: ids('reload-uncertain')
+  });
+
+  await assert.rejects(() => uncertain.commitComplete(attempt.id, ref, snapshot.contentHash), /transcript_store_io/);
+  const visible = await uncertain.getSource(source.id);
+  assert.equal(visible.state, 'complete');
+  assert.equal(visible.latestLiveSnapshot.hash, ref.hash);
 });
 
 test('transcript store: interrupted recovery itself is retryable across a rename failure', async (t) => {
@@ -352,11 +372,9 @@ test('transcript store: interrupted recovery itself is retryable across a rename
     randomId: ids('failing')
   });
   await assert.rejects(() => failing.recoverInterrupted(), /transcript_store_io/);
-
-  const restarted = createTranscriptStore({ stateDir, blobs, clock: clockAt(100), randomId: ids('restart') });
-  assert.equal((await restarted.getSource(source.id)).state, 'syncing');
-  assert.equal(await restarted.recoverInterrupted(), 1);
-  assert.equal((await restarted.getSource(source.id)).state, 'interrupted');
+  assert.equal((await failing.getSource(source.id)).state, 'syncing');
+  assert.equal(await failing.recoverInterrupted(), 1);
+  assert.equal((await failing.getSource(source.id)).state, 'interrupted');
 });
 
 test('transcript store: corrupt and unsupported durable state fail closed without rewriting bytes', async (t) => {
