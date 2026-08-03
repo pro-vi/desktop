@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 
 import {
   INITIAL_PREPARED_IMPORT_BATCH_RECORDS,
+  MAX_CATALOG_IMPORT_PROBLEMS,
   MAX_PREPARED_IMPORT_BATCH_RECORDS,
   emptyImportCounts,
   initialImportCursor,
@@ -154,8 +155,15 @@ function preparedImportBatchLimit(recordIndex) {
 
 async function validateArchiveRecords(exportReader, archive, profileScopeId) {
   let recordIndex = 0;
+  let problemCount = 0;
   for await (const decoded of exportReader.streamConversations(archive, profileScopeId, initialImportCursor())) {
     const prepared = prepareDecoded(decoded, recordIndex);
+    if (prepared.problem !== null) {
+      problemCount += 1;
+      if (problemCount > MAX_CATALOG_IMPORT_PROBLEMS) {
+        throw serviceError('export_unsafe_archive');
+      }
+    }
     if (decoded.status === 'complete') {
       const rawRecord = {
         kind: 'raw',

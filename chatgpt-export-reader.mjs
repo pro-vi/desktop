@@ -3,7 +3,6 @@ import { Readable } from 'node:stream';
 import { createInflateRaw } from 'node:zlib';
 
 import {
-  MAX_CATALOG_IMPORT_PROBLEMS,
   initialImportCursor,
   parseImportCursor,
   parseIsoDateTime,
@@ -30,6 +29,7 @@ const ENCRYPTED_FLAGS = 0x0041;
 const SUPPORTED_FLAGS = UTF8_FLAG | DATA_DESCRIPTOR_FLAG;
 const MAX_ZIP_COMMENT_BYTES = 65_535;
 const MAX_MESSAGE_GRAPH_NODES = 100_000;
+export const MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS = 100_000;
 
 const DEFAULT_LIMITS = Object.freeze({
   maxArchiveBytes: 8 * 1024 * 1024 * 1024,
@@ -39,7 +39,7 @@ const DEFAULT_LIMITS = Object.freeze({
   maxTargetBytes: 4 * 1024 * 1024 * 1024,
   maxEntryBytes: 4 * 1024 * 1024 * 1024,
   maxRecordBytes: 64 * 1024 * 1024,
-  maxRecords: MAX_CATALOG_IMPORT_PROBLEMS,
+  maxRecords: MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS,
   maxCompressionRatio: 500,
   maxDepth: 4,
   maxJsonDepth: 256,
@@ -69,7 +69,7 @@ function normalizeLimits(value = {}) {
   for (const [key, limit] of Object.entries(limits)) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw readerError('export_reader_limits_invalid');
     if (key === 'maxCompressionRatio' && limit > 100_000) throw readerError('export_reader_limits_invalid');
-    if (key === 'maxRecords' && limit > MAX_CATALOG_IMPORT_PROBLEMS) {
+    if (key === 'maxRecords' && limit > MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS) {
       throw readerError('export_reader_limits_invalid');
     }
   }
