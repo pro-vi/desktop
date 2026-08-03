@@ -1054,6 +1054,31 @@ test('http-api: explicit live continuation binding fails before any provider mut
   }
 });
 
+test('http-api: live continuation preserves safe transcript-store failures without leaking details', async (t) => {
+  const privateLookupError = new Error('PRIVATE transcript /Users/private/export.zip <div>secret</div>');
+  privateLookupError.code = 'transcript_store_io';
+  privateLookupError.data = { transcript: 'PRIVATE', path: '/Users/private/export.zip' };
+  const started = await startContinuationHttp(t, { listError: privateLookupError });
+
+  const response = await req({
+    port: started.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: 'source-1',
+      key: 'thread-key',
+      chatUrl: 'https://chatgpt.com/c/thread-123',
+      prompt: 'must not be sent'
+    }
+  });
+
+  assert.equal(response.res.status, 500);
+  assert.deepEqual(response.data, { error: 'transcript_store_io' });
+  assert.doesNotMatch(JSON.stringify(response.data), /PRIVATE|export\.zip|\/Users\/private|<div>/);
+  assert.equal(started.events.some(([kind]) => ['prepare', 'query', 'sync'].includes(kind)), false);
+});
+
 test('http-api: live continuation rejects competing route selectors before tab or run work', async (t) => {
   const cases = [
     ['body tab', '/query', { tabId: 'tab-other' }],

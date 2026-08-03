@@ -135,6 +135,10 @@ function mapErrorToHttp(error) {
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
   if (msg === 'model_intent_activation_failed') return { code: 409, body: { error: 'model_intent_activation_failed', data: error?.data || null } };
+  const transcript = transcriptHttpError(error);
+  if (transcript.body.error !== 'internal_error') return transcript;
+  const catalog = catalogHttpError(error);
+  if (catalog.body.error !== 'internal_error') return catalog;
   return null;
 }
 
@@ -204,11 +208,19 @@ function transcriptHttpError(error) {
       'transcript_store_io',
       'transcript_store_reload_required',
       'transcript_store_size_limit',
+      'transcript_controller_unavailable',
+      'transcript_service_unavailable',
       'transcript_import_index_invalid',
       'library_blob_corrupt',
+      'library_blob_hash_collision',
+      'library_blob_hash_failure',
+      'library_blob_invalid_ref',
+      'library_blob_invalid_snapshot',
       'library_blob_io',
       'library_blob_not_found',
-      'library_blob_schema_unsupported'
+      'library_blob_schema_unsupported',
+      'library_blob_size_limit',
+      'library_blob_snapshot_hash_mismatch'
     ].includes(code)
   ) {
     return { code: 500, body: { error: code } };
@@ -1089,7 +1101,13 @@ export function startHttpApi({
     let sources;
     try {
       sources = await transcriptSync.list();
-    } catch {
+    } catch (error) {
+      const code = String(error?.code || error?.message || '');
+      if (code === 'transcript_service_unavailable' || code.startsWith('transcript_store_')) {
+        const safe = new Error(code);
+        safe.code = code;
+        throw safe;
+      }
       throw liveContinuationError();
     }
     if (!Array.isArray(sources)) throw liveContinuationError();
