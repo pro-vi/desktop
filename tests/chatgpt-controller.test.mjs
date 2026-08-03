@@ -3673,6 +3673,29 @@ test('chatgpt-controller: forced chat entry navigation reloads an already-exact 
   assert.ok(replacementReads >= 3);
 });
 
+test('chatgpt-controller: ordinary chat entry keeps a full readiness window after navigation', async () => {
+  const readinessTimeouts = [];
+  const page = {
+    async navigate() {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/';
+    }
+  };
+  const controller = new ChatGPTController({ page, selectors: {} });
+  controller.ensureReady = async ({ timeoutMs }) => {
+    readinessTimeouts.push(timeoutMs);
+  };
+
+  await controller.prepareChatEntry({
+    chatUrl: 'https://chatgpt.com/c/readiness-budget-thread',
+    timeoutMs: 25
+  });
+
+  assert.deepEqual(readinessTimeouts, [25]);
+});
+
 test('chatgpt-controller: served route inspection requires a visible mapped message and positive turn ordinal', async () => {
   const messageSelector = '[data-route-message="mapped"]';
   const turnSelector = '[data-route-turn="mapped"]';

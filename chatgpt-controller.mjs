@@ -568,8 +568,13 @@ export class ChatGPTController {
     if (mustNavigate) await this.navigate(target.chatUrl);
     if (forceNavigation) {
       await this.#waitForDocumentReplacement(priorDocumentEpoch, deadline);
+      await this.ensureReady({ timeoutMs: Math.max(1, deadline - Date.now()) });
+    } else {
+      // Ordinary query and sync navigation historically received a full readiness
+      // window after navigation completed. Route verification opts into the
+      // combined navigation/replacement deadline above.
+      await this.ensureReady({ timeoutMs: effectiveTimeoutMs });
     }
-    await this.ensureReady({ timeoutMs: Math.max(1, deadline - Date.now()) });
     return target;
   }
 
