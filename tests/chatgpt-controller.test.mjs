@@ -6377,6 +6377,53 @@ test('chatgpt-controller: readConversationText reports a missing leading user tu
   assert.ok(result.scrollPasses > 1);
 });
 
+test('chatgpt-controller: a served assistant-first head keeps its proven top boundary', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'assistant', text: 'Reply without its prompt' },
+    { role: 'user', text: 'Later turn' }
+  ]);
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 10_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_leading_turn_missing');
+  // The scroll did reach the top here. Reporting topBoundary false would make
+  // this indistinguishable from a scroll that fell short, which is the case a
+  // caller should retry rather than route to the export import.
+  assert.equal(capture.evidence.topBoundary, true);
+  assert.equal(capture.evidence.bottomBoundary, true);
+});
+
+test('chatgpt-controller: withheld earlier turns report a proven top and the legacy reason', async () => {
+  const messages = Array.from({ length: 12 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    text: `Turn ${index}`
+  }));
+  // The provider serves turns 7 onward and never yields the earlier ones, so the
+  // scroller quiets at the top of what exists in the DOM. This is the shape a
+  // real conversation hits, and before the dedicated reason it was reported as
+  // conversation_top_not_reached with topBoundary false -- denying a boundary the
+  // capture had actually proven.
+  const page = virtualizedConversationPage(messages, { initialStart: 7, loadOnMessageScroll: false });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 10_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.rawTurns[0].role, 'assistant');
+  assert.equal(capture.reason, 'conversation_leading_turn_missing');
+  assert.equal(capture.evidence.topBoundary, true);
+  // Callers outside the app still read the pre-V0 vocabulary.
+  const legacyReader = new ChatGPTController({
+    page: virtualizedConversationPage(messages, { initialStart: 7, loadOnMessageScroll: false }),
+    selectors: {}
+  });
+  const projected = await legacyReader.readConversationText({ maxChars: 5_000 });
+  assert.equal(projected.reason, 'leading_turn_missing');
+  assert.equal(projected.complete, false);
+});
+
 test('chatgpt-controller: readConversationText preserves max_chars over the leading-role safety net', async () => {
   const page = virtualizedConversationPage([
     { role: 'assistant', text: 'Reply without its prompt' }
@@ -6606,3 +6653,4 @@ test('chatgpt-controller: research export uses native download hook for markdown
     Date.now = realNow;
   }
 });
+

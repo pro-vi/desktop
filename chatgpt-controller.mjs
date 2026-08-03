@@ -2506,9 +2506,15 @@ export class ChatGPTController {
         }
       }
 
+      // The scroller quieted at the top of what the provider served, and that
+      // head is an assistant turn: either the thread truly opens that way or
+      // turn 1 was withheld. Either way the top boundary was proven, so denying
+      // it here would report a scroll that fell short -- a retryable failure --
+      // for a scroll that already finished. Give the condition its own reason
+      // and keep the boundary honest; recovering turn 1 needs the export
+      // import, not another pass.
       if (topBoundary && transcript[0]?.role === 'assistant') {
-        topBoundary = false;
-        reason = reason || 'conversation_top_not_reached';
+        reason = reason || 'conversation_leading_turn_missing';
       }
       if (!reason && hasUnresolvedStructuralState()) reason = 'compatibility_drift';
       const captureStructure = !reason ? orderedCaptureStructure() : null;

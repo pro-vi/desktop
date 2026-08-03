@@ -288,6 +288,7 @@ test('transcript contract: legacy projection exhaustively closes structured reas
   const expected = new Map([
     ['conversation_messages_not_found', 'conversation_messages_not_found'],
     ['conversation_top_not_reached', 'conversation_top_not_reached'],
+    ['conversation_leading_turn_missing', 'leading_turn_missing'],
     ['conversation_scroll_stalled', 'conversation_scroll_stalled'],
     ['conversation_capture_timeout', 'conversation_capture_timeout'],
     ['conversation_generation_active', 'conversation_capture_invalid'],

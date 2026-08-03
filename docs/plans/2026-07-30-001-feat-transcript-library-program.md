@@ -76,6 +76,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + type CaptureReason =
 +   | 'conversation_messages_not_found'
 +   | 'conversation_top_not_reached'
++   | 'conversation_leading_turn_missing'
 +   | 'conversation_scroll_stalled'
 +   | 'conversation_capture_timeout'
 +   | 'conversation_generation_active'
@@ -91,6 +92,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
     // discharges O1: completeness and its failures are one closed discriminated union
     // contract: a structurally valid served mapped message with no transcript text remains partial without being classified as provider compatibility drift
     // contract: a fully served conversation whose every mapped message lacks transcript text is drift, since text extraction, not an all-image thread, is the representable cause
+    // contract: a capture that quiets at the top of the served thread keeps evidence.topBoundary true even when that head is an assistant turn, and reports conversation_leading_turn_missing rather than conversation_top_not_reached, so a proven boundary is never denied to signal a missing turn 1
 +
 + parseConversationCapture(value: unknown): ConversationCapture
 + normalizeLiveCapture(capture: Extract<ConversationCapture, {status:'complete'}>): NormalizedTranscript

@@ -10,6 +10,7 @@ export const TRANSCRIPT_TURN_MAX_TEXT_CHARS = TRANSCRIPT_PAGE_MAX_TEXT_CHARS - 1
 export const TRANSCRIPT_CAPTURE_REASONS = Object.freeze([
   'conversation_messages_not_found',
   'conversation_top_not_reached',
+  'conversation_leading_turn_missing',
   'conversation_scroll_stalled',
   'conversation_capture_timeout',
   'conversation_generation_active',
@@ -56,6 +57,7 @@ const MAX_TURNS = 100_000;
 const LEGACY_REASON_BY_CAPTURE_REASON = Object.freeze({
   conversation_messages_not_found: 'conversation_messages_not_found',
   conversation_top_not_reached: 'conversation_top_not_reached',
+  conversation_leading_turn_missing: 'leading_turn_missing',
   conversation_scroll_stalled: 'conversation_scroll_stalled',
   conversation_capture_timeout: 'conversation_capture_timeout',
   conversation_generation_active: 'conversation_capture_invalid',
@@ -508,6 +510,9 @@ function projectParsedLegacyConversationText(capture, {
     ? legacyDiagnosticReason || LEGACY_REASON_BY_CAPTURE_REASON[capture.reason] || 'conversation_capture_invalid'
     : null;
   if (clipped) reason = 'max_chars';
+  // Captures recorded before conversation_leading_turn_missing existed folded an
+  // assistant-first head into conversation_top_not_reached. Keep projecting those
+  // to the same legacy reason so stored transcripts read the same as fresh ones.
   else if (capture.status === 'partial' && capture.reason === 'conversation_top_not_reached' && turns[0]?.role === 'assistant') {
     reason = 'leading_turn_missing';
   }
