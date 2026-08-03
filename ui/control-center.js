@@ -158,7 +158,7 @@ const SAFE_CONTROL_CENTER_ERROR_CODES = new Set([
   'invalid_catalog_contract',
   'catalog_response_invalid',
   'catalog_imports_response_invalid',
-  'catalog_profile_scope_invalid',
+  'invalid_profile_scope_id',
   'catalog_cursor_mismatch',
   'catalog_store_corrupt_state',
   'catalog_store_schema_unsupported',
@@ -440,14 +440,14 @@ async function syncTranscriptSource(source) {
 
 async function forgetTranscriptSource(source) {
   const confirmed = window.confirm(
-    'Forget this local tracked source? This removes Agentify’s source record only. The ChatGPT conversation remains untouched.'
+    'Forget this local tracked source from Agentify’s active list? Recoverable deletion history and immutable transcript blobs may remain locally. The ChatGPT conversation remains untouched.'
   );
   if (!confirmed) return;
   await withLibraryAction('Forgetting the local source…', async () => {
     const outcome = await callApi('forgetTranscript', { sourceId: source.id, confirm: true }, { required: true });
     libraryStatus(outcome?.deleted === false
-      ? 'The local source was already absent. The provider conversation was untouched.'
-      : 'Local source forgotten. The provider conversation was untouched.', 'ok');
+      ? 'The source was already absent from the active list. Recoverable history and immutable blobs may remain locally. The provider conversation was untouched.'
+      : 'Local source forgotten from the active list. Recoverable history and immutable blobs may remain locally. The provider conversation was untouched.', 'ok');
     await refreshLibraryMetadata();
   });
 }
@@ -1247,7 +1247,7 @@ async function main() {
       try {
         window.localStorage?.removeItem(LIBRARY_SCOPE_STORAGE_KEY);
       } catch {}
-      libraryStatus('Profile scope could not be selected (catalog_profile_scope_invalid).', 'warn');
+      libraryStatus('Profile scope could not be selected (invalid_profile_scope_id).', 'warn');
       return;
     }
     await refreshLibraryMetadata();
@@ -1445,6 +1445,8 @@ async function main() {
     setInterval(() => refresh().catch(() => {}), 3000);
   }
 
+  await refresh();
+
   try {
     const b = getBridge();
     if (hasApi('onLibraryChanged')) {
@@ -1456,7 +1458,7 @@ async function main() {
     libraryStatus('Live library updates are unavailable. Use Refresh after HTTP or MCP changes.', 'warn');
   }
 
-  await Promise.all([refresh(), refreshLibraryMetadata()]);
+  await refreshLibraryMetadata();
   const initialProfileScopeId = selectedProfileScope();
   if (initialProfileScopeId) applyProfileScopeSelection(initialProfileScopeId);
 }

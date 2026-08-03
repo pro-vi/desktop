@@ -62,7 +62,7 @@ function fakeElement(tagName = 'div') {
   return node;
 }
 
-function uiHarness(source, { savedScope = 'scope-a', getCatalog } = {}) {
+function uiHarness(source, { savedScope = 'scope-a', getState, getCatalog } = {}) {
   const elements = new Map();
   const intervals = [];
   const libraryChangedListeners = [];
@@ -76,7 +76,7 @@ function uiHarness(source, { savedScope = 'scope-a', getCatalog } = {}) {
     createElement: (tagName) => fakeElement(tagName)
   };
   const bridge = {
-    getState: async () => ({ vendors: [], tabs: [], stateDir: '/private/state', runtime: {} }),
+    getState: getState || (async () => ({ vendors: [], tabs: [], stateDir: '/private/state', runtime: {} })),
     getSettings: async () => ({}),
     getRuns: async () => ({ runs: [] }),
     listWatchFolders: async () => ({ folders: [] }),
@@ -181,7 +181,11 @@ test('Transcript Library Control Center exposes the minimal V0 controls and priv
   assert.match(html, /No sidebar scan is performed/i);
   assert.match(html, /ZIP access is one-use/i);
   assert.match(html, /private file permissions/i);
-  assert.match(html, /Forget removes only Agentify[^<]*local source record/i);
+  assert.match(html, /letters, numbers, dots, underscores, colons, or hyphens/i);
+  assert.match(html, /spaces are not allowed/i);
+  assert.match(html, /active list/i);
+  assert.match(html, /Recoverable deletion history/i);
+  assert.match(html, /immutable transcript blobs may remain locally/i);
   assert.match(html, /never deletes the provider conversation/i);
 });
 
@@ -328,6 +332,34 @@ test('Transcript Library metadata refresh retains last-good rows and reports bou
   assert.doesNotMatch(rendered, /private\/export\/path/);
 });
 
+test('Transcript Library initial metadata waits for the private state directory', async () => {
+  const source = await readUi('control-center.js');
+  let stateRequested = false;
+  let releaseState;
+  const pendingState = new Promise((resolve) => { releaseState = resolve; });
+  let catalogCalls = 0;
+  const harness = uiHarness(source, {
+    getState: async () => {
+      stateRequested = true;
+      return await pendingState;
+    },
+    getCatalog: async () => {
+      catalogCalls += 1;
+      return { items: [], nextCursor: null };
+    }
+  });
+
+  await waitFor(() => stateRequested, 'initial state refresh did not start');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(catalogCalls, 0, 'library metadata rendered before stateDir was available');
+
+  releaseState({ vendors: [], tabs: [], stateDir: '/private/ordered-state', runtime: {} });
+  await waitFor(
+    () => catalogCalls > 0 && harness.elements.get('libraryStorageLocation')?.textContent.includes('/private/ordered-state/transcript-library'),
+    'library metadata did not render with the resolved private state directory'
+  );
+});
+
 test('Transcript Library scope refresh discards stale scope results and reruns for the current scope', async () => {
   const source = await readUi('control-center.js');
   let resolveScopeA;
@@ -433,6 +465,7 @@ test('Transcript Library source rows expose busy/disabled state and unchanged sy
 
   const harness = uiHarness(source);
   await waitFor(() => typeof harness.bridge.onLibraryChanged === 'function', 'library change listener did not initialize');
+  await waitFor(() => harness.elements.has('librarySourcesList'), 'initial library metadata did not render');
   const makeSource = (id, state) => ({
     id,
     label: `${state} source`,
@@ -481,8 +514,8 @@ test('Transcript Library renderer accepts a profile scope only after backend val
     getCatalog: async ({ profileScopeId }) => {
       requestedScopes.push(profileScopeId);
       if (profileScopeId === 'bad scope') {
-        const error = new Error('catalog_profile_scope_invalid');
-        error.code = 'catalog_profile_scope_invalid';
+        const error = new Error('invalid_profile_scope_id');
+        error.code = 'invalid_profile_scope_id';
         throw error;
       }
       return { items: [], nextCursor: null };
@@ -505,7 +538,7 @@ test('Transcript Library renderer accepts a profile scope only after backend val
   assert.equal(requestedScopes.includes('bad scope'), true);
   assert.equal(harness.localStorageWrites.some(({ value }) => value === 'bad scope'), false);
   assert.equal(harness.localStorageRemovals.includes('agentify.transcriptLibrary.profileScopeId'), true);
-  assert.match(harness.elements.get('libraryActionStatus').textContent, /could not be selected \(catalog_profile_scope_invalid\)/);
+  assert.match(harness.elements.get('libraryActionStatus').textContent, /could not be selected \(invalid_profile_scope_id\)/);
   const importRow = harness.elements.get('libraryImportsList').children
     .find((node) => node.className.includes('libraryItem'));
   const reassignButton = importRow.children[1].children.find((button) => button.textContent === 'Reassign scope');

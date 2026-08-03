@@ -115,7 +115,7 @@
             <label class="field">
               <div class="label">ChatGPT profile scope</div>
               <input id="libraryProfileScope" type="text" placeholder="e.g. chatgpt-personal" autocomplete="off" />
-              <div class="fieldHelp">A stable local name for this signed-in ChatGPT account. Reuse the same value over time.</div>
+              <div class="fieldHelp">A stable local name for this signed-in ChatGPT account. Use 1–128 letters, numbers, dots, underscores, colons, or hyphens; spaces are not allowed.</div>
             </label>
             <label class="field">
               <div class="label">Verification tab key</div>
@@ -149,7 +149,7 @@
           </div>
 
           <div class="privacyNote">
-            ZIP access is one-use. Raw records and snapshots stay under the local state folder with private file permissions. Forget removes only Agentify’s local source record; it never deletes the provider conversation.
+            ZIP access is one-use. Raw records and snapshots stay under the local state folder with private file permissions. Forget removes a source from Agentify’s active list. Recoverable deletion history and immutable transcript blobs may remain locally; it never deletes the provider conversation.
           </div>
           <div id="libraryStorageLocation" class="hint mono">Local transcript storage lives inside Agentify’s private state folder.</div>
         </section>

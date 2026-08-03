@@ -118,8 +118,8 @@ function registerFixtureIpc(scenario, getWindow) {
     : []);
   ipcMain.handle('agentify:getCatalog', async (_event, request) => {
     if (request?.profileScopeId !== PROFILE_SCOPE_ID) {
-      const error = new Error('catalog_profile_scope_invalid');
-      error.code = 'catalog_profile_scope_invalid';
+      const error = new Error('invalid_profile_scope_id');
+      error.code = 'invalid_profile_scope_id';
       throw error;
     }
     return scenario === 'states'

@@ -123,7 +123,7 @@ const SCENARIOS = Object.freeze({
       {
         label: 'confirmed local forget success',
         selector: '#libraryActionStatus',
-        expectedText: ['Local source forgotten', 'provider conversation was untouched']
+        expectedText: ['Local source forgotten', 'active list', 'immutable blobs may remain locally', 'provider conversation was untouched']
       },
       {
         label: 'empty tracked-source state',
@@ -133,7 +133,7 @@ const SCENARIOS = Object.freeze({
       {
         label: 'provider-preserving privacy promise',
         selector: '#transcriptLibraryCard .privacyNote',
-        expectedText: ['Forget removes only Agentify', 'never deletes the provider conversation']
+        expectedText: ['active list', 'Recoverable deletion history', 'immutable transcript blobs may remain locally', 'never deletes the provider conversation']
       }
     ]
   }
