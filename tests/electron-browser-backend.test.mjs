@@ -213,6 +213,34 @@ test('electron-browser-backend: terminateEvaluation stops renderer execution thr
   assert.equal(createdWindow?.debuggerAttached, false);
 });
 
+test('electron-browser-backend: failed evaluation termination never crashes the shared renderer', async () => {
+  let createdWindow = null;
+  let crashCalls = 0;
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      createdWindow = this;
+      this.webContents.debugger.sendCommand = async () => {
+        throw new Error('termination_failed');
+      };
+      this.webContents.forcefullyCrashRenderer = () => {
+        crashCalls += 1;
+      };
+    }
+
+    async loadURL() {
+      return true;
+    }
+  }
+
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+
+  assert.equal(await session.page.terminateEvaluation(), false);
+  assert.equal(crashCalls, 0);
+  assert.equal(createdWindow?.destroyed, false);
+});
+
 test('electron-browser-backend: navigation guard remembers an in-page route mismatch after returning', async () => {
   let createdWindow = null;
   class OkBrowserWindow extends MockBrowserWindow {

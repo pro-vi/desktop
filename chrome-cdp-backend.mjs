@@ -406,17 +406,10 @@ class ChromeCdpPageAdapter {
       );
       if (terminated) return true;
     } catch {}
-    try {
-      const closed = await settleWithin(
-        this.client.send('Target.closeTarget', { targetId: this.targetId }).then(() => true, () => false),
-        2_000
-      );
-      if (!closed) throw new Error('chrome_cdp_termination_failed');
-      this.markClosed();
-      return true;
-    } catch {
-      return false;
-    }
+    // A capture runs inside the same provider tab used by normal queries. Closing
+    // that target is not a safe cancellation primitive: it destroys user-visible
+    // state and turns a bounded read failure into data loss at the browser seam.
+    return false;
   }
 
   async evaluateDeepResearch(js) {

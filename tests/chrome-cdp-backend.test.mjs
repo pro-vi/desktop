@@ -256,6 +256,29 @@ test('chrome-cdp-backend: terminateEvaluation stops the owned renderer session',
     item.method === 'Runtime.terminateExecution' && item.sessionId === 'session-1'), true);
 });
 
+test('chrome-cdp-backend: failed evaluation termination never closes the shared target', async () => {
+  const calls = [];
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });
+  backend.started = true;
+  backend.client = {
+    connected: true,
+    ws: {},
+    send: async (method, params = {}, sessionId) => {
+      calls.push({ method, params, sessionId });
+      if (method === 'Target.createTarget') return { targetId: 'target-1' };
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-1' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      if (method === 'Runtime.terminateExecution') throw new Error('termination_failed');
+      return {};
+    }
+  };
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+
+  assert.equal(await session.page.terminateEvaluation(), false);
+  assert.equal(calls.some((item) => item.method === 'Target.closeTarget'), false);
+  assert.equal(session.page.isClosed(), false);
+});
+
 test('chrome-cdp-backend: navigation guard remembers a same-document route mismatch after returning', async () => {
   const routeA = 'https://chatgpt.com/c/route-a';
   const routeB = 'https://chatgpt.com/c/route-b';

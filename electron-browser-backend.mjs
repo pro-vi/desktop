@@ -121,12 +121,9 @@ class ElectronPageAdapter {
       );
       if (terminated === true) return true;
     } catch {}
-    try {
-      wc.forcefullyCrashRenderer();
-      return true;
-    } catch {
-      return false;
-    }
+    // Never crash the shared renderer to cancel a transcript read. The caller can
+    // fail the capture closed while leaving the provider tab intact.
+    return false;
   }
 
   async evaluateDeepResearch(js) {
