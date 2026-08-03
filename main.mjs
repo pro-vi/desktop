@@ -30,6 +30,7 @@ import {
 } from './conversation-catalog-sync.mjs';
 import { createElectronExportImportGrants } from './export-import-grants.mjs';
 import { createPrivateLibraryBlobStore } from './library-blob-store.mjs';
+import { recoverTranscriptLibraryStartup } from './library-startup.mjs';
 import { privateFileSystem } from './private-filesystem.mjs';
 import { createTranscriptReadService } from './transcript-read.mjs';
 import { TabManager } from './tab-manager.mjs';
@@ -310,8 +311,7 @@ async function main() {
     blobs: transcriptBlobs,
     fileSystem: privateFileSystem
   });
-  await transcriptStore.recoverInterrupted();
-  await catalogStore.recoverInterruptedImports();
+  const libraryStartup = await recoverTranscriptLibraryStartup({ transcriptStore, catalogStore });
   exportImportGrants = createElectronExportImportGrants({ dialog });
   const catalogSync = createConversationCatalogService({
     store: catalogStore,
@@ -422,6 +422,7 @@ async function main() {
       browserBackend: browserBackendKind,
       browser: browserState,
       compatibility: getCompatibilityStatus(),
+      libraryStartup,
       runtime: server?.getRuntimeState?.() || { inflightQueries: 0, providerSlots: { max: settings.maxInflightQueries || 2, activeLeases: [], queued: [] }, activeQueries: [] }
     };
   });
