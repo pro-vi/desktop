@@ -773,11 +773,14 @@ export function createConversationCatalogStore({
         throw storeError('catalog_import_cursor_mismatch');
       }
       const records = durableState.records.slice();
+      const durableRecordIndexes = new Map(durableState.records.map((record, index) => [record, index]));
       for (const candidate of candidates) {
         const existing = existingByIndex.get(candidate.recordIndex);
         if (existing) {
           if (!replacementEquivalent(existing, candidate)) throw storeError('catalog_import_replay_conflict');
-          records[records.indexOf(existing)] = candidate;
+          const recordIndex = durableRecordIndexes.get(existing);
+          if (recordIndex === undefined) throw storeError('catalog_store_corrupt_state');
+          records[recordIndex] = candidate;
         } else {
           records.push(candidate);
         }
