@@ -4131,12 +4131,20 @@ export function startHttpApi({
         await projectsReady;
         const body = await parseBody(req);
         const maxChars = positiveIntOr(body.maxChars, 200_000, 1_000_000);
+        // Entry by URL stays read-only: prepareChatEntry validates the target and
+        // navigates, and never touches the composer or submit path, so capturing a
+        // supplied conversation cannot append a turn to it. Parse before resolving
+        // a tab so an unusable URL fails without creating one.
+        const entryTarget = body.chatUrl ? parseChatGptEntryTarget(body.chatUrl) : null;
         const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
         const controller = tabs.getControllerById(tabId);
         if (typeof controller?.readConversationText !== 'function') {
           return sendJson(res, 501, { error: 'conversation_read_unsupported' });
         }
-        const capture = await runExclusive(controller, async () => await controller.readConversationText({ maxChars }));
+        const capture = await runExclusive(controller, async () => {
+          if (entryTarget) await controller.prepareChatEntry({ chatUrl: entryTarget.chatUrl });
+          return await controller.readConversationText({ maxChars });
+        });
         return sendJson(res, 200, { ok: true, tabId, ...capture });
       }
 

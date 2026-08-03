@@ -642,7 +642,7 @@ Prompt:
 Use explicit tool calls (`agentify_query`, `agentify_read_page`, `agentify_read_conversation`, etc.) when you need deterministic/reproducible runs or when debugging tool selection.
 
 ## How to use (practical)
-- **Use ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok normally (manual):** write a plan/spec in the UI, then in your MCP client call `agentify_read_page` to pull the visible page text into your workflow. For a complete long ChatGPT thread, call `agentify_read_conversation`; it scrolls through virtualized turns and reports whether capture is complete.
+- **Use ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok normally (manual):** write a plan/spec in the UI, then in your MCP client call `agentify_read_page` to pull the visible page text into your workflow. For a complete long ChatGPT thread, call `agentify_read_conversation`; it scrolls through virtualized turns and reports whether capture is complete. Pass `chatUrl` to read a specific conversation — Agentify navigates there and captures without sending anything, so reading a thread never adds a turn to it.
 - **Drive ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok from your MCP client:** call `agentify_ensure_ready`, then `agentify_query` with a `prompt`. Use a stable `key` per project to keep parallel jobs isolated.
 - **Parallel jobs:** create/ensure a tab per project with `agentify_tab_create(key: ...)`, then use that `key` for `agentify_query`, `agentify_read_page`, and `agentify_download_images`.
 - **Upload files:** pass local paths via `attachments` to `agentify_query` or `agentify_image_gen` (best-effort; depends on the site UI).

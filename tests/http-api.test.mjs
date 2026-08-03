@@ -4141,6 +4141,97 @@ test('http-api: read-conversation exposes complete transcript capture through th
   assert.equal(data.text, 'User\nOne\n\nAssistant\nTwo');
 });
 
+test('http-api: read-conversation enters a supplied chatUrl without sending anything', async (t) => {
+  const calls = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async (args) => {
+      calls.push(['prepareChatEntry', args.chatUrl]);
+      return { ok: true };
+    },
+    // A read must never reach these. Present so a regression calls them loudly
+    // rather than passing because the fixture happened to omit them.
+    query: async () => {
+      calls.push(['query']);
+      throw new Error('read-conversation must not send a prompt');
+    },
+    readConversationText: async () => {
+      calls.push(['readConversationText']);
+      return { text: 'User\nOne', complete: true, truncated: false, reason: null, messageCount: 1, scrollPasses: 2 };
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: '/tmp',
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { chatUrl: 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6', maxChars: 500 }
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(data.complete, true);
+  assert.deepEqual(calls, [
+    ['prepareChatEntry', 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6'],
+    ['readConversationText']
+  ]);
+});
+
+test('http-api: read-conversation rejects an unusable chatUrl before touching a tab', async (t) => {
+  const calls = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async () => { calls.push('prepareChatEntry'); },
+    readConversationText: async () => { calls.push('readConversationText'); return {}; }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => { calls.push('ensureTab'); return 't0'; },
+    createTab: async () => { calls.push('createTab'); return 't0'; },
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: '/tmp',
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { chatUrl: 'https://chatgpt.com/g/g-p-abc/project' }
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(data.error, 'invalid_chatgpt_url');
+  assert.deepEqual(calls, []);
+});
+
 test('http-api: query packs context paths before forwarding to controller', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-context-'));
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');

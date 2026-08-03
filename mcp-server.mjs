@@ -855,21 +855,22 @@ registerTool(
   'agentify_read_conversation',
   {
     description:
-      'Read the complete ChatGPT conversation in the active tab. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript.',
+      'Read a complete ChatGPT conversation. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_chatgpt_export instead.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT for complete conversation capture.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
+      chatUrl: z.string().optional().describe('ChatGPT conversation or shared-chat URL to read. Navigates the tab before capturing, without sending anything to the conversation.'),
       maxChars: z.number().optional().describe('Maximum transcript characters to return.')
     }
   },
-  async ({ model, tabId, key, maxChars }) => {
+  async ({ model, tabId, key, chatUrl, maxChars }) => {
     const conn = await getConn();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/read-conversation',
-      body: { model, tabId, key, maxChars: maxChars || 200_000 }
+      body: { model, tabId, key, chatUrl, maxChars: maxChars || 200_000 }
     });
     return {
       content: [{ type: 'text', text: data.text || '' }],
