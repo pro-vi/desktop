@@ -1375,6 +1375,42 @@ test('chatgpt-controller: query applies the requested model intent before sendin
   );
 });
 
+test('chatgpt-controller: an unsupported model intent fails before the composer is touched', async () => {
+  const evaluations = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      evaluations.push(js);
+      if (js.includes('const hasTurnstile')) return readyState();
+      throw new Error(`unexpected page evaluation: ${String(js).slice(0, 80)}`);
+    }
+  };
+  const controller = new ChatGPTController({ page, selectors: { promptTextarea: '#prompt-textarea' } });
+
+  // A generation name the picker offers but this build cannot express. Returning
+  // a satisfied activation here would send the query on whatever the tab already
+  // had selected while reporting a pin that never happened.
+  await assert.rejects(
+    controller.query({ prompt: 'agentify', timeoutMs: 5_000, modelIntent: 'gpt-5.6-sol' }),
+    (error) => {
+      assert.equal(error.message, 'model_intent_unsupported');
+      assert.equal(error.data.reason, 'model_intent_unrecognized');
+      assert.equal(error.data.requestedIntent, 'gpt-5.6-sol');
+      assert.equal(error.data.targetIntent, null);
+      assert.deepEqual(error.data.supportedIntents, ['gpt-5.5-pro', 'gpt-5.4-pro']);
+      return true;
+    }
+  );
+
+  // Readiness is the only thing allowed to have run: no picker traversal, no
+  // typing, no send.
+  assert.ok(evaluations.length > 0);
+  assert.ok(
+    evaluations.every((js) => String(js).includes('const hasTurnstile')),
+    'only the readiness probe may run before an unsupported intent is rejected'
+  );
+});
+
 test('chatgpt-controller: model intent ignores pure Extended Pro mode chips', async () => {
   const realNow = Date.now;
   let fakeNow = 6_250_000;

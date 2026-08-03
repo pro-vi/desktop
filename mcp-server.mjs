@@ -680,7 +680,7 @@ registerTool(
         .describe('Tracked Transcript Library source id returned with sourceKey and conversationUrl; enables fail-closed live continuation validation.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
       modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro (Pro Extended), thinking (Medium), instant. This is separate from the vendor `model` hint.'),
-      modelIntent: z.string().optional().describe('Optional explicit ChatGPT generation intent for this query only. Supported intents: gpt-5.5-pro, gpt-5.4-pro. The controller fails closed unless the UI can confirm the requested generation before sending.'),
+      modelIntent: z.string().optional().describe('Optional explicit ChatGPT generation intent for this query only. Supported intents: gpt-5.5-pro, gpt-5.4-pro. Any other value is rejected before sending rather than ignored, so a successful run always means the requested generation was applied. Omit to leave the picker as-is. The controller also fails closed when the UI cannot confirm the requested generation.'),
       bundleName: z.string().optional().describe('Named context bundle to merge into this query before sending.'),
       prompt: z.string().describe('Prompt to send to ChatGPT.'),
       promptPrefix: z.string().optional().describe('Optional reusable instruction block prepended before packed context and prompt.'),

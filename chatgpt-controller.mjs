@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
+import { CHATGPT_MODEL_INTENTS, normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-location.mjs';
 import { providerConversationIdFromOwnedLocation } from './conversation-identity.mjs';
 import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
@@ -2923,11 +2923,30 @@ export class ChatGPTController {
   }
 
   async #applyModelIntentImpl({ modelIntent, timeoutMs = 20_000 } = {}) {
+    const supplied = typeof modelIntent === 'string' ? modelIntent.trim() : '';
     const normalizedIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
-    if (!normalizedIntent) return { active: true, reason: 'model_intent_not_requested', targetIntent: null };
+    // Nothing was asked for, so nothing had to be activated.
+    if (!normalizedIntent && !supplied) {
+      return { active: true, reason: 'model_intent_not_requested', targetIntent: null };
+    }
 
-    const meta = CHATGPT_MODEL_INTENT_META[normalizedIntent];
-    if (!meta) return { active: true, reason: 'model_intent_unsupported', targetIntent: normalizedIntent };
+    // A generation was asked for that this build cannot express -- an unknown
+    // name, or a known one with no picker metadata. The caller reads this result
+    // for provenance only and never gates the send on it, so reporting active
+    // here sent the query on whatever the tab already had selected while
+    // claiming a pin that never happened. Fail before send, as a failed
+    // activation does.
+    const meta = normalizedIntent ? CHATGPT_MODEL_INTENT_META[normalizedIntent] : null;
+    if (!meta) {
+      const err = new Error('model_intent_unsupported');
+      err.data = {
+        reason: normalizedIntent ? 'model_intent_metadata_missing' : 'model_intent_unrecognized',
+        requestedIntent: supplied || null,
+        targetIntent: normalizedIntent,
+        supportedIntents: [...CHATGPT_MODEL_INTENTS]
+      };
+      throw err;
+    }
 
     await this.#focusPrompt({ clickPrompt: false });
     await this.#emitProgress({ phase: 'activating_model_intent', modelIntent: normalizedIntent });
