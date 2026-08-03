@@ -9,11 +9,19 @@ import {
   createChatGptExportReader,
   createGrantedArchiveFromFileHandle
 } from '../chatgpt-export-reader.mjs';
+import { locationFromConversationUrl } from '../chatgpt-location.mjs';
 import { createConversationCatalogService } from '../conversation-catalog-sync.mjs';
 import { createConversationCatalogStore } from '../conversation-catalog-store.mjs';
-import { createPrivateLibraryBlobStore } from '../library-blob-store.mjs';
+import {
+  createPrivateLibraryBlobStore,
+  makeTranscriptSnapshot
+} from '../library-blob-store.mjs';
 import { createPrivateFileSystem } from '../private-filesystem.mjs';
-import { TRANSCRIPT_TURN_MAX_TEXT_CHARS } from '../transcript-contract.mjs';
+import {
+  TRANSCRIPT_TURN_MAX_TEXT_CHARS,
+  normalizeLiveCapture
+} from '../transcript-contract.mjs';
+import { createTranscriptReadService } from '../transcript-read.mjs';
 import { buildZip, crc32 } from './fixtures/zip-archive.mjs';
 
 const PROFILE_SCOPE_ID = 'profile-main';
@@ -249,7 +257,7 @@ test('catalog service: real import stages exact raw/snapshot blobs and exact re-
   assert.deepEqual(await fixture.blobs.getRaw(firstItem.latestArchiveRecord), Buffer.from(JSON.stringify(record)));
   const snapshot = await fixture.blobs.getSnapshot(firstItem.latestImportedSnapshot);
   assert.deepEqual(snapshot.identity, identity(record.id));
-  assert.equal(snapshot.capturedAt, OBSERVED_AT);
+  assert.equal(snapshot.capturedAt, VERIFIED_AT);
   assert.deepEqual(snapshot.origin, {
     kind: 'chatgpt-export',
     importId: first.importId,
@@ -309,9 +317,128 @@ test('catalog service: extended-year timestamps cannot strand import preflight o
     capturedAtByIdentity.set(item.identity.providerConversationId, snapshot.capturedAt);
   }
   assert.deepEqual(Object.fromEntries(capturedAtByIdentity), {
-    'timestamp-create-fallback': CREATED_AT,
-    'timestamp-epoch-fallback': '1970-01-01T00:00:00.000Z'
+    'timestamp-create-fallback': VERIFIED_AT,
+    'timestamp-epoch-fallback': VERIFIED_AT
   });
+});
+
+test('catalog service: future provider time cannot outrank a later live snapshot across replay and restart', async (t) => {
+  const fixture = await harness(t, 'future-provider-time');
+  const record = conversationRecord({ conversationId: 'future-order-thread' });
+  record.update_time = Date.parse('9999-01-01T00:00:00.000Z') / 1000;
+  const zipBytes = exportZip([record]);
+  await fixture.grants.add('grant-future-time', zipBytes);
+
+  const imported = await fixture.service.importExport({
+    grantId: 'grant-future-time',
+    profileScopeId: PROFILE_SCOPE_ID
+  });
+  assert.equal(imported.status, 'complete');
+  const [catalogImport] = await fixture.service.listImports();
+  assert.equal(catalogImport.createdAt, VERIFIED_AT);
+  const importedItem = (await fixture.service.list({
+    profileScopeId: PROFILE_SCOPE_ID,
+    limit: 10
+  })).items[0];
+  const importedSnapshot = await fixture.blobs.getSnapshot(importedItem.latestImportedSnapshot);
+  assert.equal(importedItem.firstObservedAt, catalogImport.createdAt);
+  assert.equal(importedItem.lastObservedAt, catalogImport.createdAt);
+  assert.equal(importedSnapshot.capturedAt, catalogImport.createdAt);
+  assert.deepEqual(
+    await fixture.blobs.getRaw(importedItem.latestArchiveRecord),
+    Buffer.from(JSON.stringify(record))
+  );
+
+  await fixture.grants.add('grant-future-time-replay', zipBytes);
+  assert.deepEqual(await fixture.service.importExport({
+    grantId: 'grant-future-time-replay',
+    profileScopeId: PROFILE_SCOPE_ID
+  }), imported);
+  const replayedItem = (await fixture.service.list({
+    profileScopeId: PROFILE_SCOPE_ID,
+    limit: 10
+  })).items[0];
+  assert.deepEqual(replayedItem.latestImportedSnapshot, importedItem.latestImportedSnapshot);
+
+  const liveCapturedAt = '2026-07-31T12:11:00.000Z';
+  const conversationUrl = `https://chatgpt.com/c/${record.id}`;
+  const rawTurns = [
+    {
+      ordinal: 0,
+      providerMessageId: `${record.id}-user`,
+      role: 'user',
+      text: 'A harmless import fixture prompt'
+    },
+    {
+      ordinal: 1,
+      providerMessageId: `${record.id}-assistant`,
+      role: 'assistant',
+      text: 'A harmless import fixture reply'
+    }
+  ];
+  const evidence = {
+    topBoundary: true,
+    bottomBoundary: true,
+    orderedWindowStitching: true,
+    scrollPasses: 1,
+    windowCount: 1,
+    messageCount: rawTurns.length,
+    providerIdCount: rawTurns.length,
+    byteCount: rawTurns.reduce((total, turn) =>
+      total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0)
+  };
+  const recordIdentity = identity(record.id);
+  const liveSnapshot = makeTranscriptSnapshot({
+    identity: recordIdentity,
+    normalizedTranscript: normalizeLiveCapture({
+      status: 'complete',
+      conversationUrl,
+      capturedAt: liveCapturedAt,
+      rawTurns,
+      evidence
+    }),
+    origin: { kind: 'live-capture', conversationUrl, captureEvidence: evidence },
+    capturedAt: liveCapturedAt
+  });
+  const liveRef = await fixture.blobs.putSnapshot(liveSnapshot);
+  assert.equal(liveSnapshot.contentHash, importedSnapshot.contentHash);
+  assert.notEqual(liveSnapshot.snapshotHash, importedSnapshot.snapshotHash);
+
+  const restartedBlobs = createPrivateLibraryBlobStore({ stateDir: fixture.stateDir });
+  const restartedStore = createConversationCatalogStore({
+    stateDir: fixture.stateDir,
+    blobs: restartedBlobs,
+    clock: () => '2026-08-01T00:00:00.000Z',
+    randomId: () => 'restart-unused'
+  });
+  assert.deepEqual(await restartedStore.recoverInterruptedImports(), []);
+  assert.deepEqual(
+    await restartedStore.latestImportedSnapshot(recordIdentity),
+    importedItem.latestImportedSnapshot
+  );
+  const read = createTranscriptReadService({
+    sources: {
+      async findSource() {
+        return {
+          id: 'source-future-order',
+          identity: recordIdentity,
+          key: 'future-order-key',
+          enabled: true,
+          target: {
+            kind: 'owned-conversation',
+            location: locationFromConversationUrl(conversationUrl)
+          },
+          latestLiveSnapshot: liveRef
+        };
+      }
+    },
+    imported: restartedStore,
+    blobs: restartedBlobs
+  });
+
+  const selected = await read.get({ identity: recordIdentity, limit: 10 });
+  assert.deepEqual(selected.snapshot, liveRef);
+  assert.equal(selected.capturedAt, liveCapturedAt);
 });
 
 test('catalog service: import interruption persistence retries once and reports unresolved recovery exactly', async (t) => {
@@ -407,7 +534,7 @@ test('catalog service: a real archive is committed in bounded batches', async (t
   assert.equal((await fixture.service.list({ profileScopeId: PROFILE_SCOPE_ID, limit: 100 })).items.length, 0);
 });
 
-test('catalog service: bounded batches grow geometrically through the 10,000-record ceiling', async () => {
+test('catalog service: bounded batches grow geometrically through the 10,000-problem outcome ceiling', async () => {
   async function runSchedule(recordCount, startRecordIndex = 0) {
     const commitBatchSizes = [];
     const priorProblems = Array.from({ length: startRecordIndex }, (_, recordIndex) => ({
@@ -418,6 +545,7 @@ test('catalog service: bounded batches grow geometrically through the 10,000-rec
     const catalogImport = {
       id: 'import-geometric-batches',
       status: 'open',
+      createdAt: VERIFIED_AT,
       cursor: { schemaVersion: 1, recordIndex: startRecordIndex },
       counts: {
         recordsSeen: startRecordIndex,
@@ -502,7 +630,7 @@ test('catalog service: bounded batches grow geometrically through the 10,000-rec
   assert.deepEqual(resumed.commitBatchSizes, [256, 1]);
 });
 
-test('catalog service: a real archive over the representable record bound is rejected before begin', async (t) => {
+test('catalog service: a real archive over the representable problem bound is rejected before begin', async (t) => {
   const fixture = await harness(t, 'record-bound');
   const privateMarker = 'private-record-bound-marker';
   const records = Array.from({ length: 10_001 }, (_, index) => ({

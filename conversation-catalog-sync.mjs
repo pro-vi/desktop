@@ -274,6 +274,12 @@ export function createConversationCatalogService({
           counts: catalogImport.counts
         });
       }
+      let importObservedAt;
+      try {
+        importObservedAt = parseIsoDateTime(catalogImport.createdAt, 'catalogImport.createdAt');
+      } catch {
+        throw serviceError('catalog_import_state_invalid');
+      }
 
       let cursor = catalogImport.cursor;
       let preparedBatch = [];
@@ -301,7 +307,7 @@ export function createConversationCatalogService({
                 rawRecord,
                 branchEvidence: decoded.activeBranchEvidence
               },
-              capturedAt: decoded.observedAt
+              capturedAt: importObservedAt
             });
             importedSnapshot = await blobs.putSnapshot(snapshot);
           }
@@ -311,7 +317,7 @@ export function createConversationCatalogService({
             title: decoded.title,
             rawRecord,
             importedSnapshot,
-            observedAt: decoded.observedAt,
+            observedAt: importObservedAt,
             problem: prepared.problem
           });
           if (preparedBatch.length === preparedBatchLimit) await commitBatch();
