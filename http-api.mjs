@@ -41,6 +41,10 @@ import { createRunStore } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 import { isTerminalRunStatus } from './run-lifecycle.mjs';
 import { atomicWriteFile } from './fs-utils.mjs';
+import {
+  catalogHttpStatusForErrorCode,
+  transcriptHttpStatusForErrorCode
+} from './library-http-errors.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -164,70 +168,8 @@ function isExactRecord(value, keys) {
 
 function transcriptHttpError(error) {
   const code = String(error?.code || error?.message || '');
-  if (code === 'body_too_large') return { code: 413, body: { error: code } };
-  if (
-    [
-      'invalid_json',
-      'invalid_profile_scope_id',
-      'invalid_conversation_identity',
-      'invalid_provider_conversation_id',
-      'transcript_request_invalid',
-      'transcript_source_invalid',
-      'transcript_track_invalid',
-      'transcript_page_limit'
-    ].includes(code)
-  ) {
-    return { code: 400, body: { error: code } };
-  }
-  if (code === 'transcript_confirmation_required') {
-    return { code: 400, body: { error: code } };
-  }
-  if (['tab_not_found', 'transcript_source_not_found', 'transcript_identity_not_found', 'transcript_snapshot_not_found'].includes(code)) {
-    return { code: 404, body: { error: code } };
-  }
-  if (
-    [
-      'key_vendor_mismatch',
-      'owned_conversation_required',
-      'tab_closed',
-      'transcript_source_disabled',
-      'transcript_source_exists',
-      'transcript_source_key_exists',
-      'transcript_sync_active',
-      'transcript_no_complete_snapshot',
-      'transcript_snapshot_identity_mismatch',
-      'transcript_cursor_mismatch'
-    ].includes(code)
-  ) {
-    return { code: 409, body: { error: code } };
-  }
-  if (
-    [
-      'transcript_store_corrupt_state',
-      'transcript_store_schema_unsupported',
-      'transcript_store_io',
-      'transcript_store_reload_required',
-      'transcript_store_size_limit',
-      'transcript_controller_unavailable',
-      'transcript_service_unavailable',
-      'transcript_import_index_invalid',
-      'library_blob_corrupt',
-      'library_blob_hash_collision',
-      'library_blob_hash_failure',
-      'library_blob_invalid_ref',
-      'library_blob_invalid_snapshot',
-      'library_blob_io',
-      'library_blob_not_found',
-      'library_blob_schema_unsupported',
-      'library_blob_size_limit',
-      'library_blob_snapshot_hash_mismatch'
-    ].includes(code)
-  ) {
-    return { code: 500, body: { error: code } };
-  }
-  if (code === 'transcript_page_character_limit') {
-    return { code: 413, body: { error: code } };
-  }
+  const status = transcriptHttpStatusForErrorCode(code);
+  if (status !== null) return { code: status, body: { error: code } };
   return { code: 500, body: { error: 'internal_error' } };
 }
 
@@ -240,93 +182,10 @@ async function sendTranscriptResponse(res, operation) {
   }
 }
 
-const CATALOG_HTTP_BAD_REQUEST_ERRORS = new Set([
-  'catalog_archive_record_invalid',
-  'catalog_batch_invalid',
-  'catalog_change_listener_invalid',
-  'catalog_clock_invalid',
-  'catalog_import_grant_invalid',
-  'catalog_import_id_invalid',
-  'catalog_import_invalid',
-  'catalog_import_outcome_invalid',
-  'catalog_import_request_invalid',
-  'catalog_profile_hint_invalid',
-  'catalog_profile_hints_invalid',
-  'catalog_reassign_request_invalid',
-  'catalog_request_invalid',
-  'catalog_route_invalid',
-  'catalog_scope_confirmation_required',
-  'catalog_scope_invalid',
-  'catalog_verification_key_invalid',
-  'catalog_verification_timeout_invalid',
-  'invalid_catalog_contract',
-  'invalid_conversation_identity',
-  'invalid_json',
-  'invalid_profile_scope_id',
-  'invalid_provider_conversation_id'
-]);
-
-const CATALOG_HTTP_INTERNAL_ERRORS = new Set([
-  'catalog_import_interrupted',
-  'catalog_import_recovery_required',
-  'catalog_raw_blob_invalid',
-  'catalog_snapshot_blob_invalid',
-  'catalog_snapshot_mismatch',
-  'catalog_store_blobs_required',
-  'catalog_store_clock_invalid',
-  'catalog_store_corrupt_state',
-  'catalog_store_io',
-  'catalog_store_reload_required',
-  'catalog_store_required',
-  'catalog_store_schema_unsupported',
-  'catalog_store_size_limit',
-  'catalog_store_state_dir_required',
-  'library_blob_corrupt',
-  'library_blob_hash_collision',
-  'library_blob_hash_failure',
-  'library_blob_invalid_raw_record',
-  'library_blob_invalid_ref',
-  'library_blob_invalid_snapshot',
-  'library_blob_io',
-  'library_blob_non_json_value',
-  'library_blob_not_found',
-  'library_blob_schema_unsupported',
-  'library_blob_size_limit',
-  'library_blob_snapshot_hash_mismatch',
-  'library_blob_state_dir_required'
-]);
-
 function catalogHttpError(error) {
   const code = String(error?.code || error?.message || '');
-  if (code === 'body_too_large') return { code: 413, body: { error: code } };
-  if (CATALOG_HTTP_INTERNAL_ERRORS.has(code)) {
-    return { code: 500, body: { error: code } };
-  }
-  if (CATALOG_HTTP_BAD_REQUEST_ERRORS.has(code)) {
-    return { code: 400, body: { error: code } };
-  }
-  if (
-    ['catalog_conversation_not_found', 'catalog_import_not_found', 'catalog_import_grant_unavailable'].includes(code)
-  ) {
-    return { code: 404, body: { error: code } };
-  }
-  if (
-    [
-      'catalog_import_active',
-      'catalog_import_manifest_conflict',
-      'catalog_import_replay_conflict',
-      'catalog_import_cursor_mismatch',
-      'catalog_import_not_open',
-      'catalog_import_outcome_mismatch',
-      'catalog_record_index_mismatch',
-      'catalog_scope_conflict',
-      'catalog_cursor_mismatch',
-      'catalog_route_identity_mismatch',
-      'catalog_verification_identity_mismatch'
-    ].includes(code)
-  ) {
-    return { code: 409, body: { error: code } };
-  }
+  const status = catalogHttpStatusForErrorCode(code);
+  if (status !== null) return { code: status, body: { error: code } };
   return { code: 500, body: { error: 'internal_error' } };
 }
 

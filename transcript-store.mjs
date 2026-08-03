@@ -512,6 +512,7 @@ export function createTranscriptStore({
   const filePath = path.join(root, 'state.json');
   let durableState = emptyState();
   let loadPromise = null;
+  let reloadPromise = null;
   let queue = Promise.resolve();
   let writeUncertain = false;
 
@@ -557,7 +558,7 @@ export function createTranscriptStore({
     }
     let raw;
     try {
-      raw = JSON.parse(bytes.toString('utf8'));
+      raw = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
     } catch {
       throw storeError('transcript_store_corrupt_state');
     }
@@ -570,19 +571,41 @@ export function createTranscriptStore({
     return clone(durableState);
   }
 
-  async function load() {
-    if (writeUncertain) {
+  async function reloadAfterUncertainWrite() {
+    if (reloadPromise === null) {
       loadPromise = null;
-      try {
-        const reloaded = await loadOnce();
-        writeUncertain = false;
-        loadPromise = Promise.resolve(reloaded);
-      } catch {
-        loadPromise = null;
-        throw storeError('transcript_store_reload_required');
-      }
+      const reloading = (async () => {
+        try {
+          await fileSystem.settleReplacement(filePath, { boundaryPath: stateDir });
+          const reloaded = await loadOnce();
+          writeUncertain = false;
+          loadPromise = Promise.resolve(reloaded);
+          return reloaded;
+        } catch {
+          loadPromise = null;
+          throw storeError('transcript_store_reload_required');
+        }
+      })();
+      const shared = reloading.finally(() => {
+        if (reloadPromise === shared) reloadPromise = null;
+      });
+      reloadPromise = shared;
     }
-    if (!loadPromise) loadPromise = loadOnce();
+    return await reloadPromise;
+  }
+
+  async function load() {
+    if (writeUncertain || reloadPromise !== null) {
+      await reloadAfterUncertainWrite();
+    }
+    if (!loadPromise) {
+      let guarded;
+      guarded = loadOnce().catch((error) => {
+        if (error?.code === 'transcript_store_io' && loadPromise === guarded) loadPromise = null;
+        throw error;
+      });
+      loadPromise = guarded;
+    }
     const loaded = await loadPromise;
     return clone(loaded);
   }

@@ -132,7 +132,14 @@ export function createPrivateFileSystem({
   }
 
   async function replaceFile(finalPath, bytes, { boundaryPath } = {}) {
-    const tempPath = await writePrivateTemp(finalPath, bytes, { boundaryPath });
+    let tempPath;
+    try {
+      tempPath = await writePrivateTemp(finalPath, bytes, { boundaryPath });
+    } catch {
+      // No rename was attempted, so callers can safely retain their current
+      // in-memory state and retry without entering uncertain-write recovery.
+      throw privateFileError('private_replace_not_applied');
+    }
     try {
       try {
         await operations.rename(tempPath, finalPath);
@@ -164,6 +171,23 @@ export function createPrivateFileSystem({
     } finally {
       await ignoreMissing(async () => await operations.unlink(tempPath)).catch(() => {});
     }
+  }
+
+  async function settleReplacement(finalPath, { boundaryPath } = {}) {
+    const directoryPath = path.dirname(finalPath);
+    const parentExists = await walkPrivateDirectories(directoryPath, {
+      boundaryPath,
+      create: false
+    });
+    if (!parentExists) throw privateFileError('private_file_missing');
+    const stat = await operations.lstat(finalPath);
+    if (stat.isSymbolicLink()) throw privateFileError('private_file_symlink');
+    if (!stat.isFile()) throw privateFileError('private_path_not_file');
+    if (Number(stat.nlink || 1) !== 1) throw privateFileError('private_file_link_count');
+    if (process.platform !== 'win32' && (stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+      throw privateFileError('private_file_mode');
+    }
+    await syncDirectory(directoryPath);
   }
 
   async function readPrivateFile(filePath, {
@@ -292,6 +316,7 @@ export function createPrivateFileSystem({
     ensurePrivateDirectory,
     publishImmutable,
     replaceFile,
+    settleReplacement,
     readPrivateFile,
     settleImmutable,
     pathKind

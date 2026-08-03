@@ -284,6 +284,15 @@ test('Control Center renders only allowlisted symbolic error codes', async () =>
   };
   await createButton.onclick();
   assert.equal(harness.elements.get('createHint').textContent, 'Create failed: catalog_store_io');
+
+  harness.bridge.createTab = async () => {
+    const error = new Error(privateDetail);
+    error.code = 'catalog_import_capacity_required';
+    throw error;
+  };
+  await createButton.onclick();
+  assert.equal(harness.elements.get('createHint').textContent, 'Create failed: catalog_import_capacity_required');
+  assert.doesNotMatch(harness.elements.get('createHint').textContent, /journal|private|export\/path/);
 });
 
 test('Transcript Library metadata refresh retains last-good rows and reports bounded section errors', async () => {
@@ -448,6 +457,39 @@ test('Transcript Library change events render open import progress while import 
   resolveImport({ status: 'complete', counts: { cataloged: 8, snapshots: 7 } });
   await actionPromise;
   assert.equal(importSettled, true);
+});
+
+test('Transcript Library labels oversized legacy imports read-only and hides invalid recovery actions', async () => {
+  const source = await readUi('control-center.js');
+  const harness = uiHarness(source, { savedScope: 'scope-b' });
+  await waitFor(
+    () => harness.elements.get('libraryImportsEmpty')?.textContent.includes('No export imports yet'),
+    'initial library metadata did not render'
+  );
+  harness.bridge.getCatalogImports = async () => [{
+    id: 'legacy-over-limit',
+    status: 'partial',
+    assignment: { profileScopeId: 'scope-a' },
+    readOnlyReason: 'legacy-record-limit',
+    updatedAt: '2026-07-31T12:00:00.000Z',
+    counts: { recordsSeen: 20_001, cataloged: 20_001, snapshots: 20_001, problems: 0 },
+    cursor: { schemaVersion: 1, recordIndex: 20_001 },
+    // A stale suspension must not revive actions after the read-only marker wins.
+    suspension: { reason: 'interrupted', observedAt: '2026-07-31T12:00:00.000Z' }
+  }];
+
+  await harness.emitLibraryChanged();
+  const importList = harness.elements.get('libraryImportsList');
+  await waitFor(
+    () => descendantText(importList).includes('legacy-over-limit'),
+    'read-only legacy import did not render'
+  );
+  const importRow = importList.children
+    .find((node) => node.className.includes('libraryItem'));
+  assert.match(descendantText(importRow), /Read-only legacy history/);
+  const actionLabels = importRow.children[1].children.map(({ textContent }) => textContent);
+  assert.equal(actionLabels.includes('Resume with ZIP'), false);
+  assert.equal(actionLabels.includes('Reassign scope'), false);
 });
 
 test('Transcript Library source rows expose busy/disabled state and unchanged sync copy honestly', async () => {

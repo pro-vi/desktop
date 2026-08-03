@@ -8,6 +8,7 @@ import {
   initialImportCursor,
   nextImportCursor,
   parseExportImportOutcome,
+  parseImportCapacity,
   parseIsoDateTime,
   parseOpaqueAccountHint,
   parseRouteVerificationOutcome
@@ -37,6 +38,7 @@ const REASSIGN_KEYS = Object.freeze(['importId', 'newProfileScopeId', 'confirm']
 const READER_REJECTION = new Map([
   ['export_not_a_zip', 'not-a-zip'],
   ['export_unsupported_layout', 'unsupported-export'],
+  ['export_record_limit_exceeded', 'unsafe-archive'],
   ['export_unsafe_archive', 'unsafe-archive'],
   ['export_corrupt_archive', 'unsafe-archive'],
   ['export_corrupt_json', 'unsafe-archive'],
@@ -88,7 +90,8 @@ function rejectionFor(error) {
 
 function assertDependencies(store, blobs, grants, exportReader, routeVerifier) {
   for (const method of [
-    'beginImport', 'commitPreparedRecords', 'finishImport', 'interruptImport', 'listImports',
+    'beginImport', 'commitPreparedRecords', 'finishImport', 'interruptImport',
+    'terminalizeLegacyOverLimit', 'listImports',
     'verifyRoute', 'observeUnavailable', 'reassignScope', 'list'
   ]) {
     if (typeof store?.[method] !== 'function') throw serviceError('catalog_store_required');
@@ -188,6 +191,7 @@ async function validateArchiveRecords(exportReader, archive, profileScopeId) {
     }
     recordIndex += 1;
   }
+  return parseImportCapacity({ recordCount: recordIndex });
 }
 
 export function createConversationCatalogService({
@@ -244,6 +248,7 @@ export function createConversationCatalogService({
     let catalogImport = null;
     try {
       let manifest;
+      let importCapacity;
       try {
         manifest = await exportReader.inspect(archive);
         const localHint = comparableHint(await accountHints.get(profileScopeId));
@@ -251,15 +256,26 @@ export function createConversationCatalogService({
         if (localHint !== null && exportHint !== null && localHint !== exportHint) {
           return rejected('account-hint-conflict');
         }
-        await validateArchiveRecords(exportReader, archive, profileScopeId);
+        importCapacity = await validateArchiveRecords(exportReader, archive, profileScopeId);
       } catch (error) {
+        if (
+          String(error?.code || '') === 'export_record_limit_exceeded' &&
+          manifest !== undefined
+        ) {
+          const terminalized = await store.terminalizeLegacyOverLimit(manifest, profileScopeId);
+          if (terminalized !== null) notifyChanged();
+        }
         const rejection = rejectionFor(error);
         if (rejection) return rejection;
         throw serviceError('catalog_import_inspection_failed');
       }
 
       try {
-        catalogImport = await store.beginImport(manifest, { profileScopeId, confirmed: true });
+        catalogImport = await store.beginImport(
+          manifest,
+          { profileScopeId, confirmed: true },
+          importCapacity
+        );
         notifyChanged();
       } catch (error) {
         if (String(error?.code || '') === 'catalog_scope_confirmation_required') {
@@ -272,6 +288,15 @@ export function createConversationCatalogService({
           status: 'complete',
           importId: catalogImport.id,
           counts: catalogImport.counts
+        });
+      }
+      if (catalogImport.status === 'partial' && catalogImport.suspension === null) {
+        return parseExportImportOutcome({
+          status: 'partial',
+          importId: catalogImport.id,
+          counts: catalogImport.counts,
+          problems: catalogImport.problems,
+          resume: catalogImport.cursor
         });
       }
       let importObservedAt;
@@ -291,6 +316,7 @@ export function createConversationCatalogService({
         preparedBatchLimit = preparedImportBatchLimit(cursor.recordIndex);
         notifyChanged();
       };
+      let terminalOutcome = null;
       try {
         for await (const decoded of exportReader.streamConversations(archive, profileScopeId, cursor)) {
           const recordIndex = cursor.recordIndex;
@@ -323,30 +349,35 @@ export function createConversationCatalogService({
           if (preparedBatch.length === preparedBatchLimit) await commitBatch();
         }
         await commitBatch();
+        const current = (await store.listImports()).find(({ id }) => id === catalogImport.id);
+        if (!current) throw serviceError('catalog_import_state_missing');
+        terminalOutcome = current.counts.problems === 0
+          ? parseExportImportOutcome({ status: 'complete', importId: current.id, counts: current.counts })
+          : parseExportImportOutcome({
+              status: 'partial',
+              importId: current.id,
+              counts: current.counts,
+              problems: current.problems,
+              resume: current.cursor
+            });
+        await store.finishImport(current.id, terminalOutcome);
       } catch {
-        let interrupted = false;
-        for (let attempt = 0; attempt < 2 && !interrupted; attempt += 1) {
-          interrupted = await store.interruptImport(catalogImport.id).then(() => true, () => false);
+        let interrupted = null;
+        for (let attempt = 0; attempt < 2 && interrupted === null; attempt += 1) {
+          interrupted = await store.interruptImport(catalogImport.id).catch(() => null);
         }
-        if (!interrupted) throw serviceError('catalog_import_recovery_required');
+        if (interrupted === null) throw serviceError('catalog_import_recovery_required');
         notifyChanged();
+        if (
+          terminalOutcome !== null && interrupted.status === terminalOutcome.status &&
+          interrupted.suspension === null
+        ) {
+          return terminalOutcome;
+        }
         throw serviceError('catalog_import_interrupted');
       }
-
-      const current = (await store.listImports()).find(({ id }) => id === catalogImport.id);
-      if (!current) throw serviceError('catalog_import_state_missing');
-      const outcome = current.counts.problems === 0
-        ? parseExportImportOutcome({ status: 'complete', importId: current.id, counts: current.counts })
-        : parseExportImportOutcome({
-            status: 'partial',
-            importId: current.id,
-            counts: current.counts,
-            problems: current.problems,
-            resume: current.cursor
-          });
-      await store.finishImport(current.id, outcome);
       notifyChanged();
-      return outcome;
+      return terminalOutcome;
     } finally {
       // The catalog outcome is already durable. Grant cleanup is one-shot, so
       // never retry or expose a potentially private close error to the caller.
@@ -490,11 +521,12 @@ export function createChatGptRouteVerifier({
       typeof controller.prepareChatEntry !== 'function' ||
       typeof controller.inspectConversationRoute !== 'function' ||
       typeof controller.detectChallenge !== 'function' ||
-      typeof controller.getUrl !== 'function'
+      typeof controller.getUrl !== 'function' ||
+      typeof controller.quarantineExclusiveUntil !== 'function'
     ) {
       return failedVerification('compatibility-drift');
     }
-    return await controller.runExclusive(async () => {
+    const verifyExclusive = async () => {
       let expired = false;
       const assertActive = () => {
         if (!expired) return;
@@ -614,6 +646,7 @@ export function createChatGptRouteVerifier({
       const timeout = new Promise((resolve) => {
         timeoutId = setTimeout(() => {
           expired = true;
+          controller.quarantineExclusiveUntil(operation);
           resolve(failedVerification('transport'));
         }, navigationTimeoutMs);
       });
@@ -622,7 +655,15 @@ export function createChatGptRouteVerifier({
       } finally {
         clearTimeout(timeoutId);
       }
-    });
+    };
+    try {
+      return await controller.runExclusive(verifyExclusive);
+    } catch {
+      // A prior timed-out provider operation can quarantine the controller
+      // before this verifier callback starts. Keep the verification port's
+      // closed outcome contract instead of leaking the controller's busy code.
+      return failedVerification('transport');
+    }
   }
 
   return Object.freeze({ verify });

@@ -295,6 +295,33 @@ test('transcript store: rename failure before publication stays retryable in-pro
   assert.deepEqual(await blobs.getSnapshot(ref), snapshot);
 });
 
+test('transcript store: a pre-rename temp write failure retries without uncertain recovery', async (t) => {
+  const stateDir = await tempState(t, 'temp-write-before-rename');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  let failTempOpen = true;
+  const operations = proxiedOperations({
+    async open(...args) {
+      if (failTempOpen && args[1] === 'wx') {
+        failTempOpen = false;
+        throw Object.assign(new Error('injected temp write failure'), { code: 'EIO' });
+      }
+      return await fs.open(...args);
+    }
+  });
+  const store = createTranscriptStore({
+    stateDir,
+    blobs,
+    fileSystem: createPrivateFileSystem({ operations }),
+    clock: clockAt(60),
+    randomId: ids('temp-write-before-rename')
+  });
+
+  await assert.rejects(store.register(sourceInput()), /transcript_store_io/);
+  const source = await store.register(sourceInput());
+  assert.equal(source.key, 'state-key');
+  assert.equal((await store.list()).length, 1);
+});
+
 test('transcript store: a rename that lands before reporting failure is reconciled in-process', async (t) => {
   const { stateDir, blobs, source, attempt, snapshot, ref } = await setupOpenAttempt(t, 'rename-after');
   let inject = true;
@@ -357,6 +384,78 @@ test('transcript store: genuinely uncertain replacement reloads durable state on
   assert.equal(visible.latestLiveSnapshot.hash, ref.hash);
 });
 
+test('transcript store: uncertain reload is coalesced before a later write can advance', async (t) => {
+  const { stateDir, blobs, source, attempt } = await setupOpenAttempt(t, 'reload-coalesced');
+  const baseFileSystem = createPrivateFileSystem();
+  const metadataPath = path.join(stateDir, 'transcript-library', 'live', 'state.json');
+  let armUncertainWrite = false;
+  let gateMetadataReads = false;
+  let metadataReads = 0;
+  let resolveCaptured;
+  let resolveRelease;
+  const captured = new Promise((resolve) => { resolveCaptured = resolve; });
+  const release = new Promise((resolve) => { resolveRelease = resolve; });
+  const fileSystem = Object.freeze({
+    ...baseFileSystem,
+    async replaceFile(...args) {
+      await baseFileSystem.replaceFile(...args);
+      if (armUncertainWrite) {
+        armUncertainWrite = false;
+        gateMetadataReads = true;
+        const error = new Error('injected uncertain replacement');
+        error.code = 'private_replace_uncertain';
+        throw error;
+      }
+    },
+    async readPrivateFile(filePath, options) {
+      const bytes = await baseFileSystem.readPrivateFile(filePath, options);
+      if (gateMetadataReads && filePath === metadataPath) {
+        metadataReads += 1;
+        if (metadataReads === 1) {
+          resolveCaptured();
+          await release;
+        }
+      }
+      return bytes;
+    }
+  });
+  const store = createTranscriptStore({
+    stateDir,
+    blobs,
+    fileSystem,
+    clock: clockAt(100),
+    randomId: ids('reload-coalesced')
+  });
+  await store.load();
+  armUncertainWrite = true;
+  await assert.rejects(
+    store.finishIncomplete(attempt.id, { kind: 'partial', reason: 'conversation_top_not_reached' }),
+    /transcript_store_io/
+  );
+
+  const firstRead = store.getSource(source.id);
+  await captured;
+  const secondRead = store.getSource(source.id);
+  let laterWriteSettled = false;
+  const laterWrite = store.beginAttempt(source.id).then((value) => {
+    laterWriteSettled = true;
+    return value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(metadataReads, 1);
+  assert.equal(laterWriteSettled, false);
+
+  resolveRelease();
+  await Promise.all([firstRead, secondRead]);
+  const nextAttempt = await laterWrite;
+  assert.equal((await store.finishIncomplete(nextAttempt.id, {
+    kind: 'failed',
+    reason: 'capture_failed'
+  })).status, 'failed');
+  const restarted = createTranscriptStore({ stateDir, blobs });
+  assert.equal((await restarted.getSource(source.id)).lastAttempt.id, nextAttempt.id);
+});
+
 test('transcript store: interrupted recovery itself is retryable across a rename failure', async (t) => {
   const { stateDir, blobs, source } = await setupOpenAttempt(t, 'recover-retry');
   let failRename = true;
@@ -402,14 +501,32 @@ test('transcript store: corrupt and unsupported durable state fail closed withou
   assert.deepEqual(await fs.readFile(store.statePath), unsupportedBytes);
 });
 
-test('transcript store: filesystem read failures remain IO errors and contain no state bytes', async (t) => {
+test('transcript store: invalid UTF-8 metadata fails closed without normalizing corrupt bytes', async (t) => {
+  const stateDir = await tempState(t, 'invalid-utf8');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const initial = createTranscriptStore({ stateDir, blobs, clock: clockAt(), randomId: ids('utf8') });
+  await initial.register(sourceInput({ label: 'Utf8Title' }));
+  const bytes = await fs.readFile(initial.statePath);
+  const offset = bytes.indexOf(Buffer.from('Utf8Title'));
+  assert.notEqual(offset, -1);
+  bytes[offset] = 0xff;
+  await fs.writeFile(initial.statePath, bytes, { mode: 0o600 });
+
+  const restarted = createTranscriptStore({ stateDir, blobs });
+  await assert.rejects(restarted.load(), /transcript_store_corrupt_state/);
+  assert.deepEqual(await fs.readFile(initial.statePath), bytes);
+});
+
+test('transcript store: a transient filesystem read failure is redacted and retryable', async (t) => {
   const stateDir = await tempState(t, 'read-io');
   const blobs = createPrivateLibraryBlobStore({ stateDir });
   const initial = createTranscriptStore({ stateDir, blobs, clock: clockAt(), randomId: ids('read-io') });
   await initial.register(sourceInput());
+  let failRead = true;
   const operations = proxiedOperations({
     async open(filePath, ...args) {
-      if (filePath === initial.statePath) {
+      if (filePath === initial.statePath && failRead) {
+        failRead = false;
         throw Object.assign(new Error('injected read failure with no payload'), { code: 'EIO' });
       }
       return await fs.open(filePath, ...args);
@@ -425,6 +542,7 @@ test('transcript store: filesystem read failures remain IO errors and contain no
     assert.equal(error.message, 'transcript_store_io');
     return true;
   });
+  assert.equal((await failing.load()).sources.length, 1);
 });
 
 test('transcript store: latest and attempt history are derived invariants on restart', async (t) => {

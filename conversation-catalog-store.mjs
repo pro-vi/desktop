@@ -3,14 +3,17 @@ import path from 'node:path';
 
 import {
   CONVERSATION_CATALOG_SCHEMA_VERSION,
+  MAX_CATALOG_IMPORT_RECORDS,
   MAX_PREPARED_IMPORT_BATCH_RECORDS,
   emptyImportCounts,
   initialImportCursor,
   parseCatalogListCursor,
   parseCatalogConversation,
   parseCatalogRoute,
+  parseCatalogTitle,
   parseExportImportOutcome,
   parseExportManifest,
+  parseImportCapacity,
   parseImportCursor,
   parseImportProblem,
   parseIsoDateTime,
@@ -32,13 +35,16 @@ import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-
 import { parseRawRecordRef, parseSnapshotRef } from './library-blob-store.mjs';
 import { privateFileSystem } from './private-filesystem.mjs';
 
-export const CONVERSATION_CATALOG_STORE_SCHEMA_VERSION = 1;
-const MAX_STATE_BYTES = 64 * 1024 * 1024;
+export const CONVERSATION_CATALOG_STORE_SCHEMA_VERSION = 2;
+const LEGACY_CONVERSATION_CATALOG_STORE_SCHEMA_VERSION = 1;
+export const MAX_CONVERSATION_CATALOG_STATE_BYTES = 64 * 1024 * 1024;
 const STATE_KEYS = Object.freeze(['schemaVersion', 'revision', 'imports', 'records', 'routeHistories']);
 const IMPORT_KEYS = Object.freeze([
-  'schemaVersion', 'id', 'manifest', 'assignment', 'status', 'cursor', 'suspension',
+  'schemaVersion', 'id', 'manifest', 'assignment', 'capacity', 'readOnlyReason', 'status', 'cursor', 'suspension',
   'createdAt', 'updatedAt'
 ]);
+const LEGACY_IMPORT_KEYS = Object.freeze(IMPORT_KEYS.filter((key) =>
+  key !== 'capacity' && key !== 'readOnlyReason'));
 const RECORD_KEYS = Object.freeze([
   'schemaVersion', 'importId', 'recordIndex', 'identity', 'title', 'rawRecord',
   'importedSnapshot', 'observedAt', 'problem'
@@ -90,7 +96,18 @@ function parseNonNegativeInteger(value) {
   return value;
 }
 
-function parseTitle(value) {
+function parseContract(parse, value, corruptCode = 'catalog_store_corrupt_state') {
+  try {
+    return parse(value);
+  } catch {
+    throw storeError(corruptCode);
+  }
+}
+
+function parseStoredTitle(value, sourceSchemaVersion) {
+  if (sourceSchemaVersion !== LEGACY_CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
+    return parseContract(parseCatalogTitle, value);
+  }
   if (value === null) return null;
   if (
     typeof value !== 'string' || value.length < 1 || value.length > 512 || value.trim() !== value ||
@@ -98,14 +115,13 @@ function parseTitle(value) {
   ) {
     throw storeError('catalog_store_corrupt_state');
   }
-  return value;
-}
-
-function parseContract(parse, value, corruptCode = 'catalog_store_corrupt_state') {
   try {
-    return parse(value);
+    return parseCatalogTitle(value);
   } catch {
-    throw storeError(corruptCode);
+    // V1 admitted ill-formed UTF-16 in this optional display field. Keep the
+    // immutable raw record and exact identity, but do not carry malformed text
+    // into the stricter V2 catalog projection.
+    return null;
   }
 }
 
@@ -121,9 +137,16 @@ function parseSuspension(value) {
   };
 }
 
-function parseImport(value) {
-  requireExact(value, IMPORT_KEYS);
-  if (value.schemaVersion !== CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
+function parseReadOnlyReason(value) {
+  if (value === null || value === 'legacy-record-limit') return value;
+  throw storeError('catalog_store_corrupt_state');
+}
+
+function parseImport(value, sourceSchemaVersion = CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
+  requireExact(value, sourceSchemaVersion === LEGACY_CONVERSATION_CATALOG_STORE_SCHEMA_VERSION
+    ? LEGACY_IMPORT_KEYS
+    : IMPORT_KEYS);
+  if (value.schemaVersion !== sourceSchemaVersion) {
     throw storeError('catalog_store_schema_unsupported');
   }
   if (!['open', 'partial', 'complete'].includes(value.status)) {
@@ -134,11 +157,25 @@ function parseImport(value) {
   if (updatedAt < createdAt) throw storeError('catalog_store_corrupt_state');
   const suspension = parseSuspension(value.suspension);
   if (value.status === 'complete' && suspension !== null) throw storeError('catalog_store_corrupt_state');
+  const capacity = sourceSchemaVersion === LEGACY_CONVERSATION_CATALOG_STORE_SCHEMA_VERSION || value.capacity === null
+    ? null
+    : parseContract(parseImportCapacity, value.capacity);
+  const readOnlyReason = sourceSchemaVersion === LEGACY_CONVERSATION_CATALOG_STORE_SCHEMA_VERSION
+    ? null
+    : parseReadOnlyReason(value.readOnlyReason);
+  if (
+    readOnlyReason !== null &&
+    (capacity !== null || !['partial', 'complete'].includes(value.status) || suspension !== null)
+  ) {
+    throw storeError('catalog_store_corrupt_state');
+  }
   return {
     schemaVersion: CONVERSATION_CATALOG_STORE_SCHEMA_VERSION,
     id: parseSafeId(value.id),
     manifest: parseContract(parseExportManifest, value.manifest),
     assignment: parseContract(parseProfileScopeAssignment, value.assignment),
+    capacity,
+    readOnlyReason,
     status: value.status,
     cursor: parseContract(parseImportCursor, value.cursor),
     suspension,
@@ -147,9 +184,9 @@ function parseImport(value) {
   };
 }
 
-function parseStoredRecord(value) {
+function parseStoredRecord(value, sourceSchemaVersion = CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
   requireExact(value, RECORD_KEYS);
-  if (value.schemaVersion !== CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
+  if (value.schemaVersion !== sourceSchemaVersion) {
     throw storeError('catalog_store_schema_unsupported');
   }
   const identity = value.identity === null
@@ -176,7 +213,7 @@ function parseStoredRecord(value) {
     importId: parseSafeId(value.importId),
     recordIndex,
     identity,
-    title: parseTitle(value.title),
+    title: parseStoredTitle(value.title, sourceSchemaVersion),
     rawRecord: parseContract(parseRawRecordRef, value.rawRecord),
     importedSnapshot,
     observedAt: parseContract((candidate) => parseIsoDateTime(candidate, 'observedAt'), value.observedAt),
@@ -184,9 +221,9 @@ function parseStoredRecord(value) {
   };
 }
 
-function parseRouteHistory(value) {
+function parseRouteHistory(value, sourceSchemaVersion = CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
   requireExact(value, ROUTE_HISTORY_KEYS);
-  if (value.schemaVersion !== CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
+  if (value.schemaVersion !== sourceSchemaVersion) {
     throw storeError('catalog_store_schema_unsupported');
   }
   const identity = parseContract(parseConversationIdentity, value.identity);
@@ -208,16 +245,20 @@ function parseRouteHistory(value) {
 
 function parseState(value) {
   requireExact(value, STATE_KEYS);
-  if (value.schemaVersion !== CONVERSATION_CATALOG_STORE_SCHEMA_VERSION) {
+  const sourceSchemaVersion = value.schemaVersion;
+  if (
+    sourceSchemaVersion !== CONVERSATION_CATALOG_STORE_SCHEMA_VERSION &&
+    sourceSchemaVersion !== LEGACY_CONVERSATION_CATALOG_STORE_SCHEMA_VERSION
+  ) {
     throw storeError('catalog_store_schema_unsupported');
   }
   if (!Array.isArray(value.imports) || !Array.isArray(value.records) || !Array.isArray(value.routeHistories)) {
     throw storeError('catalog_store_corrupt_state');
   }
   const revision = parseNonNegativeInteger(value.revision);
-  const imports = value.imports.map(parseImport);
-  const records = value.records.map(parseStoredRecord);
-  const routeHistories = value.routeHistories.map(parseRouteHistory);
+  const imports = value.imports.map((entry) => parseImport(entry, sourceSchemaVersion));
+  const records = value.records.map((entry) => parseStoredRecord(entry, sourceSchemaVersion));
+  const routeHistories = value.routeHistories.map((entry) => parseRouteHistory(entry, sourceSchemaVersion));
   if (
     new Set(imports.map(({ id }) => id)).size !== imports.length ||
     new Set(imports.map(({ manifest }) => manifest.archiveHash)).size !== imports.length ||
@@ -242,7 +283,21 @@ function parseState(value) {
     if (importRecords.some((record, index) => record.recordIndex !== index)) {
       throw storeError('catalog_store_corrupt_state');
     }
-    if (catalogImport.cursor.recordIndex > importRecords.length) throw storeError('catalog_store_corrupt_state');
+    if (catalogImport.cursor.recordIndex > importRecords.length) {
+      throw storeError('catalog_store_corrupt_state');
+    }
+    if (
+      catalogImport.capacity !== null &&
+      (
+        importRecords.length > catalogImport.capacity.recordCount ||
+        (
+          catalogImport.status !== 'open' && catalogImport.suspension === null &&
+          importRecords.length !== catalogImport.capacity.recordCount
+        )
+      )
+    ) {
+      throw storeError('catalog_store_corrupt_state');
+    }
     if (
       catalogImport.status === 'complete' &&
       (
@@ -278,16 +333,24 @@ function emptyState() {
 
 function terminalImportProjection(state) {
   let openCount = 0;
+  const recordCountsByImport = new Map();
+  for (const { importId } of state.records) {
+    recordCountsByImport.set(importId, (recordCountsByImport.get(importId) ?? 0) + 1);
+  }
   const imports = state.imports.map((catalogImport) => {
     if (catalogImport.status !== 'open') return catalogImport;
     openCount += 1;
     return {
       ...catalogImport,
       status: 'partial',
-      suspension: {
-        reason: 'interrupted',
-        observedAt: catalogImport.updatedAt
-      }
+      readOnlyReason: catalogImport.capacity === null &&
+        (recordCountsByImport.get(catalogImport.id) ?? 0) > MAX_CATALOG_IMPORT_RECORDS
+        ? 'legacy-record-limit'
+        : null,
+      suspension: catalogImport.capacity === null &&
+          (recordCountsByImport.get(catalogImport.id) ?? 0) > MAX_CATALOG_IMPORT_RECORDS
+        ? null
+        : { reason: 'interrupted', observedAt: catalogImport.updatedAt }
     };
   });
   if (state.revision > Number.MAX_SAFE_INTEGER - openCount) {
@@ -298,6 +361,110 @@ function terminalImportProjection(state) {
 
 function encodeState(state) {
   return Buffer.from(`${JSON.stringify(state, null, 2)}\n`);
+}
+
+function encodeCompactState(state) {
+  return Buffer.from(`${JSON.stringify(state)}\n`);
+}
+
+function minimumEncodedStateByteLength(state) {
+  return encodeCompactState(state).length;
+}
+
+function encodeStateWithinLimit(state, maxBytes) {
+  const readable = encodeState(state);
+  if (readable.length <= maxBytes) return readable;
+  const compact = encodeCompactState(state);
+  return compact.length <= maxBytes ? compact : null;
+}
+
+// Capacity is reserved against the largest metadata shape the closed catalog
+// contract accepts. The contribution calculation uses the same pretty-JSON
+// encoder as persistence and takes the larger first/subsequent array element.
+// A fixed cushion makes small schema-neutral formatting changes fail safe.
+const IMPORT_CAPACITY_ENCODING_CUSHION_BYTES = 64 * 1024;
+const MAX_CAPACITY_IDENTITY = Object.freeze({
+  provider: 'chatgpt',
+  profileScopeId: 's'.repeat(128),
+  providerConversationId: 'c'.repeat(256)
+});
+const MAX_CAPACITY_RAW_REF = Object.freeze({
+  kind: 'raw',
+  algorithm: 'sha256',
+  hash: 'a'.repeat(64),
+  byteLength: Number.MAX_SAFE_INTEGER
+});
+const MAX_CAPACITY_IMPORT_ID = 'i'.repeat(256);
+const MAX_CAPACITY_RECORD_BASE = Object.freeze({
+  schemaVersion: CONVERSATION_CATALOG_STORE_SCHEMA_VERSION,
+  importId: MAX_CAPACITY_IMPORT_ID,
+  recordIndex: MAX_CATALOG_IMPORT_RECORDS - 1,
+  identity: MAX_CAPACITY_IDENTITY,
+  title: '界'.repeat(512),
+  rawRecord: MAX_CAPACITY_RAW_REF,
+  observedAt: '9999-12-31T23:59:59.999Z'
+});
+
+function maximumArrayElementContribution(field, value) {
+  const baseline = { ...emptyState(), revision: Number.MAX_SAFE_INTEGER };
+  const once = { ...baseline, [field]: [value] };
+  const twice = { ...baseline, [field]: [value, value] };
+  return Math.max(
+    encodeState(once).length - encodeState(baseline).length,
+    encodeState(twice).length - encodeState(once).length
+  );
+}
+
+const MAX_PROBLEM_RECORD_CAPACITY_BYTES = maximumArrayElementContribution('records', {
+  ...MAX_CAPACITY_RECORD_BASE,
+  importedSnapshot: null,
+  problem: {
+    recordIndex: MAX_CATALOG_IMPORT_RECORDS - 1,
+    reason: 'active-branch-ambiguous',
+    identity: MAX_CAPACITY_IDENTITY
+  }
+});
+const MAX_IMPORT_ROW_CAPACITY_BYTES = maximumArrayElementContribution('imports', {
+  schemaVersion: CONVERSATION_CATALOG_STORE_SCHEMA_VERSION,
+  id: MAX_CAPACITY_IMPORT_ID,
+  manifest: {
+    archiveHash: 'd'.repeat(64),
+    layout: 'numbered-conversations-json',
+    accountHint: `chatgpt-user-id:sha256:${'e'.repeat(64)}`
+  },
+  assignment: { profileScopeId: 's'.repeat(128), confirmed: true },
+  capacity: { recordCount: MAX_CATALOG_IMPORT_RECORDS },
+  readOnlyReason: null,
+  status: 'partial',
+  cursor: { schemaVersion: 1, recordIndex: MAX_CATALOG_IMPORT_RECORDS },
+  suspension: { reason: 'scope-reassigned', observedAt: '9999-12-31T23:59:59.999Z' },
+  createdAt: '9999-12-31T23:59:59.999Z',
+  updatedAt: '9999-12-31T23:59:59.999Z'
+});
+
+function importCapacityUpperBound(capacity) {
+  return MAX_IMPORT_ROW_CAPACITY_BYTES + IMPORT_CAPACITY_ENCODING_CUSHION_BYTES +
+    (capacity.recordCount * MAX_PROBLEM_RECORD_CAPACITY_BYTES);
+}
+
+function hasActiveCapacityReservation(catalogImport) {
+  return catalogImport.capacity !== null &&
+    (catalogImport.status === 'open' || catalogImport.suspension !== null);
+}
+
+function capacityProjectionByteLength(state) {
+  const activeImports = state.imports.filter(hasActiveCapacityReservation);
+  if (activeImports.length === 0) return minimumEncodedStateByteLength(state);
+  const activeIds = new Set(activeImports.map(({ id }) => id));
+  const unreservedState = {
+    ...state,
+    imports: state.imports.filter(({ id }) => !activeIds.has(id)),
+    records: state.records.filter(({ importId }) => !activeIds.has(importId))
+  };
+  return minimumEncodedStateByteLength(unreservedState) + activeImports.reduce(
+    (total, catalogImport) => total + importCapacityUpperBound(catalogImport.capacity),
+    0
+  );
 }
 
 function recordCounts(records) {
@@ -317,12 +484,23 @@ function recordsForImport(state, importId) {
     .sort((left, right) => left.recordIndex - right.recordIndex);
 }
 
+function isOverLimitLegacyImport(state, catalogImport) {
+  return catalogImport.capacity === null &&
+    recordsForImport(state, catalogImport.id).length > MAX_CATALOG_IMPORT_RECORDS;
+}
+
 function publicImport(catalogImport, records) {
+  const readOnlyReason = catalogImport.readOnlyReason ?? (
+    catalogImport.capacity === null && records.length > MAX_CATALOG_IMPORT_RECORDS
+      ? 'legacy-record-limit'
+      : null
+  );
   return {
     schemaVersion: catalogImport.schemaVersion,
     id: catalogImport.id,
     manifest: clone(catalogImport.manifest),
     assignment: clone(catalogImport.assignment),
+    readOnlyReason,
     status: catalogImport.status,
     cursor: clone(catalogImport.cursor),
     counts: recordCounts(records),
@@ -503,7 +681,7 @@ export function createConversationCatalogStore({
   fileSystem = privateFileSystem,
   clock = () => new Date().toISOString(),
   randomId = crypto.randomUUID,
-  maxStateBytes = MAX_STATE_BYTES
+  maxStateBytes = MAX_CONVERSATION_CATALOG_STATE_BYTES
 } = {}) {
   if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) {
     throw storeError('catalog_store_state_dir_required');
@@ -514,13 +692,17 @@ export function createConversationCatalogStore({
   ) {
     throw storeError('catalog_store_blobs_required');
   }
-  if (!Number.isSafeInteger(maxStateBytes) || maxStateBytes < 1 || maxStateBytes > MAX_STATE_BYTES) {
+  if (
+    !Number.isSafeInteger(maxStateBytes) || maxStateBytes < 1 ||
+    maxStateBytes > MAX_CONVERSATION_CATALOG_STATE_BYTES
+  ) {
     throw storeError('catalog_store_size_limit_invalid');
   }
   const root = path.join(stateDir, 'transcript-library', 'catalog');
   const filePath = path.join(root, 'state.json');
   let durableState = emptyState();
   let loadPromise = null;
+  let reloadPromise = null;
   let queue = Promise.resolve();
   let writeUncertain = false;
   let catalogProjectionCache = null;
@@ -586,31 +768,56 @@ export function createConversationCatalogStore({
     }
     let raw;
     try {
-      raw = JSON.parse(bytes.toString('utf8'));
+      raw = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
     } catch {
       throw storeError('catalog_store_corrupt_state');
     }
     try {
-      installDurableState(parseState(raw));
+      const parsed = parseState(raw);
+      if (capacityProjectionByteLength(parsed) > maxStateBytes) {
+        throw storeError('catalog_store_corrupt_state');
+      }
+      installDurableState(parsed);
     } catch (error) {
       if (error?.code === 'catalog_store_schema_unsupported') throw error;
       throw storeError('catalog_store_corrupt_state');
     }
   }
 
-  async function ensureLoaded() {
-    if (writeUncertain) {
+  async function reloadAfterUncertainWrite() {
+    if (reloadPromise === null) {
       loadPromise = null;
-      try {
-        await loadOnce();
-        writeUncertain = false;
-        loadPromise = Promise.resolve();
-      } catch {
-        loadPromise = null;
-        throw storeError('catalog_store_reload_required');
-      }
+      const reloading = (async () => {
+        try {
+          await fileSystem.settleReplacement(filePath, { boundaryPath: stateDir });
+          await loadOnce();
+          writeUncertain = false;
+          loadPromise = Promise.resolve();
+        } catch {
+          loadPromise = null;
+          throw storeError('catalog_store_reload_required');
+        }
+      })();
+      const shared = reloading.finally(() => {
+        if (reloadPromise === shared) reloadPromise = null;
+      });
+      reloadPromise = shared;
     }
-    if (!loadPromise) loadPromise = loadOnce();
+    await reloadPromise;
+  }
+
+  async function ensureLoaded() {
+    if (writeUncertain || reloadPromise !== null) {
+      await reloadAfterUncertainWrite();
+    }
+    if (!loadPromise) {
+      let guarded;
+      guarded = loadOnce().catch((error) => {
+        if (error?.code === 'catalog_store_io' && loadPromise === guarded) loadPromise = null;
+        throw error;
+      });
+      loadPromise = guarded;
+    }
     await loadPromise;
   }
 
@@ -631,10 +838,15 @@ export function createConversationCatalogStore({
 
   async function persist(candidate) {
     const parsed = compactRouteHistories(parseState({ ...candidate, revision: durableState.revision + 1 }));
-    const bytes = encodeState(parsed);
-    if (bytes.length > maxStateBytes) throw storeError('catalog_store_size_limit');
-    const terminalBytes = encodeState(terminalImportProjection(parsed));
-    if (terminalBytes.length > maxStateBytes) throw storeError('catalog_store_size_limit');
+    const bytes = encodeStateWithinLimit(parsed, maxStateBytes);
+    if (bytes === null) throw storeError('catalog_store_size_limit');
+    if (capacityProjectionByteLength(parsed) > maxStateBytes) throw storeError('catalog_store_size_limit');
+    const terminalProjection = terminalImportProjection(parsed);
+    const terminalBytes = encodeStateWithinLimit(terminalProjection, maxStateBytes);
+    if (terminalBytes === null) throw storeError('catalog_store_size_limit');
+    if (capacityProjectionByteLength(terminalProjection) > maxStateBytes) {
+      throw storeError('catalog_store_size_limit');
+    }
     try {
       await fileSystem.replaceFile(filePath, bytes, { boundaryPath: stateDir });
     } catch (error) {
@@ -645,12 +857,14 @@ export function createConversationCatalogStore({
     return parsed;
   }
 
-  async function beginImport(manifestValue, assignmentValue) {
+  async function beginImport(manifestValue, assignmentValue, capacityValue) {
     let manifest;
     let assignment;
+    let capacity;
     try {
       manifest = parseExportManifest(manifestValue);
       assignment = parseProfileScopeAssignment(assignmentValue);
+      capacity = parseImportCapacity(capacityValue);
     } catch {
       throw storeError('catalog_import_invalid');
     }
@@ -665,12 +879,28 @@ export function createConversationCatalogStore({
         if (existing.assignment.profileScopeId !== assignment.profileScopeId) {
           throw storeError('catalog_scope_confirmation_required');
         }
+        if (existing.capacity !== null && existing.capacity.recordCount !== capacity.recordCount) {
+          throw storeError('catalog_import_manifest_conflict');
+        }
         if (existing.status === 'open') throw storeError('catalog_import_active');
-        if (existing.status === 'complete') {
+        if (existing.status === 'complete' || existing.suspension === null) {
           return publicImport(existing, recordsForImport(durableState, existing.id));
         }
+        const records = recordsForImport(durableState, existing.id);
+        if (
+          existing.cursor.recordIndex > capacity.recordCount ||
+          records.length > capacity.recordCount
+        ) {
+          throw storeError('catalog_import_manifest_conflict');
+        }
         const imports = durableState.imports.slice();
-        imports[existingIndex] = { ...existing, status: 'open', suspension: null, updatedAt: nowIso() };
+        imports[existingIndex] = {
+          ...existing,
+          capacity,
+          status: 'open',
+          suspension: null,
+          updatedAt: nowIso()
+        };
         const persisted = await persist({ ...durableState, imports });
         const reopened = persisted.imports[existingIndex];
         return publicImport(reopened, recordsForImport(persisted, reopened.id));
@@ -681,6 +911,8 @@ export function createConversationCatalogStore({
         id: `import-${randomId()}`,
         manifest,
         assignment,
+        capacity,
+        readOnlyReason: null,
         status: 'open',
         cursor: initialImportCursor(),
         suspension: null,
@@ -738,6 +970,10 @@ export function createConversationCatalogStore({
       if (importIndex < 0) throw storeError('catalog_import_not_found');
       const catalogImport = durableState.imports[importIndex];
       const currentIndex = catalogImport.cursor.recordIndex;
+      if (catalogImport.capacity === null) throw storeError('catalog_import_capacity_required');
+      if (nextCursor.recordIndex > catalogImport.capacity.recordCount) {
+        throw storeError('catalog_import_cursor_mismatch');
+      }
       const firstRecordIndex = nextCursor.recordIndex - preparedRecords.length;
       if (firstRecordIndex < 0) throw storeError('catalog_import_cursor_mismatch');
       const candidates = preparedRecords.map((prepared, offset) => {
@@ -815,8 +1051,11 @@ export function createConversationCatalogStore({
       const catalogImport = durableState.imports[importIndex];
       const records = recordsForImport(durableState, importId);
       const counts = recordCounts(records);
+      if (catalogImport.capacity === null) throw storeError('catalog_import_capacity_required');
       if (
         JSON.stringify(outcome.counts) !== JSON.stringify(counts) ||
+        catalogImport.cursor.recordIndex !== catalogImport.capacity.recordCount ||
+        records.length !== catalogImport.capacity.recordCount ||
         (outcome.status === 'partial' && (
           JSON.stringify(outcome.problems) !== JSON.stringify(records.filter(({ problem }) => problem).map(({ problem }) => problem)) ||
           JSON.stringify(outcome.resume) !== JSON.stringify(catalogImport.cursor)
@@ -846,20 +1085,30 @@ export function createConversationCatalogStore({
 
   async function recoverInterruptedImports() {
     return await enqueue(async () => {
-      const open = durableState.imports.filter(({ status }) => status === 'open');
-      if (!open.length) return [];
+      const recoverable = durableState.imports.filter((catalogImport) =>
+        catalogImport.status === 'open' ||
+        (
+          catalogImport.status === 'partial' && catalogImport.suspension !== null &&
+          isOverLimitLegacyImport(durableState, catalogImport)
+        ));
+      if (!recoverable.length) return [];
       const observedAt = nowIso();
-      const openIds = new Set(open.map(({ id }) => id));
-      const imports = durableState.imports.map((catalogImport) => openIds.has(catalogImport.id)
+      const recoverableIds = new Set(recoverable.map(({ id }) => id));
+      const imports = durableState.imports.map((catalogImport) => recoverableIds.has(catalogImport.id)
         ? {
             ...catalogImport,
             status: 'partial',
-            suspension: { reason: 'interrupted', observedAt },
+            readOnlyReason: isOverLimitLegacyImport(durableState, catalogImport)
+              ? 'legacy-record-limit'
+              : null,
+            suspension: isOverLimitLegacyImport(durableState, catalogImport)
+              ? null
+              : { reason: 'interrupted', observedAt },
             updatedAt: observedAt
           }
         : catalogImport);
       const persisted = await persist({ ...durableState, imports });
-      return persisted.imports.filter(({ id }) => openIds.has(id))
+      return persisted.imports.filter(({ id }) => recoverableIds.has(id))
         .map((catalogImport) => publicImport(catalogImport, recordsForImport(persisted, catalogImport.id)));
     });
   }
@@ -877,11 +1126,57 @@ export function createConversationCatalogStore({
       imports[importIndex] = {
         ...catalogImport,
         status: 'partial',
-        suspension: { reason: 'interrupted', observedAt },
+        readOnlyReason: isOverLimitLegacyImport(durableState, catalogImport)
+          ? 'legacy-record-limit'
+          : null,
+        suspension: isOverLimitLegacyImport(durableState, catalogImport)
+          ? null
+          : { reason: 'interrupted', observedAt },
         updatedAt: observedAt
       };
       const persisted = await persist({ ...durableState, imports });
       return publicImport(persisted.imports[importIndex], recordsForImport(persisted, importId));
+    });
+  }
+
+  async function terminalizeLegacyOverLimit(manifestValue, profileScopeIdValue) {
+    let manifest;
+    let profileScopeId;
+    try {
+      manifest = parseExportManifest(manifestValue);
+      profileScopeId = parseProfileScopeId(profileScopeIdValue);
+    } catch {
+      throw storeError('catalog_import_invalid');
+    }
+    return await enqueue(async () => {
+      const importIndex = durableState.imports.findIndex(({ manifest: stored }) =>
+        stored.archiveHash === manifest.archiveHash);
+      if (importIndex < 0) return null;
+      const catalogImport = durableState.imports[importIndex];
+      if (
+        catalogImport.capacity !== null ||
+        catalogImport.assignment.profileScopeId !== profileScopeId ||
+        JSON.stringify(catalogImport.manifest) !== JSON.stringify(manifest)
+      ) {
+        return null;
+      }
+      const records = recordsForImport(durableState, catalogImport.id);
+      if (catalogImport.readOnlyReason === 'legacy-record-limit') {
+        return publicImport(catalogImport, records);
+      }
+      const imports = durableState.imports.slice();
+      imports[importIndex] = {
+        ...catalogImport,
+        status: catalogImport.status === 'complete' ? 'complete' : 'partial',
+        readOnlyReason: 'legacy-record-limit',
+        suspension: null,
+        updatedAt: nowIso()
+      };
+      const persisted = await persist({ ...durableState, imports });
+      return publicImport(
+        persisted.imports[importIndex],
+        recordsForImport(persisted, catalogImport.id)
+      );
     });
   }
 
@@ -1037,6 +1332,15 @@ export function createConversationCatalogStore({
         };
       }
       const ownRecords = recordsForImport(durableState, importId);
+      if (
+        (catalogImport.readOnlyReason !== null) ||
+        (catalogImport.capacity === null &&
+        (catalogImport.suspension !== null || ownRecords.length > MAX_CATALOG_IMPORT_RECORDS)
+        )
+      ) {
+        throw storeError('catalog_import_capacity_required');
+      }
+      const capacity = catalogImport.capacity ?? { recordCount: ownRecords.length };
       const previousKeys = new Set(ownRecords.filter(({ identity }) => identity).map(({ identity }) =>
         formatConversationIdentity(identity)));
       const targetKeys = new Set(ownRecords.filter(({ identity }) => identity).map(({ identity }) =>
@@ -1065,6 +1369,8 @@ export function createConversationCatalogStore({
       imports[importIndex] = {
         ...catalogImport,
         assignment: { profileScopeId: newScope, confirmed: true },
+        capacity,
+        readOnlyReason: null,
         status: 'partial',
         cursor: initialImportCursor(),
         suspension: { reason: 'scope-reassigned', observedAt: now },
@@ -1088,6 +1394,7 @@ export function createConversationCatalogStore({
     finishImport,
     recoverInterruptedImports,
     interruptImport,
+    terminalizeLegacyOverLimit,
     verifyRoute,
     observeUnavailable,
     reassignScope,

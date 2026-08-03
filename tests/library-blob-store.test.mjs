@@ -605,6 +605,83 @@ test('library blob store: retry re-syncs a final blob whose publication sync was
   assert.deepEqual(await store.getRaw(ref), bytes);
 });
 
+test('private filesystem: replacement settlement must durably sync the containing directory', async (t) => {
+  const stateDir = await tempState(t, 'replacement-settlement');
+  const metadataDir = path.join(stateDir, 'metadata');
+  const finalPath = path.join(metadataDir, 'state.json');
+  await fs.mkdir(metadataDir, { mode: 0o700 });
+  await fs.writeFile(finalPath, '{}\n', { mode: 0o600 });
+  let directorySyncAttempts = 0;
+  const operations = proxiedOperations({
+    async open(filePath, ...args) {
+      const handle = await fs.open(filePath, ...args);
+      if (filePath !== metadataDir) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === 'sync') {
+            return async () => {
+              directorySyncAttempts += 1;
+              if (directorySyncAttempts === 1) {
+                throw Object.assign(new Error('injected settlement sync failure'), { code: 'EIO' });
+              }
+              return await target.sync();
+            };
+          }
+          const value = target[property];
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+      });
+    }
+  });
+  const fileSystem = createPrivateFileSystem({ operations });
+
+  await assert.rejects(
+    fileSystem.settleReplacement(finalPath, { boundaryPath: stateDir }),
+    /injected settlement sync failure/
+  );
+  await fileSystem.settleReplacement(finalPath, { boundaryPath: stateDir });
+  assert.equal(directorySyncAttempts, 2);
+});
+
+test('private filesystem: replacement settlement validates the exact private final-file shape', async (t) => {
+  for (const { name, arrange, code } of [
+    {
+      name: 'wrong mode',
+      arrange: async (finalPath) => {
+        await fs.writeFile(finalPath, '{}\n', { mode: 0o600 });
+        await fs.chmod(finalPath, 0o644);
+      },
+      code: 'private_file_mode'
+    },
+    {
+      name: 'hard link',
+      arrange: async (finalPath) => {
+        const sourcePath = `${finalPath}.source`;
+        await fs.writeFile(sourcePath, '{}\n', { mode: 0o600 });
+        await fs.link(sourcePath, finalPath);
+      },
+      code: 'private_file_link_count'
+    },
+    {
+      name: 'directory',
+      arrange: async (finalPath) => await fs.mkdir(finalPath, { mode: 0o700 }),
+      code: 'private_path_not_file'
+    }
+  ]) {
+    await t.test(name, async (t) => {
+      const stateDir = await tempState(t, `replacement-settlement-${name.replace(' ', '-')}`);
+      const metadataDir = path.join(stateDir, 'metadata');
+      const finalPath = path.join(metadataDir, 'state.json');
+      await fs.mkdir(metadataDir, { mode: 0o700 });
+      await arrange(finalPath);
+      await assert.rejects(
+        createPrivateFileSystem().settleReplacement(finalPath, { boundaryPath: stateDir }),
+        new RegExp(code)
+      );
+    });
+  }
+});
+
 test('library blob store: a restarted store verifies and reuses an orphan snapshot', async (t) => {
   const stateDir = await tempState(t, 'restart');
   const first = createPrivateLibraryBlobStore({ stateDir });

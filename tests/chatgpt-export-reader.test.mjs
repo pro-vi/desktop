@@ -337,7 +337,7 @@ test('chatgpt export reader: conversation count has an independent bounded autho
 
   assert.equal(decodedCount, recordCount);
   assert.equal(reader.limits.maxRecords, MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS);
-  assert.equal(MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS, 100_000);
+  assert.equal(MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS, 20_000);
 });
 
 test('chatgpt export reader: configured record bounds reject real excess archive bytes symbolically', async (t) => {
@@ -354,13 +354,47 @@ test('chatgpt export reader: configured record bounds reject real excess archive
 
   await assert.rejects(
     collect(reader.streamConversations(archive, PROFILE_SCOPE_ID)),
-    errorHasCode(/^export_unsafe_archive$/, [privateMarker])
+    errorHasCode(/^export_record_limit_exceeded$/, [privateMarker])
   );
   assert.throws(
     () => createChatGptExportReader({
       limits: { maxRecords: MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS + 1 }
     }),
     errorHasCode(/^export_reader_limits_invalid$/)
+  );
+});
+
+test('chatgpt export reader: title Unicode is well formed at the real archive boundary', async (t) => {
+  const supplementaryTitle = '😀'.repeat(256);
+  const records = [
+    conversationRecord({ conversationId: 'well-formed-title', title: supplementaryTitle }),
+    conversationRecord({ conversationId: 'lone-surrogate-title', title: '\ud800' })
+  ];
+  const archive = await grantedArchive(t, buildZip([{
+    name: 'conversations.json',
+    data: recordsJson(records),
+    method: 'store'
+  }]));
+
+  const decoded = await collect(createChatGptExportReader().streamConversations(archive, PROFILE_SCOPE_ID));
+  assert.equal(decoded[0].title, supplementaryTitle);
+  assert.equal(decoded[1].title, null);
+});
+
+test('chatgpt export reader: the default capacity-backed record ceiling rejects before import', { timeout: 30_000 }, async (t) => {
+  const privateMarker = 'private default record limit marker';
+  const archive = await grantedArchive(t, buildZip([{
+    name: 'conversations.json',
+    data: recordsJson(Array.from(
+      { length: MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS + 1 },
+      (_, index) => ({ title: `${privateMarker} ${index}`, update_time: UPDATE_TIME })
+    )),
+    method: 'store'
+  }]));
+
+  await assert.rejects(
+    collect(createChatGptExportReader().streamConversations(archive, PROFILE_SCOPE_ID)),
+    errorHasCode(/^export_record_limit_exceeded$/, [privateMarker])
   );
 });
 

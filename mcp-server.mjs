@@ -38,6 +38,7 @@ import { defaultStateDir } from './state.mjs';
 import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from './mcp-lib.mjs';
 import { waitForRun } from './run-waiter.mjs';
 import { resolveMcpToolProfile } from './mcp-tool-profile.mjs';
+import { isSafeLibraryHttpErrorCode } from './library-http-errors.mjs';
 
 const server = new McpServer({ name: 'agentify-desktop', version: '0.1.0' });
 const stateDir = defaultStateDir();
@@ -128,74 +129,6 @@ async function getConn() {
 
 const TRANSCRIPT_SHA256 = /^[a-f0-9]{64}$/;
 const TRANSCRIPT_ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const TRANSCRIPT_HTTP_ERRORS = new Set([
-  'body_too_large',
-  'internal_error',
-  'invalid_conversation_identity',
-  'invalid_json',
-  'invalid_profile_scope_id',
-  'invalid_provider_conversation_id',
-  'key_vendor_mismatch',
-  'owned_conversation_required',
-  'tab_closed',
-  'tab_not_found',
-  'transcript_confirmation_required',
-  'transcript_cursor_mismatch',
-  'transcript_identity_not_found',
-  'transcript_no_complete_snapshot',
-  'transcript_page_character_limit',
-  'transcript_page_limit',
-  'transcript_controller_unavailable',
-  'transcript_request_invalid',
-  'transcript_service_unavailable',
-  'transcript_source_disabled',
-  'transcript_source_exists',
-  'transcript_source_invalid',
-  'transcript_source_key_exists',
-  'transcript_source_not_found',
-  'transcript_snapshot_identity_mismatch',
-  'transcript_snapshot_not_found',
-  'transcript_store_corrupt_state',
-  'transcript_store_io',
-  'transcript_store_reload_required',
-  'transcript_store_schema_unsupported',
-  'transcript_store_size_limit',
-  'transcript_sync_active',
-  'transcript_track_invalid',
-  'library_blob_corrupt',
-  'library_blob_io',
-  'library_blob_not_found',
-  'library_blob_schema_unsupported'
-]);
-
-for (const code of [
-  'catalog_request_invalid',
-  'catalog_service_unavailable',
-  'catalog_import_request_invalid',
-  'catalog_import_grant_invalid',
-  'catalog_import_grant_unavailable',
-  'catalog_import_interrupted',
-  'catalog_import_recovery_required',
-  'catalog_import_active',
-  'catalog_import_not_found',
-  'catalog_import_manifest_conflict',
-  'catalog_import_replay_conflict',
-  'catalog_import_cursor_mismatch',
-  'catalog_import_not_open',
-  'catalog_import_outcome_mismatch',
-  'catalog_scope_confirmation_required',
-  'catalog_scope_conflict',
-  'catalog_conversation_not_found',
-  'catalog_cursor_mismatch',
-  'catalog_route_identity_mismatch',
-  'catalog_verification_identity_mismatch',
-  'catalog_store_corrupt_state',
-  'catalog_store_schema_unsupported',
-  'catalog_store_io',
-  'catalog_store_reload_required',
-  'catalog_store_size_limit'
-]) TRANSCRIPT_HTTP_ERRORS.add(code);
-
 const transcriptIdentitySchema = z.object({
   provider: z.literal('chatgpt'),
   profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN),
@@ -484,7 +417,7 @@ function safeTranscriptHttpError(error) {
     typeof body === 'object' &&
     !Array.isArray(body) &&
     Object.keys(body).length === 1 &&
-    TRANSCRIPT_HTTP_ERRORS.has(body.error)
+    isSafeLibraryHttpErrorCode(body.error)
   ) {
     return body.error;
   }

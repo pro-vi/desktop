@@ -378,6 +378,7 @@ export class ChatGPTController {
     this.onUnblocked = onUnblocked;
     this.stateDir = stateDir;
     this.mutex = new Mutex();
+    this.exclusiveQuarantine = null;
     this.blocked = false;
     this.blockedKind = null;
     this.serverId = null;
@@ -543,7 +544,29 @@ export class ChatGPTController {
   }
 
   async runExclusive(fn) {
-    return await this.mutex.run(fn);
+    return await this.mutex.run(async () => {
+      if (this.exclusiveQuarantine !== null) {
+        const error = new Error('tab_busy');
+        error.code = 'tab_busy';
+        throw error;
+      }
+      return await fn();
+    });
+  }
+
+  quarantineExclusiveUntil(operation) {
+    const settling = Promise.resolve(operation).then(
+      () => undefined,
+      () => undefined
+    );
+    const prior = this.exclusiveQuarantine;
+    const quarantine = prior === null
+      ? settling
+      : Promise.all([prior, settling]).then(() => undefined);
+    this.exclusiveQuarantine = quarantine;
+    void quarantine.finally(() => {
+      if (this.exclusiveQuarantine === quarantine) this.exclusiveQuarantine = null;
+    });
   }
 
   async navigate(url) {
@@ -629,6 +652,7 @@ export class ChatGPTController {
     const deadline = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
         expired = true;
+        this.quarantineExclusiveUntil(running);
         termination = this.#settleCaptureTermination();
         const error = new Error('conversation_capture_timeout');
         error.code = 'conversation_capture_timeout';

@@ -122,12 +122,14 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   ensurePrivateDirectory(path: AbsolutePath, opts: { boundaryPath: AbsolutePath }): Promise<void>
 +   publishImmutable(path: AbsolutePath, bytes: Uint8Array, opts: { boundaryPath: AbsolutePath }): Promise<{ published: boolean }>
 +   replaceFile(path: AbsolutePath, bytes: Uint8Array, opts: { boundaryPath: AbsolutePath }): Promise<void>
++   settleReplacement(path: AbsolutePath, opts: { boundaryPath: AbsolutePath }): Promise<void>
 +   readPrivateFile(path: AbsolutePath, opts: { boundaryPath: AbsolutePath; maxBytes: number }): Promise<Uint8Array>
 +   settleImmutable(path: AbsolutePath, opts: { boundaryPath: AbsolutePath }): Promise<void>
 +   pathKind(path: AbsolutePath, opts: { boundaryPath: AbsolutePath }): Promise<'missing' | 'file' | 'directory' | 'symlink' | 'other'>
 + }
     // contract: S1/S2/S10 share one real and failure-injectable filesystem boundary
     // post: directories are 0700, files are 0600, writes are fsynced, and paths remain below an exact non-symlink boundary
+    // post: settleReplacement validates a single-link 0600 regular final file below that boundary and fsyncs its containing directory; callers still reload and parse the bytes before clearing uncertainty
     // threat boundary: rejects escapes and pre-existing symlinks; V0 trusts the owning OS user and does not defend against a same-user process racing files inside the owner-only state directory
     // errors: link, mode, confinement, size, publication, replacement, and uncertain-write failures stay distinct
     // hides: temp names, hard-link publication, directory fsync portability, and platform file APIs
@@ -285,6 +287,9 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 
 ```diff
 // conversation-catalog-contract.mjs                  + NEW · U7
++ const MAX_CATALOG_IMPORT_RECORDS = 20_000
++ parseImportCapacity(value: unknown): ImportCapacity
++ parseCatalogTitle(value: unknown): string | null
 + type CatalogRoute =
 +   | { kind: 'unverified'; claimedConversationId: ChatGptConversationId }
 +   | { kind: 'verified'; canonicalUrl: CanonicalConversationUrl; verifiedAt: ISODateTime; evidence: 'tracked-tab' | 'direct-navigation' }
@@ -335,6 +340,10 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   | { status: 'complete'; importId: CatalogImportId; counts: ImportCounts }
 +   | { status: 'partial'; importId: CatalogImportId; counts: ImportCounts; problems: ImportProblem[]; resume: ImportCursor }
 +   | { status: 'rejected'; reason: 'not-a-zip' | 'unsupported-export' | 'unsafe-archive' | 'scope-confirmation-required' | 'account-hint-conflict' }
++ type ImportCapacity = { recordCount: number }
++ type StoredImportCapacity = ImportCapacity | null // migrated V1 only: terminal/read-only, or suspended until complete preflight reserves V2 capacity
++ type CatalogImportReadOnlyReason = 'legacy-record-limit'
++ type CatalogImport = { /* existing fields */ readOnlyReason: CatalogImportReadOnlyReason | null }
 +
 + parseExportImportOutcome(value: unknown): ExportImportOutcome
     // discharges O2: export and persisted variants are exact at every process boundary
@@ -366,7 +375,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   inspect(archive: GrantedArchive): Promise<ExportManifest>
 +   streamConversations(archive: GrantedArchive, scope: ChatGptProfileScopeId, cursor?: ImportCursor): AsyncIterable<DecodedArchiveConversation>
 + }
-    // pre: archive came from a grant; entry count, expanded bytes, depth, compression ratio, and conversation count (100,000 maximum) are bounded independently from the 10,000-problem outcome limit
+    // pre: archive came from a grant; entry count, expanded bytes, depth, compression ratio, and conversation count (20,000 maximum) are bounded independently from the 10,000-problem outcome limit; a maximum-shape import fits an otherwise empty atomic catalog
     // post: one conversations.json or numbered conversation JSON files stream without whole-archive buffering
     // errors: zip-slip, expansion bomb, corrupt JSON, unsupported layout, and record decode stay distinguishable
     // hides: ZIP library, streaming parser, undocumented fields, and future adapters
@@ -374,12 +383,14 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 
 ```diff
 // conversation-catalog-store.mjs                     + NEW · U7
++ const CONVERSATION_CATALOG_STORE_SCHEMA_VERSION = 2
 + interface ConversationCatalogStore extends ImportedConversationIndex { // seam S10
-+   beginImport(manifest: ExportManifest, assignment: ProfileScopeAssignment): Promise<CatalogImport>
++   beginImport(manifest: ExportManifest, assignment: ProfileScopeAssignment, capacity: ImportCapacity): Promise<CatalogImport>
 +   commitPreparedRecords(importId: CatalogImportId, records: PreparedArchiveCommit[], nextCursor: ImportCursor): Promise<ImportBatchResult>
 +   finishImport(importId: CatalogImportId, outcome: ExportImportOutcome): Promise<CatalogImport>
 +   recoverInterruptedImports(): Promise<RecoveredImport[]>
 +   interruptImport(importId: CatalogImportId): Promise<CatalogImport>
++   terminalizeLegacyOverLimit(manifest: ExportManifest, profileScopeId: ChatGptProfileScopeId): Promise<CatalogImport | null>
 +   verifyRoute(identity: ConversationIdentity, result: VerifiedRoute): Promise<CatalogConversation>
 +   observeUnavailable(identity: ConversationIdentity, result: UnavailableRouteObservation): Promise<CatalogConversation>
 +   reassignScope(importId: CatalogImportId, newScope: ChatGptProfileScopeId, confirm: true): Promise<ScopeReassignmentResult>
@@ -390,7 +401,12 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
     // discharges O8/O9/O10: absence never deletes; import replay is idempotent; route promotion needs exact live evidence
     // pre: one non-empty bounded contiguous batch; every immutable raw/snapshot blob exists before commitPreparedRecords
     // post: every projection in the batch + its import cursor advance in one serialized atomic write; a crash before it exposes nothing
-    // post: startup converts every open import to visible resumable partial state; replay creates no duplicate identity/snapshot
+    // post: startup converts every current or within-ceiling legacy open import to visible resumable partial state; replay creates no duplicate identity/snapshot
+    // post: begin/reopen atomically reserves a conservative final catalog projection against existing state; every mutation preserves it through interruption and restart recovery until terminal finish clears it
+    // post: legacy V1 identity/raw/snapshot evidence loads without data loss; an old-valid ill-formed optional title migrates to null, and compact V2 encoding supplies migration headroom without raising the 64 MiB ceiling
+    // post: a within-ceiling legacy row keeps an explicit missing reservation until complete archive preflight acquires V2 capacity; an over-limit legacy open/suspended row or exact matching archive preflight becomes terminal read-only with readOnlyReason 'legacy-record-limit' (complete stays complete; every non-complete row becomes partial)
+    // post: read-only legacy history preserves committed evidence and is never offered as resumable or reassignable
+    // errors: insufficient local catalog capacity rejects before a new import becomes visible; a reserved import cannot strand its cursor at the metadata ceiling; a suspended legacy row without preflight or an over-limit legacy row fails with stable catalog_import_capacity_required
     // errors: scope conflict, identity conflict, corrupt state, and IO are explicit; title/time matching is defined out
     // hides: metadata index, bounded batch sizing, orphan-blob collection, account-hint comparison, and event compaction
 ```
@@ -417,6 +433,12 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +   // errors: no transcript text, role, provider ID, or DOM excerpt crosses this inspection boundary
 +   // hides: provider DOM structure and visibility checks
 +
++ ChatGPTController.quarantineExclusiveUntil(operation: Promise<unknown>): void
++   // pre: a host deadline expired while provider work still owns the controller operation
++   // post: later exclusive work fails busy until that exact operation settles; releasing the mutex cannot expose a late navigation to another query/sync/verification
++   // errors: quarantine never destroys the shared tab or cancels provider work by crashing its renderer/target
++   // hides: promise settlement tracking and controller-local quarantine state
++
 + interface ConversationRouteVerificationPort {                  // seam S11
 +   verify(identity: ConversationIdentity, key: string): Promise<RouteVerificationOutcome>
 + }
@@ -436,6 +458,16 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
     // post: raw/snapshot blobs stage first, then one bounded catalog commit publishes a contiguous batch + cursor; interrupted imports resume
     // errors: outcome unions cross HTTP/MCP unchanged; paths, raw records, and transcript bodies never enter errors
     // hides: batch assembly, decoder versions, route retry policy, and provider automation
+```
+
+```diff
+// library-http-errors.mjs                           + NEW · U3/U4/U7 · seam S13
++ transcriptHttpStatusForErrorCode(code: unknown): 400 | 404 | 409 | 413 | 500 | null
++ catalogHttpStatusForErrorCode(code: unknown): 400 | 404 | 409 | 413 | 500 | null
++ isSafeLibraryHttpErrorCode(code: unknown): boolean
+    // contract: loopback HTTP and MCP consume one allowlisted symbolic-error authority
+    // post: every explicitly allowlisted HTTP-boundary code has one stable status; unknown/private errors fail closed
+    // hides: entry-point response shaping and private exception text
 ```
 
 ```diff
@@ -520,6 +552,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +         controller.runExclusive(...)
 +           controller.prepareChatEntry({ chatUrl: source.target.location.chatUrl })
 +           controller.captureConversation({ maxCaptureBytes })
++             host deadline expiry -> partial 'conversation_capture_timeout'; quarantine later controller work until the exact renderer evaluation settles
 +             parseConversationCapture(browserValue)
 +       complete:
 +         normalized = normalizeLiveCapture(capture)
@@ -594,7 +627,13 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +         guard archive limits -> rejected 'unsafe-archive'
 +         guard supported JSON layout -> rejected 'unsupported-export'
 +         if an injected stable profile hint and export accountHint are both present and conflict -> rejected 'account-hint-conflict'
-+       catalogStore.beginImport(manifest, assignment)
++       importCapacity = complete preflight { recordCount }
++         exact record-limit refusal after manifest -> catalogStore.terminalizeLegacyOverLimit(manifest, profileScopeId)
++           only an exact same-archive/same-scope capacity-less V1 row becomes terminal read-only; current imports and nonmatches do not mutate
++         return rejected 'unsafe-archive'
++       catalogStore.beginImport(manifest, assignment, importCapacity)
++         atomically reserve a conservative maximum final projection against the current catalog
++         reject before visibility when the remaining 64 MiB metadata capacity is insufficient
 +       importObservedAt = catalogImport.createdAt // durable local receipt time, reused on resume/replay
 +       preparedBatch = [] // bounded by record count before any catalog write
 +       for await decoded of exportReader.streamConversations(...):
@@ -608,11 +647,12 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +           catalogStore.commitPreparedRecords(importId, preparedBatch, nextCursor)
 +             atomically publish the contiguous batch + cursor
 +             // crash before commit leaves only safe immutable orphans; replay is idempotent
-+       on stream/decode/store error:
-+         catalogStore.interruptImport(importId)
-+           publish visible resumable partial state without advancing beyond the committed cursor
-+         throw 'catalog_import_interrupted'
 +       catalogStore.finishImport(importId, complete|partial)
++       on stream/decode/store error, or a final-status error not already durable:
++         catalogStore.interruptImport(importId)
++           retain the reservation and publish visible resumable partial state without advancing beyond the committed cursor
++         throw 'catalog_import_interrupted'
++       applied-but-uncertain final status -> reconcile exact durable terminal outcome and return it
 ```
 
 ```diff
@@ -620,7 +660,9 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 + app startup
 +   recoverTranscriptLibraryStartup({ transcriptStore, catalogStore })
 +     catch transcript and catalog recovery independently
-+     each open import -> visible partial outcome + durable resume cursor when catalog recovery succeeds
++     each current/within-ceiling open import -> visible partial outcome + durable resume cursor when catalog recovery succeeds
++     each legacy open/suspended import already holding >20,000 committed records -> terminal read-only partial outcome preserving its evidence
++     a shorter legacy prefix becomes read-only only when exact same-archive/same-scope preflight proves the archive exceeds the ceiling
 + agentify_import_chatgpt_export({ same archive grant, profileScopeId })
 +   archiveHash agrees
 +   stream from durable cursor
@@ -644,7 +686,7 @@ Not in V0: automating the export request/email download, sidebar discovery, peri
 +       stable served owned route + exact provider ID -> verified
 +       not-found/forbidden/foreign-profile -> unavailable observation
 +       local tab acquisition/login/challenge/transport -> failed; no route mutation
-+       host deadline expiry -> failed 'transport'; release the controller lock and perform no route mutation
++       host deadline expiry -> failed 'transport'; quarantine later controller work until the timed-out provider operation settles, then release the lock without route mutation
 +     verified -> catalogStore.verifyRoute(identity, result)
 +     unavailable -> catalogStore.observeUnavailable(identity, observation)
 +       // availability observation is not deletion and may be retried
@@ -680,6 +722,7 @@ agentify-desktop/
 + conversation-catalog-sync.mjs                    NEW       import + direct verification authority      U7
 + export-import-grants.mjs                         NEW       human one-use desktop archive grants        U7
 + chatgpt-export-reader.mjs                         NEW       safe streaming export decoder               U7
++ library-http-errors.mjs                           NEW       shared safe HTTP/MCP error authority         U3/U4/U7
 ~ chatgpt-controller.mjs                          MODIFIED  structured capture + route verification     U1/U7
 ~ chrome-cdp-backend.mjs                         MODIFIED  capture cancellation + route drift guard    U1/U7
 ~ electron-browser-backend.mjs                   MODIFIED  capture cancellation + route drift guard    U1/U7
@@ -750,10 +793,11 @@ agentify-desktop/
 | **S6** | `ChatGptLocation` parser | identity and route-verifier dependencies | existing exact parser tests plus live rehearsal | foreign origin refusal; exact provider ID; query/hash stripping |
 | **S7** | Browser DOM/virtualization | `ChatGPTController.captureConversation()` | VM-backed virtualized DOM plus none — live e2e | repeated turns, compound same-container messages, proven non-message provider gaps, delayed boundaries, overlap/order/gap outcomes, and stable normalized hash; `orderedWindowStitching` is their derived summary flag, not independent evidence |
 | **S8** | `ExportImportGrantPort` | `createElectronExportImportGrants()` injected into catalog service | one-use grants with expired/reused/moved variants | human selection, path confinement, scope confirmation, no path leakage |
-| **S9** | `ChatGptExportReader` | `createConversationCatalogService({ exportReader })` | single/numbered JSON, ambiguous graph, zip-slip, expansion-bomb fixtures | independently bounded 100,000 records/10,000 problems; exact decode; hostile archive rejection |
-| **S10** | `ConversationCatalogStore` | catalog service constructor and read-service imported index | real private filesystem plus failure-injecting atomic writer/subprocess | bounded batch+cursor atomicity; replay idempotence; interrupted recovery; no fuzzy identity |
+| **S9** | `ChatGptExportReader` | `createConversationCatalogService({ exportReader })` | single/numbered JSON, ambiguous graph, zip-slip, expansion-bomb fixtures | independently bounded 20,000 records/10,000 problems; exact decode; hostile archive rejection; maximum-shape archive fits an empty atomic catalog and supplies its exact record-count reservation |
+| **S10** | `ConversationCatalogStore` | catalog service constructor and read-service imported index | real private filesystem plus failure-injecting atomic writer/subprocess | bounded batch+cursor atomicity; replay idempotence; capacity reserved against existing metadata through interruption/restart; no fuzzy identity |
 | **S11** | `ConversationRouteVerificationPort` | catalog service constructor plus map-owned served-conversation inspection | verified/unavailable/failed scripted outcomes plus retained-route error shell and live e2e | exact promotion requires stable route + provider ID + visible provider turn; transient failure non-mutation; unavailable-is-not-deleted |
 | **S12** | `ConversationCatalogService` | injected into HTTP/MCP handlers | in-memory service implementing exact import/verify variants | shared verification-key schema; protocol mapping; conditional injected account-hint gate; sensitive-error redaction |
+| **S13** | `library-http-errors` | imported by loopback HTTP and MCP response handling | real authenticated HTTP routes plus real MCP stdio subprocess | one safe symbolic-code/status authority; inspection/capacity errors retain exact codes; unknown/private errors redact |
 
 ## 5. Build order
 

@@ -3,7 +3,9 @@ import { Readable } from 'node:stream';
 import { createInflateRaw } from 'node:zlib';
 
 import {
+  MAX_CATALOG_IMPORT_RECORDS,
   initialImportCursor,
+  parseCatalogTitle,
   parseImportCursor,
   parseIsoDateTime,
   parseSha256
@@ -29,7 +31,10 @@ const ENCRYPTED_FLAGS = 0x0041;
 const SUPPORTED_FLAGS = UTF8_FLAG | DATA_DESCRIPTOR_FLAG;
 const MAX_ZIP_COMMENT_BYTES = 65_535;
 const MAX_MESSAGE_GRAPH_NODES = 100_000;
-export const MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS = 100_000;
+// The catalog is one atomic 64 MiB metadata file in V0. Twenty thousand
+// worst-shape accepted records (including the independent 10,000-problem
+// maximum) fit below that ceiling; a 100,000-record decoder limit did not.
+export const MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS = MAX_CATALOG_IMPORT_RECORDS;
 
 const DEFAULT_LIMITS = Object.freeze({
   maxArchiveBytes: 8 * 1024 * 1024 * 1024,
@@ -678,8 +683,11 @@ async function* streamJsonArrayRecords(chunks, limits) {
 function safeTitle(value) {
   if (typeof value !== 'string') return null;
   const title = value.trim();
-  if (!title || title.length > 512 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(title)) return null;
-  return title;
+  try {
+    return parseCatalogTitle(title);
+  } catch {
+    return null;
+  }
 }
 
 function observedAtFor(record) {
@@ -948,7 +956,7 @@ export function createChatGptExportReader({ limits: limitsValue = {} } = {}) {
       // before publication; pre-inflating here would add I/O without stronger evidence.
       const chunks = uncompressedEntryChunks(archive, entry, limits);
       for await (const framed of streamJsonArrayRecords(chunks, limits)) {
-        if (recordIndex >= limits.maxRecords) throw readerError('export_unsafe_archive');
+        if (recordIndex >= limits.maxRecords) throw readerError('export_record_limit_exceeded');
         if (recordIndex >= cursor.recordIndex) {
           yield decodeArchiveConversation(framed, scope);
         }

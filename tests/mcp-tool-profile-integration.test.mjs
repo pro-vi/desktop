@@ -594,6 +594,12 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
         data: { transcript: 'PRIVATE TRANSCRIPT BODY' }
       });
     }
+    if (req.url === '/catalog/import' && body.grantId === 'grant-inspection-error') {
+      return sendJsonStatus(res, 500, { error: 'catalog_import_inspection_failed' });
+    }
+    if (req.url === '/catalog/import' && body.grantId === 'grant-capacity-error') {
+      return sendJsonStatus(res, 409, { error: 'catalog_import_capacity_required' });
+    }
     if (req.url === '/catalog/verify' && body.key === 'identity-mismatch') {
       return sendJson(res, {
         status: 'verified',
@@ -632,7 +638,12 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
   const results = [];
   try {
     await client.connect(transport);
-    for (const grantId of ['grant-malformed-200', 'grant-private-error']) {
+    for (const grantId of [
+      'grant-malformed-200',
+      'grant-private-error',
+      'grant-inspection-error',
+      'grant-capacity-error'
+    ]) {
       results.push(await client.callTool({
         name: 'agentify_import_chatgpt_export',
         arguments: { grantId, profileScopeId: 'profile-main' }
@@ -655,9 +666,11 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
   assert.equal(results.every(({ isError }) => isError === true), true);
   assert.match(results[0].content[0].text, /transcript_mcp_response_invalid/);
   assert.match(results[1].content[0].text, /transcript_mcp_request_failed/);
-  assert.match(results[2].content[0].text, /transcript_mcp_response_invalid/);
-  assert.match(results[3].content[0].text, /catalog_conversation_not_found/);
+  assert.match(results[2].content[0].text, /catalog_import_inspection_failed/);
+  assert.match(results[3].content[0].text, /catalog_import_capacity_required/);
   assert.match(results[4].content[0].text, /transcript_mcp_response_invalid/);
+  assert.match(results[5].content[0].text, /catalog_conversation_not_found/);
+  assert.match(results[6].content[0].text, /transcript_mcp_response_invalid/);
   const serialized = JSON.stringify(results);
   assert.equal(serialized.includes('PRIVATE'), false);
   assert.equal(serialized.includes('/Users/private'), false);

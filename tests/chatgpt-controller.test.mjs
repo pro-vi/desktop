@@ -28,6 +28,38 @@ function readyState() {
   };
 }
 
+test('chatgpt-controller: timed-out exclusive work quarantines already queued operations until settlement', async () => {
+  const controller = new ChatGPTController({ page: {}, selectors: {} });
+  let enterExclusive;
+  let installQuarantine;
+  let settleProviderWork;
+  const entered = new Promise((resolve) => { enterExclusive = resolve; });
+  const install = new Promise((resolve) => { installQuarantine = resolve; });
+  const providerWork = new Promise((resolve) => { settleProviderWork = resolve; });
+
+  const first = controller.runExclusive(async () => {
+    enterExclusive();
+    await install;
+    controller.quarantineExclusiveUntil(providerWork);
+    return 'timed-out';
+  });
+  await entered;
+  const queued = controller.runExclusive(async () => 'unsafe-overlap');
+  installQuarantine();
+
+  assert.equal(await first, 'timed-out');
+  await assert.rejects(queued, (error) => error?.code === 'tab_busy');
+  await assert.rejects(
+    controller.runExclusive(async () => 'unsafe-overlap'),
+    (error) => error?.code === 'tab_busy'
+  );
+
+  settleProviderWork();
+  await providerWork;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await controller.runExclusive(async () => 'released'), 'released');
+});
+
 function virtualizedConversationPage(messages, {
   initialStart = 0,
   initialEnd = messages.length,
@@ -5747,6 +5779,54 @@ test('chatgpt-controller: review regression host deadline terminates a hung rend
   assert.equal(capture.status, 'partial');
   assert.equal(capture.reason, 'conversation_capture_timeout');
   assert.equal(terminateCalls, 1);
+});
+
+test('chatgpt-controller: unconfirmed capture termination quarantines later exclusive work', async () => {
+  let settleEvaluation;
+  const evaluation = new Promise((resolve) => { settleEvaluation = resolve; });
+  const page = {
+    async evaluate() {
+      return await evaluation;
+    },
+    async terminateEvaluation() {
+      return false;
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/unconfirmed-capture-termination';
+    }
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {},
+    captureHostTimeoutMs: 5
+  });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_capture_timeout');
+  await assert.rejects(
+    controller.runExclusive(async () => 'unsafe-overlap'),
+    (error) => error?.code === 'tab_busy'
+  );
+
+  settleEvaluation({
+    status: 'partial',
+    reason: 'conversation_messages_not_found',
+    rawTurns: [],
+    evidence: {
+      topBoundary: false,
+      bottomBoundary: false,
+      orderedWindowStitching: false,
+      scrollPasses: 0,
+      windowCount: 1,
+      messageCount: 0,
+      providerIdCount: 0,
+      byteCount: 0
+    }
+  });
+  await evaluation;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await controller.runExclusive(async () => 'released'), 'released');
 });
 
 test('chatgpt-controller: review regression host deadline covers route reads and rejects before slow termination', async (t) => {

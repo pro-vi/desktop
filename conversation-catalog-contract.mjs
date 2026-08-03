@@ -13,6 +13,7 @@ export const CONVERSATION_CATALOG_SCHEMA_VERSION = 1;
 export const IMPORT_CURSOR_SCHEMA_VERSION = 1;
 export const INITIAL_PREPARED_IMPORT_BATCH_RECORDS = 64;
 export const MAX_PREPARED_IMPORT_BATCH_RECORDS = 4_096;
+export const MAX_CATALOG_IMPORT_RECORDS = 20_000;
 export const MAX_CATALOG_IMPORT_PROBLEMS = 10_000;
 export const CATALOG_LIST_CURSOR_PATTERN = /^catalog-v1\.[A-Za-z0-9_-]{1,295}$/;
 export const CATALOG_IMPORT_PROBLEM_REASONS = Object.freeze([
@@ -107,11 +108,37 @@ function parseNonNegativeInteger(value, field, max = Number.MAX_SAFE_INTEGER) {
   return value;
 }
 
-function parseNullableTitle(value, field = 'title') {
+export function parseImportCapacity(value, field = 'capacity') {
+  assertExactKeys(value, ['recordCount'], field);
+  const recordCount = parseNonNegativeInteger(
+    value.recordCount,
+    `${field}.recordCount`,
+    MAX_CATALOG_IMPORT_RECORDS
+  );
+  return Object.freeze({ recordCount });
+}
+
+function isWellFormedUnicode(value) {
+  if (typeof value?.isWellFormed === 'function') return value.isWellFormed();
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function parseCatalogTitle(value, field = 'title') {
   if (value === null) return null;
   if (
     typeof value !== 'string' || value.length < 1 || value.length > 512 ||
-    value.trim() !== value || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
+    value.trim() !== value || !isWellFormedUnicode(value) ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
   ) {
     throw catalogContractError('invalid_title', field);
   }
@@ -259,7 +286,7 @@ export function parseCatalogConversation(value) {
   return Object.freeze({
     schemaVersion: CONVERSATION_CATALOG_SCHEMA_VERSION,
     identity,
-    title: parseNullableTitle(value.title),
+    title: parseCatalogTitle(value.title),
     route: parseCatalogRoute(value.route, identity),
     firstObservedAt,
     lastObservedAt,
@@ -360,7 +387,7 @@ export function parsePreparedArchiveCommit(value) {
   }
   return Object.freeze({
     identity,
-    title: parseNullableTitle(value.title),
+    title: parseCatalogTitle(value.title),
     rawRecord: parseRawRecordRef(value.rawRecord),
     importedSnapshot,
     observedAt: parseIsoDateTime(value.observedAt, 'preparedRecord.observedAt'),

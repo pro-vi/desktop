@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -518,6 +519,130 @@ test('catalog service: import interruption persistence retries once and reports 
   }
 });
 
+test('catalog service: a definite final-status write failure becomes resumable without restart', async (t) => {
+  const stateDir = await temporaryDirectory(t, 'final-status-failure');
+  let catalogRenameCalls = 0;
+  let failRenameCall = 3;
+  const operations = proxiedOperations({
+    async rename(...args) {
+      catalogRenameCalls += 1;
+      if (catalogRenameCalls === failRenameCall) {
+        throw Object.assign(new Error('injected final-status replace failure'), { code: 'EIO' });
+      }
+      return await fs.rename(...args);
+    }
+  });
+  const fileSystem = createPrivateFileSystem({ operations });
+  const blobs = createPrivateLibraryBlobStore({ stateDir, fileSystem });
+  const store = createConversationCatalogStore({
+    stateDir,
+    blobs,
+    fileSystem,
+    clock: () => VERIFIED_AT,
+    randomId: () => 'final-status-failure'
+  });
+  const grants = createGrantPort(t, stateDir);
+  const service = createConversationCatalogService({
+    store,
+    blobs,
+    grants,
+    exportReader: createChatGptExportReader(),
+    routeVerifier: { async verify() { throw new Error('not expected'); } },
+    clock: () => VERIFIED_AT
+  });
+  const bytes = exportZip([conversationRecord({ conversationId: 'final-status-thread' })]);
+  await grants.add('grant-final-status-failure', bytes);
+
+  await assert.rejects(
+    service.importExport({
+      grantId: 'grant-final-status-failure',
+      profileScopeId: PROFILE_SCOPE_ID
+    }),
+    (error) => error?.code === 'catalog_import_interrupted'
+  );
+  const [interrupted] = await store.listImports();
+  assert.equal(interrupted.status, 'partial');
+  assert.equal(interrupted.suspension?.reason, 'interrupted');
+  assert.equal(interrupted.cursor.recordIndex, 1);
+  assert.deepEqual(await store.recoverInterruptedImports(), []);
+
+  failRenameCall = -1;
+  await grants.add('grant-final-status-resume', bytes);
+  const resumed = await service.importExport({
+    grantId: 'grant-final-status-resume',
+    profileScopeId: PROFILE_SCOPE_ID
+  });
+  assert.equal(resumed.status, 'complete');
+  assert.equal(resumed.counts.recordsSeen, 1);
+  assert.equal((await store.listImports())[0].status, 'complete');
+});
+
+test('catalog service: an applied but uncertain final status reconciles to its terminal outcome', async (t) => {
+  const stateDir = await temporaryDirectory(t, 'final-status-uncertain');
+  const catalogDirectory = path.join(stateDir, 'transcript-library', 'catalog');
+  let catalogRenameCalls = 0;
+  let directorySyncFailures = 0;
+  const operations = proxiedOperations({
+    async rename(...args) {
+      const result = await fs.rename(...args);
+      catalogRenameCalls += 1;
+      if (catalogRenameCalls === 3) directorySyncFailures = 2;
+      return result;
+    },
+    async open(filePath, ...args) {
+      const handle = await fs.open(filePath, ...args);
+      if (filePath !== catalogDirectory) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === 'sync') {
+            return async () => {
+              if (directorySyncFailures > 0) {
+                directorySyncFailures -= 1;
+                throw Object.assign(new Error('injected final-status sync ambiguity'), { code: 'EIO' });
+              }
+              return await target.sync();
+            };
+          }
+          const value = target[property];
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+      });
+    }
+  });
+  const fileSystem = createPrivateFileSystem({ operations });
+  const blobs = createPrivateLibraryBlobStore({ stateDir, fileSystem });
+  const store = createConversationCatalogStore({
+    stateDir,
+    blobs,
+    fileSystem,
+    clock: () => VERIFIED_AT,
+    randomId: () => 'final-status-uncertain'
+  });
+  const grants = createGrantPort(t, stateDir);
+  const service = createConversationCatalogService({
+    store,
+    blobs,
+    grants,
+    exportReader: createChatGptExportReader(),
+    routeVerifier: { async verify() { throw new Error('not expected'); } },
+    clock: () => VERIFIED_AT
+  });
+  const bytes = exportZip([conversationRecord({ conversationId: 'final-status-uncertain-thread' })]);
+  await grants.add('grant-final-status-uncertain', bytes);
+
+  const outcome = await service.importExport({
+    grantId: 'grant-final-status-uncertain',
+    profileScopeId: PROFILE_SCOPE_ID
+  });
+
+  assert.equal(outcome.status, 'complete');
+  assert.equal(outcome.counts.recordsSeen, 1);
+  assert.equal(directorySyncFailures, 0);
+  const [catalogImport] = await store.listImports();
+  assert.equal(catalogImport.status, 'complete');
+  assert.equal(catalogImport.suspension, null);
+});
+
 test('catalog service: a real archive is committed in bounded batches', async (t) => {
   const fixture = await harness(t, 'bounded-batches');
   const records = Array.from({ length: 65 }, (_, index) => ({
@@ -575,6 +700,7 @@ test('catalog service: bounded batches grow geometrically through the 10,000-pro
         return structuredClone(catalogImport);
       },
       async interruptImport() { throw new Error('not expected'); },
+      async terminalizeLegacyOverLimit() { throw new Error('not expected'); },
       async listImports() { return [structuredClone(catalogImport)]; },
       async verifyRoute() { throw new Error('not expected'); },
       async observeUnavailable() { throw new Error('not expected'); },
@@ -644,6 +770,64 @@ test('catalog service: a real archive over the representable problem bound is re
   assert.deepEqual(await fixture.store.listImports(), []);
   assert.deepEqual(fixture.commitBatchSizes, []);
   assert.deepEqual(fixture.changeEvents, []);
+});
+
+test('catalog service: exact over-limit preflight terminalizes only its matching legacy prefix', async (t) => {
+  const stateDir = await temporaryDirectory(t, 'legacy-prefix-record-limit');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const bytes = exportZip([
+    conversationRecord({ conversationId: 'legacy-prefix-0' }),
+    conversationRecord({ conversationId: 'legacy-prefix-1' })
+  ], { method: 'store' });
+  const manifest = {
+    archiveHash: crypto.createHash('sha256').update(bytes).digest('hex'),
+    layout: 'single-conversations-json',
+    accountHint: null
+  };
+  const initial = createConversationCatalogStore({
+    stateDir,
+    blobs,
+    clock: () => CREATED_AT,
+    randomId: () => 'legacy-prefix'
+  });
+  const started = await initial.beginImport(
+    manifest,
+    { profileScopeId: PROFILE_SCOPE_ID, confirmed: true },
+    { recordCount: 1 }
+  );
+  await initial.interruptImport(started.id);
+  const state = JSON.parse(await fs.readFile(initial.statePath, 'utf8'));
+  state.schemaVersion = 1;
+  for (const catalogImport of state.imports) {
+    catalogImport.schemaVersion = 1;
+    delete catalogImport.capacity;
+    delete catalogImport.readOnlyReason;
+  }
+  await fs.writeFile(initial.statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+
+  const store = createConversationCatalogStore({ stateDir, blobs, clock: () => VERIFIED_AT });
+  const grants = createGrantPort(t, stateDir);
+  await grants.add('grant-legacy-prefix-limit', bytes);
+  const changeEvents = [];
+  const service = createConversationCatalogService({
+    store,
+    blobs,
+    grants,
+    exportReader: createChatGptExportReader({ limits: { maxRecords: 1 } }),
+    routeVerifier: { async verify() { throw new Error('not expected'); } },
+    onChanged: () => changeEvents.push('changed'),
+    clock: () => VERIFIED_AT
+  });
+  const outcome = await service.importExport({
+    grantId: 'grant-legacy-prefix-limit',
+    profileScopeId: PROFILE_SCOPE_ID
+  });
+  assert.deepEqual(outcome, { status: 'rejected', reason: 'unsafe-archive' });
+  const [terminalized] = await store.listImports();
+  assert.equal(terminalized.status, 'partial');
+  assert.equal(terminalized.suspension, null);
+  assert.equal(terminalized.readOnlyReason, 'legacy-record-limit');
+  assert.deepEqual(changeEvents, ['changed']);
 });
 
 test('catalog service: an immutable snapshot over 32 MiB is rejected before begin', async (t) => {
@@ -723,8 +907,13 @@ test('catalog service: a real ambiguous record produces visible catalog-only par
   const fixture = await harness(t, 'partial');
   const complete = conversationRecord({ conversationId: 'complete-thread' });
   const ambiguous = conversationRecord({ conversationId: 'ambiguous-thread', ambiguous: true });
+  const zipBytes = exportZip([complete, ambiguous]);
 
-  const outcome = await importArchive(t, fixture, [complete, ambiguous]);
+  await fixture.grants.add('grant-import', zipBytes);
+  const outcome = await fixture.service.importExport({
+    grantId: 'grant-import',
+    profileScopeId: PROFILE_SCOPE_ID
+  });
   assert.deepEqual(outcome, {
     status: 'partial',
     importId: 'import-partial-1',
@@ -749,6 +938,15 @@ test('catalog service: a real ambiguous record produces visible catalog-only par
     Buffer.from(JSON.stringify(ambiguous))
   );
   assert.equal((await fixture.service.listImports())[0].status, 'partial');
+
+  const committedBatchCount = fixture.commitBatchSizes.length;
+  await fixture.grants.add('grant-partial-repeat', zipBytes);
+  assert.deepEqual(await fixture.service.importExport({
+    grantId: 'grant-partial-repeat',
+    profileScopeId: PROFILE_SCOPE_ID
+  }), outcome);
+  assert.equal(fixture.commitBatchSizes.length, committedBatchCount);
+  assert.equal((await fixture.service.listImports()).length, 1);
 });
 
 test('catalog service: a rejected grant close cannot undo a durable completed import', async (t) => {

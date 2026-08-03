@@ -166,6 +166,7 @@ const SAFE_CONTROL_CENTER_ERROR_CODES = new Set([
   'catalog_store_size_limit',
   'catalog_store_io',
   'catalog_import_active',
+  'catalog_import_capacity_required',
   'catalog_import_grant_invalid',
   'catalog_import_grant_unavailable',
   'catalog_import_inspection_failed',
@@ -492,14 +493,18 @@ function renderLibrary({ imports, catalog, sources, profileScopeId, stateDir }) 
       addBadge(statusRow, `${problemCount} problem${problemCount === 1 ? '' : 's'}`, 'warn');
     }
     meta.appendChild(statusRow);
-    if (catalogImport.suspension) {
+    const legacyReadOnly = catalogImport.readOnlyReason === 'legacy-record-limit';
+    if (legacyReadOnly) {
+      addSubline(meta, 'Read-only legacy history: this import exceeds the current record limit. Existing local evidence remains available; Resume and Reassign are disabled.');
+    } else if (catalogImport.suspension) {
       addSubline(meta, `Recovery state: ${catalogImport.suspension.reason}. Resume cursor ${catalogImport.cursor?.recordIndex || 0}.`);
     }
-    if (catalogImport.status === 'partial' && catalogImport.suspension) {
+    if (!legacyReadOnly && catalogImport.status === 'partial' && catalogImport.suspension) {
       controls.appendChild(makeLibraryButton('Resume with ZIP', () =>
         importChatGptExport(catalogImport.assignment.profileScopeId)));
     }
-    const canReassign = selectedScopeAccepted && profileScopeId !== catalogImport.assignment?.profileScopeId;
+    const canReassign = !legacyReadOnly && selectedScopeAccepted &&
+      profileScopeId !== catalogImport.assignment?.profileScopeId;
     if (canReassign) {
       controls.appendChild(makeLibraryButton('Reassign scope', () =>
         reassignCatalogImport(catalogImport, profileScopeId)));

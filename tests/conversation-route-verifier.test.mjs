@@ -29,6 +29,7 @@ function verifierFixture({
 } = {}) {
   const events = [];
   let inExclusive = false;
+  let exclusiveQuarantine = null;
   let urlRead = 0;
   let challengeRead = 0;
   const controller = {
@@ -37,11 +38,24 @@ function verifierFixture({
       events.push(['exclusive:start']);
       inExclusive = true;
       try {
+        if (exclusiveQuarantine !== null) {
+          const error = new Error('tab_busy');
+          error.code = 'tab_busy';
+          throw error;
+        }
         return await operation();
       } finally {
         inExclusive = false;
         events.push(['exclusive:end']);
       }
+    },
+    quarantineExclusiveUntil(operation) {
+      events.push(['exclusive:quarantine']);
+      const quarantine = Promise.resolve(operation).then(() => undefined, () => undefined);
+      exclusiveQuarantine = quarantine;
+      void quarantine.finally(() => {
+        if (exclusiveQuarantine === quarantine) exclusiveQuarantine = null;
+      });
     },
     async prepareChatEntry(input) {
       assert.equal(inExclusive, true);
@@ -404,7 +418,7 @@ test('route verifier: failures before a provider document is observed remain tra
   });
 });
 
-test('route verifier: a hung provider inspection times out and releases the controller lock', async () => {
+test('route verifier: a hung provider inspection times out and quarantines later controller work', async () => {
   const fixture = verifierFixture({
     navigationTimeoutMs: 25,
     controllerPatch: {
@@ -421,5 +435,50 @@ test('route verifier: a hung provider inspection times out and releases the cont
   assert.deepEqual(outcome, { status: 'failed', reason: 'transport' });
   assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(fixture.events.at(-1)[0], 'exclusive:end');
-  assert.equal(await fixture.controller.runExclusive(async () => 'released'), 'released');
+  assert.deepEqual(
+    await fixture.verifier.verify(identity(), 'still-quarantined-key'),
+    { status: 'failed', reason: 'transport' }
+  );
+  await assert.rejects(
+    fixture.controller.runExclusive(async () => 'unsafe-overlap'),
+    (error) => error?.code === 'tab_busy'
+  );
+});
+
+test('route verifier: late provider completion clears quarantine before the next exclusive operation', async () => {
+  let releasePreparation;
+  const preparation = new Promise((resolve) => {
+    releasePreparation = resolve;
+  });
+  const fixture = verifierFixture({
+    navigationTimeoutMs: 25,
+    controllerPatch: {
+      async prepareChatEntry() {
+        fixture.events.push(['prepare:pending']);
+        await preparation;
+        fixture.events.push(['prepare:settled']);
+      }
+    }
+  });
+
+  assert.deepEqual(
+    await fixture.verifier.verify(identity(), 'late-completion-key'),
+    { status: 'failed', reason: 'transport' }
+  );
+  await assert.rejects(
+    fixture.controller.runExclusive(async () => 'unsafe-overlap'),
+    (error) => error?.code === 'tab_busy'
+  );
+
+  releasePreparation();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    try {
+      assert.equal(await fixture.controller.runExclusive(async () => 'released'), 'released');
+      return;
+    } catch (error) {
+      if (error?.code !== 'tab_busy') throw error;
+    }
+  }
+  assert.fail('controller quarantine did not clear after provider operation settled');
 });
