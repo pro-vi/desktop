@@ -867,7 +867,8 @@ export class ChatGPTController {
       return parseConversationCapture(value);
     }, {
       anchorId: 'assistant-message',
-      postcondition: (value) => value?.status === 'complete',
+      postcondition: (value) => value?.status === 'complete' ||
+        (value?.status === 'partial' && value.reason !== 'compatibility_drift'),
       mapResult: (value, resolution) => {
         if (resolution?.kind === 'resolution' && resolution.healthStatus !== 'fail') return value;
         return value?.status === 'partial' && value.reason === 'compatibility_drift'

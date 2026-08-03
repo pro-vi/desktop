@@ -109,20 +109,113 @@ test('compatibility policy: operation errors retain identity and incomplete appa
   assert.equal(observations[1].verdict, 'incomplete');
 });
 
-test('compatibility policy: transcript callers can fail closed on unresolved compatibility apparatus', async () => {
+test('compatibility policy: captureConversation fails closed on unresolved transcript apparatus', async () => {
   const observations = [];
-  const { controller } = makeController({ raw: null, observations });
-  const complete = { status: 'complete', marker: 'preserved' };
-  const actual = await controller.runCompatibilityCapability('transcript', async () => complete, {
-    anchorId: 'assistant-message',
-    postcondition: (value) => value.status === 'complete',
-    mapResult: (value, resolution) => resolution.kind === 'apparatus'
-      ? { ...value, status: 'partial', reason: 'compatibility_drift' }
-      : value
+  let evaluationCount = 0;
+  const page = {
+    async evaluate() {
+      evaluationCount += 1;
+      if (evaluationCount === 1) return null;
+      return {
+        status: 'partial',
+        reason: 'conversation_generation_active',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
+      };
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/compatibility-unresolved';
+    }
+  };
+  const bridge = createProviderCompatibilityBridge({
+    vendorId: 'chatgpt', vendorName: 'ChatGPT', selectors, profile,
+    onCompatibilityObservation: async (row) => { observations.push(row); return { accepted: true }; }
+  });
+  const controller = new ChatGPTController({
+    page,
+    selectors,
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT',
+    ...bridge
   });
 
-  assert.deepEqual(actual, { status: 'partial', marker: 'preserved', reason: 'compatibility_drift' });
+  const actual = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(actual.status, 'partial');
+  assert.equal(actual.reason, 'compatibility_drift');
+  assert.equal(evaluationCount, 2);
   assert.equal(observations.find(({ kind }) => kind === 'capability').status, 'fail');
+  assert.equal(observations.find(({ kind }) => kind === 'apparatus').verdict, 'incomplete');
+});
+
+test('compatibility policy: legitimate partial transcript capture stays partial without marking compatibility drift', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-policy-partial-transcript-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const store = createCompatibilityStore(stateDir, {
+    contractHash: profile.contractHash,
+    capabilityIds: profile.capabilities.map(({ id }) => id)
+  });
+  await store.load();
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'message-user', role: 'user', text: 'Prompt' },
+    { ordinal: 1, providerMessageId: 'message-assistant', role: 'assistant', text: 'Reply in progress' }
+  ];
+  const partialCapture = {
+    status: 'partial',
+    reason: 'conversation_generation_active',
+    rawTurns,
+    evidence: {
+      topBoundary: true,
+      bottomBoundary: true,
+      orderedWindowStitching: true,
+      scrollPasses: 2,
+      windowCount: 1,
+      messageCount: rawTurns.length,
+      providerIdCount: rawTurns.length,
+      byteCount: rawTurns.reduce((total, turn) =>
+        total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0)
+    }
+  };
+  let evaluationCount = 0;
+  const page = {
+    async evaluate() {
+      evaluationCount += 1;
+      return evaluationCount === 1 ? resolvedRaw('assistant-message') : partialCapture;
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/compatibility-partial';
+    }
+  };
+  const bridge = createProviderCompatibilityBridge({
+    vendorId: 'chatgpt', vendorName: 'ChatGPT', selectors, profile,
+    onCompatibilityObservation: async (row) => await store.record(row)
+  });
+  const controller = new ChatGPTController({
+    page,
+    selectors,
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT',
+    ...bridge
+  });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_generation_active');
+  assert.equal(evaluationCount, 2);
+  const state = store.getSnapshot();
+  assert.equal(state.capabilities.transcript.status, 'ok');
+  assert.equal(state.capabilities.transcript.reasonCode, 'postcondition-satisfied');
+  assert.equal(state.apparatus.verdict, 'ok');
 });
 
 test('compatibility policy: production observations parse and persist exactly once through the real store', async () => {
