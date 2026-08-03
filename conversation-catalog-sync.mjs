@@ -481,9 +481,18 @@ export function createChatGptRouteVerifier({
       return failedVerification('compatibility-drift');
     }
     return await controller.runExclusive(async () => {
+      let expired = false;
+      const assertActive = () => {
+        if (!expired) return;
+        throw serviceError('catalog_verification_timeout');
+      };
       const failureOutcome = async (error) => {
+        if (expired || error?.code === 'catalog_verification_timeout') {
+          return failedVerification('transport');
+        }
         if (typeof controller.detectChallenge === 'function') {
           const challenge = await controller.detectChallenge().catch(() => null);
+          assertActive();
           if (challenge?.kind === 'login') return failedVerification('login');
           if (challenge?.blocked) return failedVerification('challenge');
         }
@@ -493,6 +502,7 @@ export function createChatGptRouteVerifier({
       };
       const readExactRoute = async () => {
         const rawUrl = await controller.getUrl();
+        assertActive();
         let target;
         try {
           target = parseChatGptEntryTarget(rawUrl);
@@ -525,6 +535,7 @@ export function createChatGptRouteVerifier({
       };
       const protectiveFailure = async () => {
         const state = await controller.detectChallenge();
+        assertActive();
         if (!state || typeof state !== 'object' || typeof state.blocked !== 'boolean') {
           return failedVerification('compatibility-drift');
         }
@@ -532,54 +543,70 @@ export function createChatGptRouteVerifier({
         return failedVerification(state.kind === 'login' ? 'login' : 'challenge');
       };
 
-      try {
-        await controller.prepareChatEntry({
-          chatUrl: canonicalUrl,
-          timeoutMs: navigationTimeoutMs,
-          forceNavigation: true
-        });
-        const beforeProtection = await protectiveFailure();
-        if (beforeProtection) return beforeProtection;
-        const before = await readExactRoute();
-        if (before.outcome) return before.outcome;
-
-        const observation = await controller.inspectConversationRoute();
-        const afterProtection = await protectiveFailure();
-        if (afterProtection) return afterProtection;
-        const after = await readExactRoute();
-        if (after.outcome) return after.outcome;
-        if (before.target.chatUrl !== after.target.chatUrl) {
-          return unavailableVerification(identity, 'not-found', true, observedAt());
-        }
-
-        if (
-          hasExactKeys(observation, ['status', 'visibleTurnCount']) &&
-          observation.status === 'served' &&
-          Number.isSafeInteger(observation.visibleTurnCount) &&
-          observation.visibleTurnCount > 0
-        ) {
-          return parseRouteVerificationOutcome({
-            status: 'verified',
-            identity,
-            canonicalUrl: after.target.chatUrl,
-            evidence: 'direct-navigation'
+      const operation = (async () => {
+        try {
+          await controller.prepareChatEntry({
+            chatUrl: canonicalUrl,
+            timeoutMs: navigationTimeoutMs,
+            forceNavigation: true
           });
-        }
-        if (
-          hasExactKeys(observation, ['reason', 'status']) &&
-          observation.status === 'unavailable' && observation.reason === 'not-found'
-        ) {
-          return unavailableVerification(identity, 'not-found', true, observedAt());
-        }
-        if (
-          hasExactKeys(observation, ['reason', 'status']) &&
-          observation.status === 'failed' && observation.reason === 'compatibility-drift'
-        ) {
+          assertActive();
+          const beforeProtection = await protectiveFailure();
+          if (beforeProtection) return beforeProtection;
+          const before = await readExactRoute();
+          if (before.outcome) return before.outcome;
+
+          const observation = await controller.inspectConversationRoute();
+          assertActive();
+          const afterProtection = await protectiveFailure();
+          if (afterProtection) return afterProtection;
+          const after = await readExactRoute();
+          if (after.outcome) return after.outcome;
+          if (before.target.chatUrl !== after.target.chatUrl) {
+            return unavailableVerification(identity, 'not-found', true, observedAt());
+          }
+
+          if (
+            hasExactKeys(observation, ['status', 'visibleTurnCount']) &&
+            observation.status === 'served' &&
+            Number.isSafeInteger(observation.visibleTurnCount) &&
+            observation.visibleTurnCount > 0
+          ) {
+            return parseRouteVerificationOutcome({
+              status: 'verified',
+              identity,
+              canonicalUrl: after.target.chatUrl,
+              evidence: 'direct-navigation'
+            });
+          }
+          if (
+            hasExactKeys(observation, ['reason', 'status']) &&
+            observation.status === 'unavailable' && observation.reason === 'not-found'
+          ) {
+            return unavailableVerification(identity, 'not-found', true, observedAt());
+          }
+          if (
+            hasExactKeys(observation, ['reason', 'status']) &&
+            observation.status === 'failed' && observation.reason === 'compatibility-drift'
+          ) {
+            return failedVerification('compatibility-drift');
+          }
           return failedVerification('compatibility-drift');
+        } catch (error) {
+          return await failureOutcome(error);
         }
-        return failedVerification('compatibility-drift');
-      } catch (error) {
-        return await failureOutcome(error);
+      })();
+      let timeoutId;
+      const timeout = new Promise((resolve) => {
+        timeoutId = setTimeout(() => {
+          expired = true;
+          resolve(failedVerification('transport'));
+        }, navigationTimeoutMs);
+      });
+      try {
+        return await Promise.race([operation, timeout]);
+      } finally {
+        clearTimeout(timeoutId);
       }
     });
   }

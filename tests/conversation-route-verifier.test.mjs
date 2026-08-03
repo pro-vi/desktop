@@ -24,6 +24,7 @@ function verifierFixture({
   challenge = { kind: null, blocked: false },
   challengeResults = null,
   challengeError = null,
+  navigationTimeoutMs = NAVIGATION_TIMEOUT_MS,
   controllerPatch = {}
 } = {}) {
   const events = [];
@@ -87,9 +88,10 @@ function verifierFixture({
     events,
     verifier: createChatGptRouteVerifier({
       tabs,
-      navigationTimeoutMs: NAVIGATION_TIMEOUT_MS,
+      navigationTimeoutMs,
       clock: () => OBSERVED_AT
-    })
+    }),
+    controller
   };
 }
 
@@ -400,4 +402,24 @@ test('route verifier: failures before a provider document is observed remain tra
     );
     assert.deepEqual(events.map(([event]) => event), ['ensure', 'controller']);
   });
+});
+
+test('route verifier: a hung provider inspection times out and releases the controller lock', async () => {
+  const fixture = verifierFixture({
+    navigationTimeoutMs: 25,
+    controllerPatch: {
+      async inspectConversationRoute() {
+        fixture.events.push(['inspect:hung']);
+        return await new Promise(() => {});
+      }
+    }
+  });
+
+  const startedAt = Date.now();
+  const outcome = await fixture.verifier.verify(identity(), 'bounded-verification-key');
+
+  assert.deepEqual(outcome, { status: 'failed', reason: 'transport' });
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(fixture.events.at(-1)[0], 'exclusive:end');
+  assert.equal(await fixture.controller.runExclusive(async () => 'released'), 'released');
 });
