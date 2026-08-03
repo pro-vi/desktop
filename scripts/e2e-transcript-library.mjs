@@ -70,7 +70,12 @@ const E2E_PHASES = Object.freeze([
   'relaunch_ui',
   'relaunch_mcp',
   'forget_mcp',
-  'relaunch_shutdown'
+  'relaunch_shutdown',
+  'degraded_state_prepare',
+  'degraded_launch',
+  'degraded_observation',
+  'degraded_shutdown',
+  'degraded_state_restore'
 ]);
 const SAFE_E2E_OUTPUT_ERROR_CODES = new Set([
   'e2e_failed',
@@ -936,6 +941,57 @@ async function exerciseRecoveryHttp(connection) {
   };
 }
 
+async function exerciseDegradedLibraryStartup(runtime) {
+  const health = await httpJson(runtime.connection, '/health', { authenticated: false });
+  assert.equal(health.status, 200);
+  assert.equal(health.data.serverId, runtime.connection.state.serverId);
+
+  const tabs = await httpJson(runtime.connection, '/tabs');
+  assert.equal(tabs.status, 200);
+  assert.equal(tabs.data.ok, true);
+  assert.equal(Array.isArray(tabs.data.tabs), true);
+  assert.equal(tabs.data.tabs.length > 0, true);
+  assert.equal(tabs.data.tabs.some(({ id }) => id === tabs.data.defaultTabId), true);
+
+  const unavailable = await httpJson(runtime.connection, '/transcripts/list');
+  assert.deepEqual(unavailable, {
+    status: 500,
+    data: { error: 'transcript_store_corrupt_state' }
+  });
+
+  const cdp = await connectControlCenter(runtime.debugPort);
+  try {
+    const bridge = await cdp.evaluate(`(async () => {
+      const state = await window.agentifyDesktop.getState();
+      return {
+        bridgeAvailable: typeof window.agentifyDesktop.getTranscriptSources === 'function',
+        transcriptStartup: state.libraryStartup?.transcripts || null,
+        catalogStartup: state.libraryStartup?.catalog || null,
+        ordinaryTabCount: Array.isArray(state.tabs) ? state.tabs.length : 0,
+        defaultTabPresent: Array.isArray(state.tabs) && state.tabs.some(({ id }) => id === state.defaultTabId)
+      };
+    })()`);
+    assert.equal(bridge.bridgeAvailable, true);
+    assert.deepEqual(bridge.transcriptStartup, {
+      status: 'unavailable',
+      code: 'transcript_store_corrupt_state'
+    });
+    assert.equal(bridge.catalogStartup?.status, 'ready');
+    assert.equal(bridge.ordinaryTabCount > 0, true);
+    assert.equal(bridge.defaultTabPresent, true);
+    return {
+      health: true,
+      authenticatedTabs: true,
+      controlCenterPreload: true,
+      transcriptStartup: bridge.transcriptStartup,
+      catalogStartup: bridge.catalogStartup.status,
+      safeLibraryError: unavailable.data.error
+    };
+  } finally {
+    cdp.close();
+  }
+}
+
 async function exerciseHttp(connection) {
   const health = await httpJson(connection, '/health', { authenticated: false });
   assert.equal(health.status, 200);
@@ -1300,11 +1356,14 @@ async function main() {
   let recoveryRuntime = null;
   let completedRuntime = null;
   let relaunchedRuntime = null;
+  let degradedRuntime = null;
   let recoverySessionId = null;
   let completedSessionId = null;
   let relaunchSessionId = null;
   let cleanup = null;
   let result = null;
+  let transcriptStateMode = null;
+  const transcriptStatePath = path.join(state.stateDir, 'transcript-library', 'live', 'state.json');
   let phase = 'setup';
   try {
     phase = 'preflight';
@@ -1402,6 +1461,36 @@ async function main() {
     const relaunchedExit = await shutdownElectron(relaunchedRuntime);
     relaunchedRuntime = null;
 
+    let degradedStartup = {
+      tested: false,
+      reason: 'private_mode_fixture_not_supported_on_windows'
+    };
+    let degradedExit = null;
+    if (process.platform !== 'win32') {
+      phase = 'degraded_state_prepare';
+      const transcriptStateStat = await fs.lstat(transcriptStatePath);
+      assert.equal(transcriptStateStat.isFile(), true);
+      assert.equal(transcriptStateStat.isSymbolicLink(), false);
+      transcriptStateMode = transcriptStateStat.mode & 0o777;
+      assert.equal(transcriptStateMode, 0o600);
+      await fs.chmod(transcriptStatePath, 0o644);
+
+      phase = 'degraded_launch';
+      degradedRuntime = await launchElectron({ launch, stateDir: state.stateDir });
+      phase = 'degraded_observation';
+      degradedStartup = {
+        tested: true,
+        fixture: 'transcript_state_mode_0644',
+        ...(await exerciseDegradedLibraryStartup(degradedRuntime))
+      };
+      phase = 'degraded_shutdown';
+      degradedExit = await shutdownElectron(degradedRuntime);
+      degradedRuntime = null;
+      phase = 'degraded_state_restore';
+      await fs.chmod(transcriptStatePath, transcriptStateMode);
+      transcriptStateMode = null;
+    }
+
     const modes = await verifyPrivateLibraryModes(state.stateDir);
     assert.deepEqual(completedUi.driver, relaunchedUi.driver);
     const steps = {
@@ -1414,7 +1503,10 @@ async function main() {
         'launch-and-observe-complete-catalog',
         'relaunch-and-observe-persistence',
         'forget-local-source',
-        'observe-content-free-mutation-event-in-control-center'
+        'observe-content-free-mutation-event-in-control-center',
+        ...(degradedStartup.tested
+          ? ['launch-with-invalid-transcript-state-mode-and-observe-isolated-degradation']
+          : [])
       ],
       observed: {
         stagedRecords: crash.stagedRawFiles,
@@ -1459,8 +1551,8 @@ async function main() {
         filesystem: 'real private filesystem under a run-owned disposable root'
       },
       processes: {
-        electronLaunches: 3,
-        electronExits: [recoveryExit, completedExit, relaunchedExit],
+        electronLaunches: degradedStartup.tested ? 4 : 3,
+        electronExits: [recoveryExit, completedExit, relaunchedExit, degradedExit].filter(Boolean),
         mcpStdioLaunches: 3,
         mcpExits: [completedMcp, relaunchedMcp, forgetMcp],
         crashFixtureExit: crash.exit,
@@ -1476,7 +1568,8 @@ async function main() {
         realArchiveResumeCompleted: true,
         sameArchiveReplayCreatedNoNewBlobs: true,
         unreachableBlobsStayedUnpublished: true,
-        restartStable: true
+        restartStable: true,
+        isolatedStartupDegradation: degradedStartup
       },
       contracts: {
         authenticatedHttp: true,
@@ -1541,6 +1634,11 @@ async function main() {
     if (recoveryRuntime) await forceStopElectron(recoveryRuntime);
     if (completedRuntime) await forceStopElectron(completedRuntime);
     if (relaunchedRuntime) await forceStopElectron(relaunchedRuntime);
+    if (degradedRuntime) await forceStopElectron(degradedRuntime);
+    if (transcriptStateMode !== null) {
+      await fs.chmod(transcriptStatePath, transcriptStateMode).catch(() => {});
+      transcriptStateMode = null;
+    }
     cleanup = await cleanupOwnedState(state, options.keepState);
   }
   if (!result) throw runnerError('e2e_result_missing');
