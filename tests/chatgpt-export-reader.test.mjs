@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS,
   closeGrantedArchive,
   createChatGptExportReader,
   createGrantedArchiveFromFileHandle
@@ -312,6 +313,54 @@ test('chatgpt export reader: streams zero-based deflated shards in numeric order
       { schemaVersion: 1, recordIndex: 1 }
     )),
     [expectedComplete(second), expectedComplete(third)]
+  );
+});
+
+test('chatgpt export reader: conversation count has an independent bounded authority above the problem cap', async (t) => {
+  const recordCount = 10_001;
+  const records = Array.from({ length: recordCount }, (_, index) => ({
+    title: `Catalog-only record ${index}`,
+    update_time: UPDATE_TIME
+  }));
+  const archive = await grantedArchive(t, buildZip([{
+    name: 'conversations.json',
+    data: recordsJson(records),
+    method: 'store'
+  }]));
+  const reader = createChatGptExportReader();
+  let decodedCount = 0;
+
+  for await (const decoded of reader.streamConversations(archive, PROFILE_SCOPE_ID)) {
+    assert.equal(decoded.status, 'catalog-only');
+    decodedCount += 1;
+  }
+
+  assert.equal(decodedCount, recordCount);
+  assert.equal(reader.limits.maxRecords, MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS);
+  assert.equal(MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS, 100_000);
+});
+
+test('chatgpt export reader: configured record bounds reject real excess archive bytes symbolically', async (t) => {
+  const privateMarker = 'private record limit marker';
+  const archive = await grantedArchive(t, buildZip([{
+    name: 'conversations.json',
+    data: recordsJson(Array.from({ length: 3 }, (_, index) => ({
+      title: `${privateMarker} ${index}`,
+      update_time: UPDATE_TIME
+    }))),
+    method: 'store'
+  }]));
+  const reader = createChatGptExportReader({ limits: { maxRecords: 2 } });
+
+  await assert.rejects(
+    collect(reader.streamConversations(archive, PROFILE_SCOPE_ID)),
+    errorHasCode(/^export_unsafe_archive$/, [privateMarker])
+  );
+  assert.throws(
+    () => createChatGptExportReader({
+      limits: { maxRecords: MAX_CHATGPT_EXPORT_CONVERSATION_RECORDS + 1 }
+    }),
+    errorHasCode(/^export_reader_limits_invalid$/)
   );
 });
 
