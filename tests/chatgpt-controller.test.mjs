@@ -3561,6 +3561,70 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
   assert.match(evaluations[0], /const cap = 6096/);
 });
 
+test('chatgpt-controller: legacy transcript projection reads DOM windows while library capture stays canonical-only', async (t) => {
+  const routes = [
+    ['share', 'https://chatgpt.com/share/shared-thread'],
+    ['custom GPT', 'https://chatgpt.com/g/g-custom-assistant']
+  ];
+  for (const [name, route] of routes) {
+    await t.test(name, async () => {
+      let evaluations = 0;
+      let routeReads = 0;
+      const rawTurns = [
+        { ordinal: 0, providerMessageId: 'legacy-1', role: 'user', text: 'Visible prompt' },
+        { ordinal: 1, providerMessageId: 'legacy-2', role: 'assistant', text: 'Visible reply' }
+      ];
+      const page = {
+        async evaluate(js) {
+          evaluations += 1;
+          assert.match(js, /data-message-author-role/);
+          return {
+            status: 'complete',
+            rawTurns,
+            evidence: {
+              topBoundary: true,
+              bottomBoundary: true,
+              orderedWindowStitching: true,
+              messageCount: rawTurns.length,
+              providerIdCount: rawTurns.length,
+              byteCount: rawTurns.reduce((total, turn) =>
+                total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0),
+              windowCount: 1,
+              scrollPasses: 0
+            }
+          };
+        },
+        async getUrl() {
+          routeReads += 1;
+          return route;
+        }
+      };
+      const controller = new ChatGPTController({ page, selectors: {} });
+
+      const result = await controller.readConversationText({ maxChars: 500 });
+
+      assert.deepEqual(result, {
+        text: 'User\nVisible prompt\n\nAssistant\nVisible reply',
+        complete: true,
+        truncated: false,
+        reason: null,
+        messageCount: 2,
+        scrollPasses: 0
+      });
+      assert.equal(evaluations, 1);
+      assert.equal(routeReads, 0);
+
+      const libraryCapture = await controller.captureConversation({ maxCaptureBytes: 10_000 });
+
+      assert.equal(libraryCapture.status, 'partial');
+      assert.equal(libraryCapture.reason, 'compatibility_drift');
+      assert.equal(libraryCapture.conversationUrl, null);
+      assert.equal(evaluations, 1);
+      assert.equal(routeReads, 2);
+    });
+  }
+});
+
 test('chatgpt-controller: forced chat entry navigation reloads an already-exact route', async () => {
   const navigations = [];
   let documentEpoch = 100;
@@ -5911,6 +5975,59 @@ test('chatgpt-controller: readConversationText preserves max_chars over the lead
   assert.equal(result.truncated, true);
   assert.equal(result.reason, 'max_chars');
   assert.equal(result.messageCount, 1);
+});
+
+test('chatgpt-controller: legacy projection preserves the pre-V0 top-capture timeout reason', async () => {
+  const messages = Array.from({ length: 8 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    text: `Top timeout turn ${index}`
+  }));
+  const makePage = () => {
+    let clockReads = 0;
+    return slidingConversationPage(messages, {
+      initialStart: 4,
+      performanceNow: () => clockReads++ === 0 ? 0 : 15_000
+    });
+  };
+
+  const legacy = await new ChatGPTController({ page: makePage(), selectors: {} })
+    .readConversationText({ maxChars: 5_000 });
+  const structured = await new ChatGPTController({ page: makePage(), selectors: {} })
+    .captureConversation({ maxCaptureBytes: 25_000 });
+
+  assert.equal(legacy.reason, 'conversation_top_capture_timeout');
+  assert.equal(legacy.complete, false);
+  assert.equal(structured.status, 'partial');
+  assert.equal(structured.reason, 'conversation_capture_timeout');
+  assert.equal(Object.hasOwn(structured, 'legacyDiagnosticReason'), false);
+});
+
+test('chatgpt-controller: legacy projection preserves the pre-V0 top-scroll stall reason', async () => {
+  const messages = Array.from({ length: 8 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    text: `Top stall turn ${index}`
+  }));
+  const makePage = () => {
+    let scrollWrites = 0;
+    return slidingConversationPage(messages, {
+      initialStart: 4,
+      scrollTopForRequest: ({ requested, previous }) => {
+        scrollWrites += 1;
+        return scrollWrites <= 2 ? requested : previous;
+      }
+    });
+  };
+
+  const legacy = await new ChatGPTController({ page: makePage(), selectors: {} })
+    .readConversationText({ maxChars: 5_000 });
+  const structured = await new ChatGPTController({ page: makePage(), selectors: {} })
+    .captureConversation({ maxCaptureBytes: 25_000 });
+
+  assert.equal(legacy.reason, 'conversation_top_scroll_stalled');
+  assert.equal(legacy.complete, false);
+  assert.equal(structured.status, 'partial');
+  assert.equal(structured.reason, 'conversation_scroll_stalled');
+  assert.equal(Object.hasOwn(structured, 'legacyDiagnosticReason'), false);
 });
 
 test('chatgpt-controller: research export uses native download hook for markdown report', async (t) => {

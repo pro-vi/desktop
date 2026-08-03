@@ -8,7 +8,7 @@ import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
 import {
   TRANSCRIPT_TURN_MAX_TEXT_CHARS,
   parseConversationCapture,
-  projectLegacyConversationText
+  projectLegacyConversationWindowText
 } from './transcript-contract.mjs';
 import {
   CHATGPT_ANY_MODE_PATTERN,
@@ -900,7 +900,7 @@ export class ChatGPTController {
     }
   }
 
-  async #captureConversationWindows({ maxCaptureBytes }) {
+  async #captureConversationWindows({ maxCaptureBytes, includeLegacyDiagnostic = false }) {
     const messageSelector = this.#transcriptDependencySelector(
       'transcript-message',
       '[data-message-author-role]'
@@ -940,6 +940,7 @@ export class ChatGPTController {
     try {
       captured = await this.#evalCapture(`(async () => {
       const cap = ${maxCaptureBytes};
+      const includeLegacyDiagnostic = ${includeLegacyDiagnostic === true ? 'true' : 'false'};
       const maxTurnTextChars = ${TRANSCRIPT_TURN_MAX_TEXT_CHARS};
       const maxProviderTurnOrdinal = 100_000;
       const maxProviderGapSpan = 64;
@@ -1311,6 +1312,7 @@ export class ChatGPTController {
       let byteCount = 0;
       let windowCount = 0;
       let reason = null;
+      let legacyDiagnosticReason = null;
       const providerPositionStabilityObservations = 4;
       const providerPositionObservationCounts = new Map();
       const unsettledProviderPositions = new Set();
@@ -1945,6 +1947,7 @@ export class ChatGPTController {
             scrollPasses += 1;
             if (performance.now() - topStartedAt >= 15_000) {
               reason = 'conversation_capture_timeout';
+              legacyDiagnosticReason = 'conversation_top_capture_timeout';
               break;
             }
             const firstMessage = messageNodes()[0];
@@ -1992,6 +1995,7 @@ export class ChatGPTController {
             stillPasses += 1;
             if (stillPasses >= 3) {
               reason = 'conversation_scroll_stalled';
+              legacyDiagnosticReason = 'conversation_top_scroll_stalled';
               break;
             }
           }
@@ -2440,9 +2444,12 @@ export class ChatGPTController {
         providerIdCount: rawTurns.filter((turn) => turn.providerMessageId !== null).length,
         byteCount
       };
-      return reason
+      const captureWindow = reason
         ? { status: 'partial', reason, rawTurns, evidence }
         : { status: 'complete', rawTurns, evidence };
+      return includeLegacyDiagnostic && legacyDiagnosticReason
+        ? { ...captureWindow, legacyDiagnosticReason }
+        : captureWindow;
       })()`);
     } catch (error) {
       if (error?.code !== 'conversation_capture_timeout') throw error;
@@ -2484,11 +2491,39 @@ export class ChatGPTController {
 
   async readConversationText({ maxChars = 200_000 } = {}) {
     const projectionCap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
-    const capture = await this.captureConversation({
-      maxCaptureBytes: Math.min(16 * 1024 * 1024, (projectionCap * 4) + 4096)
+    const maxCaptureBytes = Math.min(16 * 1024 * 1024, (projectionCap * 4) + 4096);
+    let captureWindow;
+    let legacyDiagnosticReason = null;
+    try {
+      const capturedWindow = await this.#runCaptureWithHostDeadline(
+        async () => await this.#captureConversationWindows({
+          maxCaptureBytes,
+          includeLegacyDiagnostic: true
+        })
+      );
+      ({ legacyDiagnosticReason = null, ...captureWindow } = capturedWindow);
+    } catch (error) {
+      if (error?.code !== 'conversation_capture_timeout') throw error;
+      captureWindow = {
+        status: 'partial',
+        reason: 'conversation_capture_timeout',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
+      };
+    }
+    return projectLegacyConversationWindowText(captureWindow, {
+      maxChars: projectionCap,
+      legacyDiagnosticReason
     });
-    const projection = projectLegacyConversationText(capture, { maxChars: projectionCap });
-    return projection;
   }
 
   async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {

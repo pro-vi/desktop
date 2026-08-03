@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 
 import {
+  LEGACY_CONVERSATION_TEXT_REASONS,
+  TRANSCRIPT_CAPTURE_REASONS,
   TRANSCRIPT_NORMALIZATION_VERSION,
   TRANSCRIPT_PAGE_MAX_TEXT_CHARS,
   TRANSCRIPT_TURN_MAX_TEXT_CHARS,
@@ -12,6 +14,7 @@ import {
   parseNormalizedTranscript,
   parseTranscriptTurn,
   projectLegacyConversationText,
+  projectLegacyConversationWindowText,
   renderTranscript
 } from '../transcript-contract.mjs';
 
@@ -281,24 +284,23 @@ test('transcript contract: evidence byte counts are recomputed with exact UTF-8 
   }), /evidence_count_mismatch/);
 });
 
-test('transcript contract: legacy projection keeps structured failure reasons distinct', () => {
+test('transcript contract: legacy projection exhaustively closes structured reasons into the pre-V0 vocabulary', () => {
   const expected = new Map([
     ['conversation_messages_not_found', 'conversation_messages_not_found'],
     ['conversation_top_not_reached', 'conversation_top_not_reached'],
     ['conversation_scroll_stalled', 'conversation_scroll_stalled'],
     ['conversation_capture_timeout', 'conversation_capture_timeout'],
-    ['conversation_generation_active', 'conversation_generation_active'],
-    ['conversation_capture_limit_reached', 'conversation_capture_limit_reached'],
-    ['max_capture_bytes', 'max_capture_bytes'],
-    ['ambiguous_message_overlap', 'ambiguous_message_overlap'],
+    ['conversation_generation_active', 'conversation_capture_invalid'],
+    ['conversation_capture_limit_reached', 'conversation_scroll_limit_reached'],
+    ['max_capture_bytes', 'max_chars'],
+    ['ambiguous_message_overlap', 'conversation_capture_invalid'],
     ['compatibility_drift', 'conversation_capture_invalid']
   ]);
+  assert.deepEqual([...expected.keys()], [...TRANSCRIPT_CAPTURE_REASONS]);
   for (const [reason, projectedReason] of expected) {
-    const capture = {
+    const captureWindow = {
       status: 'partial',
       reason,
-      conversationUrl: 'https://chatgpt.com/c/thread-1',
-      capturedAt: '2026-07-30T12:00:00.000Z',
       rawTurns: [{ ordinal: 0, providerMessageId: 'm-1', role: 'user', text: 'Visible' }],
       evidence: evidence([{ ordinal: 0, providerMessageId: 'm-1', role: 'user', text: 'Visible' }], {
         topBoundary: false,
@@ -306,6 +308,38 @@ test('transcript contract: legacy projection keeps structured failure reasons di
         orderedWindowStitching: reason !== 'ambiguous_message_overlap' && reason !== 'compatibility_drift'
       })
     };
-    assert.equal(projectLegacyConversationText(capture).reason, projectedReason, reason);
+    const capture = {
+      ...captureWindow,
+      conversationUrl: 'https://chatgpt.com/c/thread-1',
+      capturedAt: '2026-07-30T12:00:00.000Z'
+    };
+    for (const projection of [
+      projectLegacyConversationText(capture),
+      projectLegacyConversationWindowText(captureWindow)
+    ]) {
+      assert.equal(projection.reason, projectedReason, reason);
+      assert.equal(LEGACY_CONVERSATION_TEXT_REASONS.includes(projection.reason), true, reason);
+    }
   }
+
+  const timeoutTurns = [{ ordinal: 0, providerMessageId: 'm-2', role: 'user', text: 'Visible' }];
+  const timeoutWindow = {
+    status: 'partial',
+    reason: 'conversation_capture_timeout',
+    rawTurns: timeoutTurns,
+    evidence: evidence(timeoutTurns, {
+      topBoundary: false,
+      bottomBoundary: false,
+      orderedWindowStitching: true
+    })
+  };
+  assert.equal(projectLegacyConversationWindowText(timeoutWindow, {
+    legacyDiagnosticReason: 'conversation_top_capture_timeout'
+  }).reason, 'conversation_top_capture_timeout');
+  assert.throws(
+    () => projectLegacyConversationWindowText(timeoutWindow, {
+      legacyDiagnosticReason: 'conversation_scroller_not_found'
+    }),
+    /invalid_legacy_diagnostic_reason/
+  );
 });

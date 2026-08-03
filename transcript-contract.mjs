@@ -18,11 +18,26 @@ export const TRANSCRIPT_CAPTURE_REASONS = Object.freeze([
   'ambiguous_message_overlap',
   'compatibility_drift'
 ]);
+export const LEGACY_CONVERSATION_TEXT_REASONS = Object.freeze([
+  'conversation_messages_not_found',
+  'conversation_scroller_not_found',
+  'conversation_scroll_stalled',
+  'conversation_scroll_limit_reached',
+  'conversation_top_capture_timeout',
+  'conversation_top_scroll_stalled',
+  'conversation_top_not_reached',
+  'conversation_capture_timeout',
+  'max_chars',
+  'leading_turn_missing',
+  'conversation_capture_invalid'
+]);
 export const TRANSCRIPT_TURN_ROLES = Object.freeze(['user', 'assistant', 'system', 'tool', 'unknown']);
 export const TRANSCRIPT_PROVIDER_MESSAGE_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/;
 
 const CAPTURE_KEYS = Object.freeze(['status', 'conversationUrl', 'capturedAt', 'rawTurns', 'evidence']);
 const PARTIAL_CAPTURE_KEYS = Object.freeze([...CAPTURE_KEYS, 'reason']);
+const CAPTURE_WINDOW_KEYS = Object.freeze(['status', 'rawTurns', 'evidence']);
+const PARTIAL_CAPTURE_WINDOW_KEYS = Object.freeze([...CAPTURE_WINDOW_KEYS, 'reason']);
 const EVIDENCE_KEYS = Object.freeze([
   'topBoundary',
   'bottomBoundary',
@@ -37,6 +52,27 @@ const RAW_TURN_KEYS = Object.freeze(['ordinal', 'providerMessageId', 'role', 'te
 const NORMALIZED_KEYS = Object.freeze(['normalizationVersion', 'turns', 'characterCount', 'contentHash']);
 const TURN_KEYS = Object.freeze(['turnId', 'ordinal', 'identity', 'role', 'rawRole', 'text']);
 const MAX_TURNS = 100_000;
+const LEGACY_REASON_BY_CAPTURE_REASON = Object.freeze({
+  conversation_messages_not_found: 'conversation_messages_not_found',
+  conversation_top_not_reached: 'conversation_top_not_reached',
+  conversation_scroll_stalled: 'conversation_scroll_stalled',
+  conversation_capture_timeout: 'conversation_capture_timeout',
+  conversation_generation_active: 'conversation_capture_invalid',
+  conversation_capture_limit_reached: 'conversation_scroll_limit_reached',
+  max_capture_bytes: 'max_chars',
+  ambiguous_message_overlap: 'conversation_capture_invalid',
+  compatibility_drift: 'conversation_capture_invalid'
+});
+const STRUCTURED_REASONS_BY_LEGACY_DIAGNOSTIC = Object.freeze({
+  conversation_top_capture_timeout: Object.freeze([
+    'conversation_capture_timeout',
+    'conversation_generation_active'
+  ]),
+  conversation_top_scroll_stalled: Object.freeze([
+    'conversation_scroll_stalled',
+    'conversation_generation_active'
+  ])
+});
 
 function contractError(reason, field = null) {
   const error = new Error(`invalid_transcript_contract:${reason}`);
@@ -180,30 +216,53 @@ function parseRawTurns(value, { allowEmpty }) {
   return Object.freeze(Array.from(value, (turn, index) => parseRawTurn(turn, index)));
 }
 
+function parseCaptureWindowFields(value) {
+  if (value.status !== 'complete' && value.status !== 'partial') {
+    throw contractError('unknown_capture_status', 'status');
+  }
+  const rawTurns = parseRawTurns(value.rawTurns, { allowEmpty: value.status === 'partial' });
+  const evidence = parseEvidence(value.evidence, rawTurns);
+  if (value.status === 'complete') {
+    if (!evidence.topBoundary || !evidence.bottomBoundary || !evidence.orderedWindowStitching) {
+      throw contractError('complete_without_boundaries', 'evidence');
+    }
+    return Object.freeze({ status: 'complete', rawTurns, evidence });
+  }
+  if (!TRANSCRIPT_CAPTURE_REASONS.includes(value.reason)) {
+    throw contractError('unknown_capture_reason', 'reason');
+  }
+  return Object.freeze({ status: 'partial', reason: value.reason, rawTurns, evidence });
+}
+
+function parseConversationCaptureWindow(value) {
+  if (!isRecord(value)) throw contractError('expected_object', 'captureWindow');
+  if (value.status !== 'complete' && value.status !== 'partial') {
+    throw contractError('unknown_capture_status', 'status');
+  }
+  assertExactKeys(
+    value,
+    value.status === 'complete' ? CAPTURE_WINDOW_KEYS : PARTIAL_CAPTURE_WINDOW_KEYS,
+    'captureWindow'
+  );
+  return parseCaptureWindowFields(value);
+}
+
 export function parseConversationCapture(value) {
   if (!isRecord(value)) throw contractError('expected_object', 'capture');
   if (value.status !== 'complete' && value.status !== 'partial') {
     throw contractError('unknown_capture_status', 'status');
   }
   assertExactKeys(value, value.status === 'complete' ? CAPTURE_KEYS : PARTIAL_CAPTURE_KEYS, 'capture');
-  const rawTurns = parseRawTurns(value.rawTurns, { allowEmpty: value.status === 'partial' });
-  const evidence = parseEvidence(value.evidence, rawTurns);
+  const window = parseCaptureWindowFields(value);
   const common = {
     conversationUrl: parseCanonicalConversationUrl(value.conversationUrl, { nullable: value.status === 'partial' }),
     capturedAt: parseIsoDateTime(value.capturedAt, 'capturedAt'),
-    rawTurns,
-    evidence
+    rawTurns: window.rawTurns,
+    evidence: window.evidence
   };
-  if (value.status === 'complete') {
-    if (!evidence.topBoundary || !evidence.bottomBoundary || !evidence.orderedWindowStitching) {
-      throw contractError('complete_without_boundaries', 'evidence');
-    }
-    return Object.freeze({ status: 'complete', ...common });
-  }
-  if (!TRANSCRIPT_CAPTURE_REASONS.includes(value.reason)) {
-    throw contractError('unknown_capture_reason', 'reason');
-  }
-  return Object.freeze({ status: 'partial', reason: value.reason, ...common });
+  return window.status === 'complete'
+    ? Object.freeze({ status: 'complete', ...common })
+    : Object.freeze({ status: 'partial', reason: window.reason, ...common });
 }
 
 function canonicalJson(value) {
@@ -422,19 +481,34 @@ export function renderTranscript(value, { startOrdinal = 0, endOrdinal = null, m
   return text.slice(0, cap);
 }
 
-export function projectLegacyConversationText(value, { maxChars = 200_000 } = {}) {
-  const capture = parseConversationCapture(value);
+function projectParsedLegacyConversationText(capture, {
+  maxChars = 200_000,
+  legacyDiagnosticReason = null
+} = {}) {
   const cap = assertInteger(Math.floor(Number(maxChars)), 'maxChars', { min: 1, max: 1_000_000 });
+  if (legacyDiagnosticReason !== null) {
+    const compatibleReasons = STRUCTURED_REASONS_BY_LEGACY_DIAGNOSTIC[legacyDiagnosticReason];
+    if (
+      capture.status !== 'partial' ||
+      !compatibleReasons ||
+      !compatibleReasons.includes(capture.reason)
+    ) {
+      throw contractError('invalid_legacy_diagnostic_reason', 'legacyDiagnosticReason');
+    }
+  }
   const turns = capture.rawTurns.map((raw, ordinal) => {
     const rawRole = raw.role.trim().toLowerCase();
     return { ordinal, role: TRANSCRIPT_TURN_ROLES.includes(rawRole) ? rawRole : 'unknown', text: normalizeText(raw.text) };
   });
   const fullText = renderTranscript({ turns });
   const clipped = fullText.length > cap;
-  let reason = capture.status === 'partial' ? capture.reason : null;
+  let reason = capture.status === 'partial'
+    ? legacyDiagnosticReason || LEGACY_REASON_BY_CAPTURE_REASON[capture.reason] || 'conversation_capture_invalid'
+    : null;
   if (clipped) reason = 'max_chars';
-  else if (reason === 'conversation_top_not_reached' && turns[0]?.role === 'assistant') reason = 'leading_turn_missing';
-  else if (reason === 'compatibility_drift') reason = 'conversation_capture_invalid';
+  else if (capture.status === 'partial' && capture.reason === 'conversation_top_not_reached' && turns[0]?.role === 'assistant') {
+    reason = 'leading_turn_missing';
+  }
   return {
     text: fullText.slice(0, cap),
     complete: capture.status === 'complete' && !clipped,
@@ -443,4 +517,12 @@ export function projectLegacyConversationText(value, { maxChars = 200_000 } = {}
     messageCount: turns.length,
     scrollPasses: capture.evidence.scrollPasses
   };
+}
+
+export function projectLegacyConversationText(value, { maxChars = 200_000 } = {}) {
+  return projectParsedLegacyConversationText(parseConversationCapture(value), { maxChars });
+}
+
+export function projectLegacyConversationWindowText(value, options = {}) {
+  return projectParsedLegacyConversationText(parseConversationCaptureWindow(value), options);
 }
