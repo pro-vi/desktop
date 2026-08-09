@@ -374,6 +374,145 @@ class ElectronPageAdapter {
       timer = setTimeout(() => finish(null), Math.max(1, Number(timeoutMs) || 0));
     });
   }
+
+  beginDownloadCapture({ timeoutMs = 15_000, outDir, maxBytes = null } = {}) {
+    const wc = this.win?.webContents;
+    const session = wc?.session;
+    const targetDir = String(outDir || '').trim();
+    const byteLimit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : null;
+    let resolveReady;
+    let resolveOutcome;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const outcome = new Promise((resolve) => { resolveOutcome = resolve; });
+    if (!session || !targetDir) {
+      resolveReady(false);
+      resolveOutcome({ status: 'unavailable' });
+      return { ready, outcome };
+    }
+
+    const waitStartedAt = Date.now();
+    let settled = false;
+    let timer = null;
+    let activeItem = null;
+    let activePath = null;
+    let onUpdated = null;
+
+    const removePartial = () => {
+      if (!activePath) return;
+      try { fsSync.rmSync(activePath, { force: true }); } catch {}
+    };
+    const finish = (value, { cancel = false, discard = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try { session.removeListener?.('will-download', onDownload); } catch {}
+      try {
+        if (onUpdated) activeItem?.removeListener?.('updated', onUpdated);
+      } catch {}
+      if (cancel) {
+        try { activeItem?.cancel?.(); } catch {}
+      }
+      if (discard) removePartial();
+      resolveOutcome(value || { status: 'unavailable' });
+    };
+
+    const onDownload = (_event, item, sourceWebContents) => {
+      if (!item || settled) return;
+      if (sourceWebContents && wc && sourceWebContents !== wc) return;
+      activeItem = item;
+      const rawName = String(item.getFilename?.() || '').trim() || `download-${Date.now()}`;
+      const safeName = rawName.replace(/[\\/:*?"<>|]+/g, '-');
+      const parsed = path.parse(safeName);
+      const downloadStartedAt = Date.now();
+      let finalName = safeName;
+      let filePath = path.join(targetDir, finalName);
+      try { fsSync.mkdirSync(targetDir, { recursive: true }); } catch {}
+      if (fsSync.existsSync(filePath)) {
+        for (let suffix = 1; suffix < 1000; suffix++) {
+          finalName = `${parsed.name}-${suffix}${parsed.ext}`;
+          filePath = path.join(targetDir, finalName);
+          if (!fsSync.existsSync(filePath)) break;
+        }
+      }
+      activePath = filePath;
+
+      const findCompletedPath = () => {
+        if (fsSync.existsSync(filePath)) return filePath;
+        const candidates = [];
+        try {
+          for (const row of fsSync.readdirSync(targetDir, { withFileTypes: true })) {
+            if (!row?.isFile?.()) continue;
+            const candidatePath = path.join(targetDir, row.name);
+            const candidateParsed = path.parse(row.name);
+            if (candidateParsed.ext !== parsed.ext) continue;
+            if (candidateParsed.name !== parsed.name && !candidateParsed.name.startsWith(`${parsed.name}-`)) continue;
+            const stat = fsSync.statSync(candidatePath);
+            if (Number(stat.mtimeMs || 0) < Math.min(downloadStartedAt, waitStartedAt) - 2_000) continue;
+            candidates.push({ path: candidatePath, mtimeMs: Number(stat.mtimeMs || 0) });
+          }
+        } catch {}
+        candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+        return candidates[0]?.path || null;
+      };
+      const exceedsLimit = () => {
+        if (byteLimit === null) return false;
+        const received = Number(item.getReceivedBytes?.() || 0);
+        return Number.isFinite(received) && received > byteLimit;
+      };
+      onUpdated = () => {
+        if (exceedsLimit()) {
+          finish({ status: 'size_limit_exceeded', maxBytes: byteLimit }, { cancel: true, discard: true });
+        }
+      };
+      const done = (_doneEvent, state) => {
+        if (settled) return;
+        const normalizedState = String(state || '').trim().toLowerCase();
+        if (normalizedState !== 'completed') {
+          finish({ status: normalizedState === 'interrupted' ? 'interrupted' : 'cancelled' }, { discard: true });
+          return;
+        }
+        const finalPath = findCompletedPath() || filePath;
+        if (byteLimit !== null) {
+          let size = Number(item.getReceivedBytes?.() || 0);
+          try { size = Math.max(size, Number(fsSync.statSync(finalPath).size || 0)); } catch {}
+          if (size > byteLimit) {
+            activePath = finalPath;
+            finish({ status: 'size_limit_exceeded', maxBytes: byteLimit }, { discard: true });
+            return;
+          }
+        }
+        finish({
+          status: 'completed',
+          path: finalPath,
+          name: path.basename(finalPath),
+          mime: typeof item.getMimeType === 'function' ? item.getMimeType() || null : null,
+          source: typeof item.getURL === 'function' ? item.getURL() || null : null
+        });
+      };
+
+      try {
+        item.setSavePath?.(filePath);
+        item.on?.('updated', onUpdated);
+        item.once?.('done', done);
+        if (exceedsLimit()) onUpdated();
+      } catch {
+        finish({ status: 'unavailable' }, { cancel: true, discard: true });
+      }
+    };
+
+    try {
+      session.on('will-download', onDownload);
+      resolveReady(true);
+    } catch {
+      resolveReady(false);
+      finish({ status: 'unavailable' });
+      return { ready, outcome };
+    }
+    timer = setTimeout(() => {
+      finish({ status: 'timeout' }, { cancel: true, discard: true });
+    }, Math.max(1, Number(timeoutMs) || 0));
+    return { ready, outcome };
+  }
 }
 
 class ElectronPresenter {

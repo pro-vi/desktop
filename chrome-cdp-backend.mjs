@@ -652,6 +652,155 @@ class ChromeCdpPageAdapter {
     });
   }
 
+  beginDownloadCapture({ timeoutMs = 15_000, outDir, maxBytes = null } = {}) {
+    const targetDir = String(outDir || '').trim();
+    const byteLimit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : null;
+    let resolveReady;
+    let resolveOutcome;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const outcome = new Promise((resolve) => { resolveOutcome = resolve; });
+    let settled = false;
+    let guid = null;
+    let suggestedFilename = null;
+    let sourceUrl = null;
+    let timer = null;
+    let offBegin = null;
+    let offProgress = null;
+    let beforeNames = new Set();
+    const startedAt = Date.now();
+
+    const cleanup = () => {
+      try { offBegin?.(); } catch {}
+      try { offProgress?.(); } catch {}
+      if (timer) clearTimeout(timer);
+    };
+    const removePartial = async () => {
+      if (!targetDir) return;
+      const names = await fs.readdir(targetDir).catch(() => []);
+      for (const name of names) {
+        if (beforeNames.has(name)) continue;
+        if (suggestedFilename && name !== suggestedFilename && name !== `${suggestedFilename}.crdownload`) continue;
+        const filePath = path.join(targetDir, name);
+        let stat = null;
+        try { stat = await fs.stat(filePath); } catch { continue; }
+        if (Number(stat.mtimeMs || 0) < startedAt - 1_000) continue;
+        await fs.rm(filePath, { force: true }).catch(() => {});
+      }
+    };
+    const cancel = async () => {
+      if (!guid) return;
+      await this.client.send('Browser.cancelDownload', { guid }).catch(() => {});
+    };
+    const finish = async (value, { cancelDownload = false, discard = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (cancelDownload) await cancel();
+      if (discard) await removePartial();
+      resolveOutcome(value || { status: 'unavailable' });
+    };
+    const findDownloadedFile = async () => {
+      if (suggestedFilename) {
+        const exactPath = path.join(targetDir, suggestedFilename);
+        try {
+          await fs.access(exactPath);
+          return exactPath;
+        } catch {}
+      }
+      const rows = await fs.readdir(targetDir, { withFileTypes: true }).catch(() => []);
+      const candidates = [];
+      for (const row of rows) {
+        if (!row?.isFile?.() || beforeNames.has(row.name)) continue;
+        const filePath = path.join(targetDir, row.name);
+        let stat = null;
+        try { stat = await fs.stat(filePath); } catch { continue; }
+        if (Number(stat.mtimeMs || 0) < startedAt - 1_000) continue;
+        candidates.push({ filePath, mtimeMs: Number(stat.mtimeMs || 0) });
+      }
+      candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+      return candidates[0]?.filePath || null;
+    };
+
+    void (async () => {
+      if (!targetDir) {
+        resolveReady(false);
+        await finish({ status: 'unavailable' });
+        return;
+      }
+      try {
+        await fs.mkdir(targetDir, { recursive: true });
+        beforeNames = new Set(await fs.readdir(targetDir).catch(() => []));
+        await this.client.send('Browser.setDownloadBehavior', {
+          behavior: 'allow',
+          downloadPath: targetDir,
+          eventsEnabled: true
+        });
+      } catch {
+        resolveReady(false);
+        await finish({ status: 'unavailable' });
+        return;
+      }
+
+      offBegin = this.client.on('Browser.downloadWillBegin', (params) => {
+        if (guid || settled) return;
+        guid = String(params?.guid || '').trim() || null;
+        suggestedFilename = String(params?.suggestedFilename || '').trim() || null;
+        sourceUrl = String(params?.url || '').trim() || null;
+      });
+      offProgress = this.client.on('Browser.downloadProgress', (params) => {
+        if (settled) return;
+        const eventGuid = String(params?.guid || '').trim();
+        if (guid && eventGuid && eventGuid !== guid) return;
+        if (!guid && eventGuid) guid = eventGuid;
+        const receivedBytes = Number(params?.receivedBytes || 0);
+        if (byteLimit !== null && Number.isFinite(receivedBytes) && receivedBytes > byteLimit) {
+          void finish(
+            { status: 'size_limit_exceeded', maxBytes: byteLimit },
+            { cancelDownload: true, discard: true }
+          );
+          return;
+        }
+        const state = String(params?.state || '').trim().toLowerCase();
+        if (state === 'completed') {
+          void (async () => {
+            await sleep(150);
+            const filePath = await findDownloadedFile();
+            if (!filePath) {
+              await finish({ status: 'interrupted' }, { discard: true });
+              return;
+            }
+            if (byteLimit !== null) {
+              const stat = await fs.stat(filePath).catch(() => null);
+              if (Number(stat?.size || 0) > byteLimit) {
+                suggestedFilename = path.basename(filePath);
+                await finish(
+                  { status: 'size_limit_exceeded', maxBytes: byteLimit },
+                  { discard: true }
+                );
+                return;
+              }
+            }
+            await finish({
+              status: 'completed',
+              path: filePath,
+              name: path.basename(filePath),
+              mime: null,
+              source: sourceUrl
+            });
+          })();
+        } else if (state === 'canceled' || state === 'interrupted') {
+          void finish({ status: state }, { discard: true });
+        }
+      });
+      timer = setTimeout(() => {
+        void finish({ status: 'timeout' }, { cancelDownload: true, discard: true });
+      }, Math.max(1, Number(timeoutMs) || 0));
+      resolveReady(true);
+    })();
+
+    return { ready, outcome };
+  }
+
   async setFileInputFiles(files) {
     let lastNodeIds = [];
     for (let attempt = 0; attempt < 10; attempt++) {

@@ -121,7 +121,10 @@ class MockDownloadItem {
     this.mime = mime;
     this.url = url;
     this.doneHandlers = [];
+    this.listeners = new Map();
     this.savePath = null;
+    this.receivedBytes = 0;
+    this.cancelled = false;
   }
 
   getFilename() {
@@ -138,6 +141,30 @@ class MockDownloadItem {
 
   setSavePath(filePath) {
     this.savePath = filePath;
+  }
+
+  getReceivedBytes() {
+    return this.receivedBytes;
+  }
+
+  cancel() {
+    this.cancelled = true;
+  }
+
+  on(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    handlers.push(handler);
+    this.listeners.set(event, handlers);
+  }
+
+  removeListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    this.listeners.set(event, handlers.filter((candidate) => candidate !== handler));
+  }
+
+  emitUpdated(receivedBytes) {
+    this.receivedBytes = receivedBytes;
+    for (const handler of this.listeners.get('updated') || []) handler({}, 'progressing');
   }
 
   once(event, handler) {
@@ -416,6 +443,65 @@ test('electron-browser-backend: waitForDownload resolves completed will-download
   assert.ok(file);
   assert.equal(path.basename(file.path), 'report.md');
   assert.equal(item.savePath, file.path);
+});
+
+test('electron-browser-backend: beginDownloadCapture is ready before the provider click', async (t) => {
+  let createdWindow = null;
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      createdWindow = this;
+    }
+
+    async loadURL() {
+      return true;
+    }
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-electron-capture-'));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+
+  const capture = session.page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 1_024 });
+
+  assert.equal(await capture.ready, true);
+  assert.equal(createdWindow.sessionListeners.get('will-download')?.length, 1);
+  const item = new MockDownloadItem();
+  createdWindow.emitSession('will-download', {}, item, createdWindow.webContents);
+  await fs.writeFile(item.savePath, '# report\n', 'utf8');
+  item.receivedBytes = 9;
+  item.emitDone('completed');
+  assert.equal((await capture.outcome).status, 'completed');
+});
+
+test('electron-browser-backend: beginDownloadCapture cancels oversized files and removes partial output', async (t) => {
+  let createdWindow = null;
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      createdWindow = this;
+    }
+
+    async loadURL() {
+      return true;
+    }
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-electron-capture-limit-'));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+
+  const capture = session.page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 8 });
+  assert.equal(await capture.ready, true);
+  const item = new MockDownloadItem();
+  createdWindow.emitSession('will-download', {}, item, createdWindow.webContents);
+  await fs.writeFile(item.savePath, 'too many bytes', 'utf8');
+  item.emitUpdated(9);
+
+  assert.deepEqual(await capture.outcome, { status: 'size_limit_exceeded', maxBytes: 8 });
+  assert.equal(item.cancelled, true);
+  await assert.rejects(fs.access(item.savePath));
+  assert.equal(createdWindow.sessionListeners.get('will-download')?.length, 0);
 });
 
 test('electron-browser-backend: waitForDownload reserves a suffixed filename when the target already exists', async (t) => {

@@ -71,6 +71,38 @@ class DelayedMockWebSocket {
   }
 }
 
+async function createDownloadTestPage() {
+  const calls = [];
+  const listeners = new Map();
+  const client = {
+    connected: true,
+    ws: {},
+    async send(method, params = {}, sessionId) {
+      calls.push({ method, params, sessionId });
+      if (method === 'Target.createTarget') return { targetId: 'target-download' };
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-download' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      return {};
+    },
+    on(method, handler) {
+      const handlers = listeners.get(method) || [];
+      handlers.push(handler);
+      listeners.set(method, handlers);
+      return () => {
+        listeners.set(method, (listeners.get(method) || []).filter((candidate) => candidate !== handler));
+      };
+    }
+  };
+  const emit = (method, params) => {
+    for (const handler of listeners.get(method) || []) handler(params);
+  };
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-download-test' });
+  backend.started = true;
+  backend.client = client;
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+  return { page: session.page, calls, listeners, emit };
+}
+
 test('chrome-cdp-backend: pending commands reject when websocket closes', async () => {
   const ws = new MockWebSocket();
   const conn = new ChromeCdpConnection('ws://example.test/devtools/browser/1', {
@@ -178,6 +210,51 @@ test('chrome-cdp-backend: late open after cancel does not resurrect connection s
   await assert.rejects(async () => await pending, /chrome_cdp_disconnected/);
   assert.equal(conn.connected, false);
   assert.equal(conn.ws, null);
+});
+
+test('chrome-cdp-backend: beginDownloadCapture waits for CDP setup before declaring readiness', async (t) => {
+  const { page, calls, listeners, emit } = await createDownloadTestPage();
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-chrome-capture-'));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+
+  const capture = page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 1_024 });
+
+  assert.equal(await capture.ready, true);
+  assert.equal(calls.some(({ method }) => method === 'Browser.setDownloadBehavior'), true);
+  assert.equal(listeners.get('Browser.downloadWillBegin')?.length, 1);
+  assert.equal(listeners.get('Browser.downloadProgress')?.length, 1);
+  emit('Browser.downloadWillBegin', {
+    guid: 'download-1',
+    suggestedFilename: 'report.md',
+    url: 'https://chatgpt.com/signed'
+  });
+  await fs.writeFile(path.join(outDir, 'report.md'), '# report\n', 'utf8');
+  emit('Browser.downloadProgress', { guid: 'download-1', state: 'completed', receivedBytes: 9 });
+  const outcome = await capture.outcome;
+  assert.equal(outcome.status, 'completed');
+  assert.equal(outcome.name, 'report.md');
+});
+
+test('chrome-cdp-backend: beginDownloadCapture cancels oversized files and removes partial output', async (t) => {
+  const { page, calls, emit } = await createDownloadTestPage();
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-chrome-capture-limit-'));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+
+  const capture = page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 8 });
+  assert.equal(await capture.ready, true);
+  emit('Browser.downloadWillBegin', {
+    guid: 'download-2',
+    suggestedFilename: 'large.bin',
+    url: 'https://chatgpt.com/signed'
+  });
+  const partialPath = path.join(outDir, 'large.bin.crdownload');
+  await fs.writeFile(partialPath, 'too many bytes', 'utf8');
+  emit('Browser.downloadProgress', { guid: 'download-2', state: 'inProgress', receivedBytes: 9 });
+
+  assert.deepEqual(await capture.outcome, { status: 'size_limit_exceeded', maxBytes: 8 });
+  assert.equal(calls.some(({ method, params }) =>
+    method === 'Browser.cancelDownload' && params.guid === 'download-2'), true);
+  await assert.rejects(fs.access(partialPath));
 });
 
 test('chrome-cdp-backend: stale socket close does not tear down a newer healthy connection', async () => {
