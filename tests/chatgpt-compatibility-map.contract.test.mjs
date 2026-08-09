@@ -164,7 +164,9 @@ test('chatgpt compatibility map: transcript capture dependencies are exact and m
         dependency: 'transcript-generation-indicator',
         selector: '[class*="think"], [data-testid*="think"], [aria-label*="think"], [class*="research"], [data-testid*="research"], [aria-label*="research"], [class*="search"], [data-testid*="search"], [aria-label*="search"], [class*="source"], [data-testid*="source"], [aria-label*="source"], [class*="clarif"], [data-testid*="clarif"], [aria-label*="clarif"], .sr-only, [role="status"], [aria-live]'
       },
-      { dependency: 'transcript-turn-ordinal', selector: '[data-testid^="conversation-turn-"]' }
+      { dependency: 'transcript-turn-ordinal', selector: '[data-testid^="conversation-turn-"]' },
+      { dependency: 'conversation-artifact-download-button', selector: 'button[aria-label="Download file"]' },
+      { dependency: 'conversation-artifact-named-button', selector: 'button[aria-label]' }
     ]
   );
 });

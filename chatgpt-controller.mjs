@@ -11,6 +11,11 @@ import {
   projectLegacyConversationWindowText
 } from './transcript-contract.mjs';
 import {
+  createConversationArtifactDescriptor,
+  emptyPartialConversationArtifactInventory,
+  parseConversationArtifactInventory
+} from './conversation-artifact-contract.mjs';
+import {
   CHATGPT_ANY_MODE_PATTERN,
   CHATGPT_ANY_MODEL_PATTERN,
   CHATGPT_MODE_INTENT_META,
@@ -844,7 +849,10 @@ export class ChatGPTController {
       let after = null;
       try {
         captured = before
-          ? await this.#captureConversationWindows({ maxCaptureBytes: cap })
+          ? (await this.#captureConversationBundle({
+              maxCaptureBytes: cap,
+              providerConversationId: before.providerConversationId
+            })).captureWindow
           : {
               status: 'partial',
               reason: 'compatibility_drift',
@@ -929,7 +937,11 @@ export class ChatGPTController {
     }
   }
 
-  async #captureConversationWindows({ maxCaptureBytes, includeLegacyDiagnostic = false }) {
+  async #captureConversationBundle({
+    maxCaptureBytes,
+    includeLegacyDiagnostic = false,
+    providerConversationId = null
+  }) {
     const messageSelector = this.#transcriptDependencySelector(
       'transcript-message',
       '[data-message-author-role]'
@@ -948,10 +960,17 @@ export class ChatGPTController {
       'transcript-generation-indicator',
       '[role="status"], [aria-live]'
     );
-    if (!messageSelector || !ownerSelector || !turnOrdinalSelector || !stopSelector || !generationIndicatorSelector) {
-      return {
+    const artifactDownloadSelector = this.#transcriptDependencySelector(
+      'conversation-artifact-download-button',
+      'button[aria-label="Download file"]'
+    );
+    const artifactNamedButtonSelector = this.#transcriptDependencySelector(
+      'conversation-artifact-named-button',
+      'button[aria-label]'
+    );
+    const partialCaptureWindow = (reason = 'compatibility_drift') => ({
         status: 'partial',
-        reason: 'compatibility_drift',
+        reason,
         rawTurns: [],
         evidence: {
           topBoundary: false,
@@ -963,6 +982,19 @@ export class ChatGPTController {
           providerIdCount: 0,
           byteCount: 0
         }
+    });
+    if (
+      !messageSelector ||
+      !ownerSelector ||
+      !turnOrdinalSelector ||
+      !stopSelector ||
+      !generationIndicatorSelector ||
+      !artifactDownloadSelector ||
+      !artifactNamedButtonSelector
+    ) {
+      return {
+        captureWindow: partialCaptureWindow(),
+        artifactInventory: emptyPartialConversationArtifactInventory()
       };
     }
     let captured;
@@ -980,6 +1012,8 @@ export class ChatGPTController {
       const turnOrdinalSelector = ${JSON.stringify(turnOrdinalSelector)};
       const stopSelector = ${JSON.stringify(stopSelector)};
       const generationIndicatorSelector = ${JSON.stringify(generationIndicatorSelector)};
+      const artifactDownloadSelector = ${JSON.stringify(artifactDownloadSelector)};
+      const artifactNamedButtonSelector = ${JSON.stringify(artifactNamedButtonSelector)};
       const transcriptTextForNode = ${extractChatGptTranscriptMessageText.toString()};
       const utf8Bytes = (value) => {
         let bytes = 0;
@@ -1188,6 +1222,93 @@ export class ChatGPTController {
         : message.providerMessageId
           ? 'id:' + message.providerMessageId
           : 'unpositioned';
+      const conversationArtifacts = new Map();
+      let artifactInputInvalid = false;
+      const artifactNodeIsServed = (node) => {
+        if (!node || node.isConnected === false || node.hidden === true) return false;
+        if (node.getAttribute?.('aria-hidden') === 'true' || node.hasAttribute?.('inert')) return false;
+        if (node.closest?.('[aria-hidden="true"], [inert]')) return false;
+        try {
+          const style = window.getComputedStyle?.(node);
+          if (
+            style?.display === 'none' ||
+            style?.visibility === 'hidden' ||
+            style?.visibility === 'collapse' ||
+            style?.contentVisibility === 'hidden'
+          ) return false;
+        } catch {
+          return false;
+        }
+        return true;
+      };
+      const observeConversationArtifacts = ({
+        scopeNode,
+        role,
+        providerMessageId,
+        providerTurnIndex
+      }) => {
+        if (String(role || '').trim().toLowerCase() !== 'assistant') return;
+        let downloadButtons;
+        try {
+          downloadButtons = Array.from(scopeNode.querySelectorAll?.(artifactDownloadSelector) || []);
+        } catch {
+          artifactInputInvalid = true;
+          return;
+        }
+        for (let occurrenceWithinMessage = 0; occurrenceWithinMessage < downloadButtons.length; occurrenceWithinMessage += 1) {
+          const downloadButton = downloadButtons[occurrenceWithinMessage];
+          if (!artifactNodeIsServed(downloadButton)) {
+            artifactInputInvalid = true;
+            continue;
+          }
+          if (!providerMessageId || !Number.isSafeInteger(providerTurnIndex)) {
+            artifactInputInvalid = true;
+            continue;
+          }
+          let container = downloadButton.parentElement;
+          let name = null;
+          let depth = 0;
+          while (container && container !== scopeNode && depth < 8) {
+            let candidates = [];
+            try {
+              candidates = Array.from(container.querySelectorAll?.(artifactNamedButtonSelector) || [])
+                .filter((candidate) => candidate !== downloadButton && artifactNodeIsServed(candidate))
+                .filter((candidate) => String(candidate.getAttribute?.('aria-label') || '').trim() !== 'Download file');
+            } catch {
+              artifactInputInvalid = true;
+              break;
+            }
+            if (candidates.length === 1) {
+              name = String(candidates[0].getAttribute?.('aria-label') || '').trim();
+              break;
+            }
+            if (candidates.length > 1) {
+              artifactInputInvalid = true;
+              break;
+            }
+            container = container.parentElement;
+            depth += 1;
+          }
+          if (!name || name.length > 1_024 || name.includes('\u0000')) {
+            artifactInputInvalid = true;
+            continue;
+          }
+          const identity = providerMessageId + ':' + occurrenceWithinMessage;
+          const observation = {
+            providerMessageId,
+            providerTurnIndex,
+            occurrenceWithinMessage,
+            name,
+            kind: 'file'
+          };
+          const prior = conversationArtifacts.get(identity);
+          if (prior && JSON.stringify(prior) !== JSON.stringify(observation)) {
+            artifactInputInvalid = true;
+            continue;
+          }
+          conversationArtifacts.set(identity, observation);
+        }
+      };
       const readMessages = () => {
         observeTurnOwnerShells();
         const records = Array.from(document.querySelectorAll(messageSelector))
@@ -1206,15 +1327,47 @@ export class ChatGPTController {
               normalizedRole.length > 64 || /[\\u0000-\\u001f\\u007f]/.test(normalizedRole);
             const textInvalid = typeof text !== 'string' || text.length > maxTurnTextChars || text.includes('\\u0000');
             if (roleInvalid || textInvalid) mappedInputInvalid = true;
+            const providerTurnIndex = providerTurnIndexForNode(node);
+            const providerMessageId = providerMessageIdForNode(node);
             return {
-              providerTurnIndex: providerTurnIndexForNode(node),
-              providerMessageId: providerMessageIdForNode(node),
+              node,
+              providerTurnIndex,
+              providerMessageId,
               role,
               text: textInvalid ? '' : text,
               turnOwner
             };
           })
           .filter(Boolean);
+        const assistantRecordsByOwner = new Map();
+        for (const message of records) {
+          if (String(message.role || '').trim().toLowerCase() !== 'assistant') continue;
+          const scopeNode = message.turnOwner || message.node;
+          const grouped = assistantRecordsByOwner.get(scopeNode) || [];
+          grouped.push(message);
+          assistantRecordsByOwner.set(scopeNode, grouped);
+        }
+        for (const [scopeNode, assistantRecords] of assistantRecordsByOwner) {
+          let scopedDownloads = [];
+          try {
+            scopedDownloads = Array.from(scopeNode.querySelectorAll?.(artifactDownloadSelector) || []);
+          } catch {
+            artifactInputInvalid = true;
+            continue;
+          }
+          if (!scopedDownloads.length) continue;
+          if (assistantRecords.length !== 1) {
+            artifactInputInvalid = true;
+            continue;
+          }
+          const [message] = assistantRecords;
+          observeConversationArtifacts({
+            scopeNode,
+            role: message.role,
+            providerMessageId: message.providerMessageId,
+            providerTurnIndex: message.providerTurnIndex
+          });
+        }
         const partCounts = new Map();
         const positioned = records
           .map((message) => {
@@ -2588,61 +2741,113 @@ export class ChatGPTController {
       const captureWindow = reason
         ? { status: 'partial', reason, rawTurns, evidence }
         : { status: 'complete', rawTurns, evidence };
-      return includeLegacyDiagnostic && legacyDiagnosticReason
+      const artifactBoundaryInvalid = !topBoundary || !bottomBoundary || [
+        'ambiguous_message_overlap',
+        'conversation_capture_limit_reached',
+        'conversation_capture_timeout',
+        'conversation_scroll_stalled',
+        'conversation_top_not_reached'
+      ].includes(reason);
+      const artifactReason = artifactInputInvalid
+        ? 'compatibility_drift'
+        : generationActiveBefore || generationActiveAfter
+          ? 'conversation_generation_active'
+          : artifactBoundaryInvalid
+            ? reason === 'conversation_capture_timeout'
+              ? 'conversation_capture_timeout'
+              : 'conversation_boundary_incomplete'
+            : null;
+      const artifactItems = [...conversationArtifacts.values()]
+        .sort((left, right) =>
+          left.providerTurnIndex - right.providerTurnIndex ||
+          left.occurrenceWithinMessage - right.occurrenceWithinMessage
+        );
+      const artifactInventory = artifactReason
+        ? { status: 'partial', reason: artifactReason, items: artifactItems }
+        : { status: 'complete', items: artifactItems };
+      const publishedCaptureWindow = includeLegacyDiagnostic && legacyDiagnosticReason
         ? { ...captureWindow, legacyDiagnosticReason }
         : captureWindow;
+      return { captureWindow: publishedCaptureWindow, artifactInventory };
       })()`);
     } catch (error) {
       if (error?.code !== 'conversation_capture_timeout') throw error;
       return {
-        status: 'partial',
-        reason: 'conversation_capture_timeout',
-        rawTurns: [],
-        evidence: {
-          topBoundary: false,
-          bottomBoundary: false,
-          orderedWindowStitching: false,
-          scrollPasses: 0,
-          windowCount: 1,
-          messageCount: 0,
-          providerIdCount: 0,
-          byteCount: 0
-        }
+        captureWindow: partialCaptureWindow('conversation_capture_timeout'),
+        artifactInventory: emptyPartialConversationArtifactInventory('conversation_capture_timeout')
       };
     }
     if (!captured || typeof captured !== 'object' || Array.isArray(captured)) {
       return {
-        status: 'partial',
-        reason: 'compatibility_drift',
-        rawTurns: [],
-        evidence: {
-          topBoundary: false,
-          bottomBoundary: false,
-          orderedWindowStitching: false,
-          scrollPasses: 0,
-          windowCount: 1,
-          messageCount: 0,
-          providerIdCount: 0,
-          byteCount: 0
-        }
+        captureWindow: partialCaptureWindow(),
+        artifactInventory: emptyPartialConversationArtifactInventory()
       };
     }
-    return captured;
+    // Keep narrow page doubles that model only the historical transcript
+    // scanner usable. The live evaluator always returns the bundle shape.
+    if (captured.status === 'complete' || captured.status === 'partial') {
+      captured = {
+        captureWindow: captured,
+        artifactInventory: { status: 'complete', items: [] }
+      };
+    }
+    const rawInventory = captured.artifactInventory;
+    const rawItems = Array.isArray(rawInventory?.items) ? rawInventory.items : [];
+    if (!providerConversationId) {
+      return {
+        captureWindow: captured.captureWindow,
+        artifactInventory: emptyPartialConversationArtifactInventory('artifact_identity_unavailable')
+      };
+    }
+    let items;
+    try {
+      items = rawItems.map((item) => createConversationArtifactDescriptor({
+        providerConversationId,
+        providerMessageId: item?.providerMessageId,
+        providerTurnIndex: item?.providerTurnIndex,
+        occurrenceWithinMessage: item?.occurrenceWithinMessage,
+        name: item?.name,
+        kind: item?.kind
+      }));
+    } catch {
+      return {
+        captureWindow: captured.captureWindow,
+        artifactInventory: emptyPartialConversationArtifactInventory()
+      };
+    }
+    const artifactInventory = parseConversationArtifactInventory(
+      rawInventory?.status === 'complete'
+        ? { status: 'complete', items }
+        : { status: 'partial', reason: rawInventory?.reason || 'compatibility_drift', items }
+    );
+    return { captureWindow: captured.captureWindow, artifactInventory };
   }
 
   async readConversationText({ maxChars = 200_000 } = {}) {
     const projectionCap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
     const maxCaptureBytes = Math.min(16 * 1024 * 1024, (projectionCap * 4) + 4096);
     let captureWindow;
+    let artifactInventory = emptyPartialConversationArtifactInventory('artifact_identity_unavailable');
     let legacyDiagnosticReason = null;
     try {
-      const capturedWindow = await this.#runCaptureWithHostDeadline(
-        async () => await this.#captureConversationWindows({
+      let providerConversationId = null;
+      try {
+        const target = parseChatGptEntryTarget(await this.getUrl());
+        if (target?.kind === 'canonical-conversation') {
+          providerConversationId = providerConversationIdFromOwnedLocation(
+            locationFromConversationUrl(target.chatUrl)
+          );
+        }
+      } catch {}
+      const capturedBundle = await this.#runCaptureWithHostDeadline(
+        async () => await this.#captureConversationBundle({
           maxCaptureBytes,
-          includeLegacyDiagnostic: true
+          includeLegacyDiagnostic: true,
+          providerConversationId
         })
       );
-      ({ legacyDiagnosticReason = null, ...captureWindow } = capturedWindow);
+      ({ legacyDiagnosticReason = null, ...captureWindow } = capturedBundle.captureWindow);
+      artifactInventory = capturedBundle.artifactInventory;
     } catch (error) {
       if (error?.code !== 'conversation_capture_timeout') throw error;
       captureWindow = {
@@ -2660,11 +2865,15 @@ export class ChatGPTController {
           byteCount: 0
         }
       };
+      artifactInventory = emptyPartialConversationArtifactInventory('conversation_capture_timeout');
     }
-    return projectLegacyConversationWindowText(captureWindow, {
-      maxChars: projectionCap,
-      legacyDiagnosticReason
-    });
+    return {
+      ...projectLegacyConversationWindowText(captureWindow, {
+        maxChars: projectionCap,
+        legacyDiagnosticReason
+      }),
+      artifactInventory
+    };
   }
 
   async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {

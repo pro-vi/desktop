@@ -968,7 +968,7 @@ registerTool(
   'agentify_read_conversation',
   {
     description:
-      'Read a complete ChatGPT conversation. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
+      'Read a complete ChatGPT conversation and inventory attached file cards. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript. artifactInventory has its own complete/partial status because file-card coverage is independent from transcript text coverage. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT for complete conversation capture.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),

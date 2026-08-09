@@ -4868,7 +4868,20 @@ test('http-api: read-conversation exposes complete transcript capture through th
         truncated: false,
         reason: null,
         messageCount: 2,
-        scrollPasses: 3
+        scrollPasses: 3,
+        artifactInventory: {
+          status: 'complete',
+          items: [{
+            schemaVersion: 1,
+            artifactKey: 'ca1_test',
+            providerConversationId: 'conversation-1',
+            providerMessageId: 'message-1',
+            providerTurnIndex: 2,
+            occurrenceWithinMessage: 0,
+            name: 'report.md',
+            kind: 'file'
+          }]
+        }
       };
     }
   };
@@ -4905,6 +4918,8 @@ test('http-api: read-conversation exposes complete transcript capture through th
   assert.equal(data.tabId, 't0');
   assert.equal(data.complete, true);
   assert.equal(data.text, 'User\nOne\n\nAssistant\nTwo');
+  assert.equal(data.artifactInventory.status, 'complete');
+  assert.deepEqual(data.artifactInventory.items.map((item) => item.name), ['report.md']);
 });
 
 test('http-api: read-conversation enters a supplied chatUrl without sending anything', async (t) => {

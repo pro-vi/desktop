@@ -1836,6 +1836,22 @@
     "dependency": "transcript-turn-ordinal",
     "reason": "provider-visible conversation turn ancestors expose an ordinal for fail-closed virtualized transcript stitching",
     "selector": "[data-testid^=\"conversation-turn-\"]"
+  },
+  {
+    "id": "controller-dom-046",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "conversation-artifact-download-button",
+    "reason": "provider-visible conversation file cards expose the download action used for artifact inventory",
+    "selector": "button[aria-label=\"Download file\"]"
+  },
+  {
+    "id": "controller-dom-047",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "conversation-artifact-named-button",
+    "reason": "provider-visible conversation file cards expose the filename on the named button paired with the download action",
+    "selector": "button[aria-label]"
   }
 ]
 }

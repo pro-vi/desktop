@@ -99,42 +99,83 @@ function virtualizedConversationPage(messages, {
     }
   };
 
-  const nodes = messages.map(({ role, text }, index) => ({
-    innerText: text,
-    textContent: text,
-    get isConnected() {
-      return index >= loadedStart && index < visibleEnd;
-    },
-    get parentElement() {
-      return scroller;
-    },
-    getAttribute(name) {
-      if (name === 'data-message-author-role') return role;
-      if (name === 'data-message-id') return providerIds ? `message-${index}` : null;
-      if (name === 'data-testid') return providerOrdinals ? `conversation-turn-${index + 1}` : null;
-      return null;
-    },
-    closest(selector) {
-      if (selector === '[data-message-id]') return providerIds ? this : null;
-      if (selector === '[data-testid^="conversation-turn-"]') return providerOrdinals ? this : null;
-      return null;
-    },
-    getBoundingClientRect() {
-      return { top: (index - loadedStart) * 80 };
-    },
-    scrollIntoView({ block } = {}) {
-      if (block === 'start') {
-        if (!loadOnMessageScroll || index !== visibleEnd - 1 || visibleEnd >= messages.length) return;
-        if (trailingLoadDelayMs === null) visibleEnd += 1;
-        else if (trailingLoadAt === null) trailingLoadAt = now + trailingLoadDelayMs;
-        return;
+  const nodes = messages.map(({ role, text, artifacts = [] }, index) => {
+    const node = {
+      innerText: text,
+      textContent: text,
+      get isConnected() {
+        return index >= loadedStart && index < visibleEnd;
+      },
+      get parentElement() {
+        return scroller;
+      },
+      getAttribute(name) {
+        if (name === 'data-message-author-role') return role;
+        if (name === 'data-message-id') return providerIds ? `message-${index}` : null;
+        if (name === 'data-testid') return providerOrdinals ? `conversation-turn-${index + 1}` : null;
+        return null;
+      },
+      closest(selector) {
+        if (selector === '[data-message-id]') return providerIds ? this : null;
+        if (selector === '[data-testid^="conversation-turn-"]') return providerOrdinals ? this : null;
+        return null;
+      },
+      getBoundingClientRect() {
+        return { top: (index - loadedStart) * 80 };
+      },
+      scrollIntoView({ block } = {}) {
+        if (block === 'start') {
+          if (!loadOnMessageScroll || index !== visibleEnd - 1 || visibleEnd >= messages.length) return;
+          if (trailingLoadDelayMs === null) visibleEnd += 1;
+          else if (trailingLoadAt === null) trailingLoadAt = now + trailingLoadDelayMs;
+          return;
+        }
+        scrollTop = 0;
+        if (!loadOnMessageScroll || index !== loadedStart || loadedStart <= 0) return;
+        if (loadDelayMs === null) loadedStart -= 1;
+        else scheduleEarlierMessages();
       }
-      scrollTop = 0;
-      if (!loadOnMessageScroll || index !== loadedStart || loadedStart <= 0) return;
-      if (loadDelayMs === null) loadedStart -= 1;
-      else scheduleEarlierMessages();
-    }
-  }));
+    };
+    const rows = artifacts.map((name) => {
+      const row = {
+        parentElement: node,
+        querySelectorAll(selector) {
+          return selector === 'button[aria-label]' ? [nameButton, downloadButton] : [];
+        }
+      };
+      const makeButton = (ariaLabel) => ({
+        parentElement: row,
+        get isConnected() {
+          return node.isConnected;
+        },
+        getAttribute(attribute) {
+          return attribute === 'aria-label' ? ariaLabel : null;
+        },
+        getClientRects() {
+          return [{}];
+        },
+        checkVisibility() {
+          return true;
+        },
+        closest() {
+          return null;
+        }
+      });
+      const nameButton = makeButton(name);
+      const downloadButton = makeButton('Download file');
+      return { nameButton, downloadButton };
+    });
+    node.querySelectorAll = (selector) => {
+      if (selector === 'button[aria-label="Download file"]') {
+        return rows.map((row) => row.downloadButton);
+      }
+      if (selector === 'button[aria-label]') {
+        return rows.flatMap((row) => [row.nameButton, row.downloadButton]);
+      }
+      return [];
+    };
+    return node;
+  });
   const generationNode = {
     textContent: generationSignal === 'thinking' ? 'Thinking' : 'Stop generating',
     getAttribute(name) {
@@ -3624,12 +3665,60 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
     truncated: false,
     reason: null,
     messageCount: 3,
-    scrollPasses: 4
+    scrollPasses: 4,
+    artifactInventory: { status: 'complete', items: [] }
   });
   assert.equal(evaluations.length, 1);
   assert.match(evaluations[0], /data-message-author-role/);
   assert.match(evaluations[0], /scrollTop/);
   assert.match(evaluations[0], /const cap = 6096/);
+});
+
+test('chatgpt-controller: conversation inventory collects files from earlier virtualized windows', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'user', text: 'First prompt' },
+    { role: 'assistant', text: 'First reply', artifacts: ['shared.md', 'source.yaml'] },
+    { role: 'user', text: 'Second prompt' },
+    { role: 'assistant', text: 'Second reply' },
+    { role: 'user', text: 'Final prompt' },
+    { role: 'assistant', text: 'Final reply', artifacts: ['shared.md'] }
+  ], {
+    initialStart: 3,
+    initialEnd: 6
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 5_000 });
+
+  assert.equal(result.complete, true);
+  assert.equal(result.artifactInventory.status, 'complete');
+  assert.deepEqual(
+    result.artifactInventory.items.map((item) => [
+      item.providerMessageId,
+      item.occurrenceWithinMessage,
+      item.name
+    ]),
+    [
+      ['message-1', 0, 'shared.md'],
+      ['message-1', 1, 'source.yaml'],
+      ['message-5', 0, 'shared.md']
+    ]
+  );
+  assert.equal(new Set(result.artifactInventory.items.map((item) => item.artifactKey)).size, 3);
+});
+
+test('chatgpt-controller: inventory completeness remains independent from transcript completeness', async () => {
+  const page = virtualizedConversationPage([
+    { role: 'assistant', text: 'Provider omitted the leading user turn', artifacts: ['result.md'] }
+  ]);
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 5_000 });
+
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, 'leading_turn_missing');
+  assert.equal(result.artifactInventory.status, 'complete');
+  assert.deepEqual(result.artifactInventory.items.map((item) => item.name), ['result.md']);
 });
 
 test('chatgpt-controller: legacy transcript projection reads DOM windows while library capture stays canonical-only', async (t) => {
@@ -3680,10 +3769,15 @@ test('chatgpt-controller: legacy transcript projection reads DOM windows while l
         truncated: false,
         reason: null,
         messageCount: 2,
-        scrollPasses: 0
+        scrollPasses: 0,
+        artifactInventory: {
+          status: 'partial',
+          reason: 'artifact_identity_unavailable',
+          items: []
+        }
       });
       assert.equal(evaluations, 1);
-      assert.equal(routeReads, 0);
+      assert.equal(routeReads, 1);
 
       const libraryCapture = await controller.captureConversation({ maxCaptureBytes: 10_000 });
 
@@ -3691,7 +3785,7 @@ test('chatgpt-controller: legacy transcript projection reads DOM windows while l
       assert.equal(libraryCapture.reason, 'compatibility_drift');
       assert.equal(libraryCapture.conversationUrl, null);
       assert.equal(evaluations, 1);
-      assert.equal(routeReads, 2);
+      assert.equal(routeReads, 3);
     });
   }
 });
