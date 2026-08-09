@@ -894,7 +894,15 @@ async function registerConversationArtifactOutcome({
       provenance
     });
   } catch {
-    if (rawPath) await fs.rm(rawPath, { force: true }).catch(() => {});
+    if (rawPath) {
+      try {
+        assertWithin({
+          filePath: path.resolve(rawPath),
+          allowedRoots: [path.resolve(outDir)]
+        });
+        await fs.rm(rawPath, { force: true }).catch(() => {});
+      } catch {}
+    }
     return parseConversationArtifactDownloadOutcome({
       status: 'download_failed',
       artifactKey,

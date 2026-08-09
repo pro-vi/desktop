@@ -5071,6 +5071,77 @@ test('http-api: conversation artifact download registers successes and preserves
   assert.equal(index.includes('conversation-files'), true);
 });
 
+test('http-api: rejected conversation artifact cannot delete a file outside its owned directory', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-conversation-artifact-safety-'));
+  const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-conversation-artifact-outside-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(outsideDir, { recursive: true, force: true });
+  });
+  const descriptor = createConversationArtifactDescriptor({
+    providerConversationId: 'conversation-safety',
+    providerMessageId: 'message-safety',
+    providerTurnIndex: 2,
+    occurrenceWithinMessage: 0,
+    name: 'outside.md'
+  });
+  const outsidePath = path.join(outsideDir, 'outside.md');
+  await fs.writeFile(outsidePath, 'must survive rejection\n', 'utf8');
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async () => {},
+    downloadConversationArtifacts: async () => [{
+      status: 'downloaded',
+      artifactKey: descriptor.artifactKey,
+      filePath: outsidePath,
+      originalName: descriptor.name,
+      mime: 'text/markdown',
+      provenance: {
+        ...descriptor,
+        conversationUrl: 'https://chatgpt.com/c/conversation-safety'
+      }
+    }]
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/conversation-artifacts/download',
+    body: {
+      chatUrl: 'https://chatgpt.com/c/conversation-safety',
+      artifactKeys: [descriptor.artifactKey],
+      maxFiles: 1
+    }
+  });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(data.outcomes, [{
+    status: 'download_failed',
+    artifactKey: descriptor.artifactKey,
+    reason: 'artifact_invalid'
+  }]);
+  assert.equal(await fs.readFile(outsidePath, 'utf8'), 'must survive rejection\n');
+});
+
 test('http-api: read-conversation rejects an unusable chatUrl before touching a tab', async (t) => {
   const calls = [];
   const controller = {

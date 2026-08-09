@@ -3735,7 +3735,9 @@ test('chatgpt-controller: conversation download arms capture before clicking and
   const order = [];
   const locatorScripts = [];
   let resolveDownload;
-  const downloadOutcome = new Promise((resolve) => { resolveDownload = resolve; });
+  let downloadOutcome = new Promise((resolve) => { resolveDownload = resolve; });
+  let downloadedPath = path.join(outDir, 'report.md');
+  let downloadedSuggestedName = 'report.md';
   const page = {
     async getUrl() {
       return 'https://chatgpt.com/c/conversation-download';
@@ -3787,13 +3789,12 @@ test('chatgpt-controller: conversation download arms capture before clicking and
     },
     async mouseUp() {
       order.push('mouseUp');
-      const filePath = path.join(outDir, 'report.md');
-      await fs.writeFile(filePath, '# report\n', 'utf8');
+      await fs.writeFile(downloadedPath, '# report\n', 'utf8');
       resolveDownload({
         status: 'completed',
-        path: filePath,
-        name: 'report.md',
-        suggestedName: 'report.md',
+        path: downloadedPath,
+        name: downloadedSuggestedName,
+        suggestedName: downloadedSuggestedName,
         mime: 'text/markdown',
         source: 'https://chatgpt.com/backend-api/estuary/content?signed=private'
       });
@@ -3818,6 +3819,27 @@ test('chatgpt-controller: conversation download arms capture before clicking and
   assert.equal(order.filter((entry) => entry === 'locate').length, 2);
   assert.equal(locatorScripts.every((script) => script.includes('messageId(node) === target.providerMessageId')), true);
   assert.equal(locatorScripts.every((script) => script.includes('exactMessages[0]?.closest')), true);
+
+  const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-conversation-download-outside-'));
+  t.after(async () => await fs.rm(outsideDir, { recursive: true, force: true }));
+  downloadedPath = path.join(outsideDir, 'outside.md');
+  downloadedSuggestedName = 'wrong.md';
+  downloadOutcome = new Promise((resolve) => { resolveDownload = resolve; });
+
+  const rejected = await controller.downloadConversationArtifacts({
+    artifactKeys: [descriptor.artifactKey],
+    maxFiles: 1,
+    maxBytesPerFile: 1_024,
+    timeoutMs: 2_000,
+    outDir
+  });
+
+  assert.deepEqual(rejected, [{
+    status: 'download_failed',
+    artifactKey: descriptor.artifactKey,
+    reason: 'name_mismatch'
+  }]);
+  assert.equal(await fs.readFile(downloadedPath, 'utf8'), '# report\n');
 });
 
 test('chatgpt-controller: legacy transcript projection reads DOM windows while library capture stays canonical-only', async (t) => {

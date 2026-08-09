@@ -33,6 +33,15 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function removeOwnedDownloadFile(outDir, filePath) {
+  const root = path.resolve(String(outDir || ''));
+  const candidate = path.resolve(String(filePath || ''));
+  const relative = path.relative(root, candidate);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  await fs.rm(candidate, { force: true }).catch(() => {});
+  return true;
+}
+
 function jitter(minMs, maxMs) {
   const min = Math.max(0, Number(minMs) || 0);
   const max = Math.max(min, Number(maxMs) || 0);
@@ -3148,7 +3157,7 @@ export class ChatGPTController {
       }
       const suggestedName = String(downloaded.suggestedName || downloaded.name || '').trim();
       if (suggestedName !== descriptor.name) {
-        await fs.rm(downloaded.path, { force: true }).catch(() => {});
+        await removeOwnedDownloadFile(outDir, downloaded.path);
         outcomes.push({ status: 'download_failed', artifactKey, reason: 'name_mismatch' });
         continue;
       }
