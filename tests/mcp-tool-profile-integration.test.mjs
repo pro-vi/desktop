@@ -216,6 +216,42 @@ function catalogImportFixture() {
   };
 }
 
+function exportGrantFixture() {
+  return {
+    status: 'granted',
+    grant: {
+      grantId: 'grant-stdio-picker',
+      profileScopeId: 'profile-main',
+      expiresAt: '2026-07-30T12:10:00.000Z'
+    }
+  };
+}
+
+function catalogImportSummaryFixture() {
+  return {
+    schemaVersion: 1,
+    importId: 'import-1',
+    profileScopeId: 'profile-main',
+    status: 'partial',
+    readOnlyReason: null,
+    cursor: { schemaVersion: 1, recordIndex: 1 },
+    counts: { recordsSeen: 1, cataloged: 1, snapshots: 1, problems: 0 },
+    suspension: { reason: 'interrupted', observedAt: '2026-07-30T12:01:00.000Z' },
+    createdAt: '2026-07-30T12:00:00.000Z',
+    updatedAt: '2026-07-30T12:01:00.000Z'
+  };
+}
+
+function catalogReassignmentFixture() {
+  return {
+    importId: 'import-1',
+    changed: true,
+    previousProfileScopeId: 'profile-main',
+    profileScopeId: 'profile-other',
+    cursor: { schemaVersion: 1, recordIndex: 0 }
+  };
+}
+
 function catalogConversationFixture() {
   return {
     schemaVersion: 1,
@@ -426,10 +462,13 @@ test('mcp server tools/list composes profiles without duplicate tools', async ()
   assert.equal(tools.includes('agentify_shutdown'), false);
 });
 
-test('mcp server library profile exposes the exact eight catalog and transcript schemas', async () => {
+test('mcp server library profile exposes the exact eleven catalog and transcript schemas', async () => {
   const definitions = await listedToolDefinitions('library');
   assert.deepEqual(definitions.map(({ name }) => name), [
+    'agentify_import_selected_chatgpt_export',
     'agentify_import_chatgpt_export',
+    'agentify_list_chatgpt_imports',
+    'agentify_reassign_chatgpt_import',
     'agentify_verify_catalog_conversation',
     'agentify_list_chatgpt_catalog',
     'agentify_track_transcript',
@@ -440,10 +479,25 @@ test('mcp server library profile exposes the exact eight catalog and transcript 
   ]);
 
   const byName = new Map(definitions.map((definition) => [definition.name, definition.inputSchema]));
+  const openPicker = byName.get('agentify_import_selected_chatgpt_export');
+  assert.deepEqual(Object.keys(openPicker.properties), ['profileScopeId']);
+  assert.deepEqual(openPicker.required, ['profileScopeId']);
+  assert.equal(openPicker.additionalProperties, false);
+
   const importExport = byName.get('agentify_import_chatgpt_export');
   assert.deepEqual(Object.keys(importExport.properties).sort(), ['grantId', 'profileScopeId']);
   assert.deepEqual([...importExport.required].sort(), ['grantId', 'profileScopeId']);
   assert.equal(importExport.additionalProperties, false);
+
+  const listImports = byName.get('agentify_list_chatgpt_imports');
+  assert.deepEqual(listImports.properties, {});
+  assert.equal(listImports.additionalProperties, false);
+
+  const reassignImport = byName.get('agentify_reassign_chatgpt_import');
+  assert.deepEqual(Object.keys(reassignImport.properties).sort(), ['confirm', 'importId', 'newProfileScopeId']);
+  assert.deepEqual([...reassignImport.required].sort(), ['confirm', 'importId', 'newProfileScopeId']);
+  assert.equal(reassignImport.additionalProperties, false);
+  assert.equal(reassignImport.properties.confirm.const, true);
 
   const verifyCatalog = byName.get('agentify_verify_catalog_conversation');
   assert.deepEqual(Object.keys(verifyCatalog.properties).sort(), ['identity', 'key']);
@@ -500,7 +554,16 @@ test('mcp catalog tools forward authenticated HTTP through the real stdio server
     if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
     const body = req.method === 'POST' ? await readJsonBody(req) : undefined;
     requests.push({ method: req.method, path: req.url, authorization: req.headers.authorization, body });
+    if (req.url === '/catalog/export-grant') {
+      return sendJson(res, body.profileScopeId === 'profile-cancel'
+        ? { status: 'cancelled' }
+        : exportGrantFixture());
+    }
     if (req.url === '/catalog/import') return sendJson(res, catalogImportFixture());
+    if (req.url === '/catalog/imports') {
+      return sendJson(res, { items: [catalogImportSummaryFixture()], truncated: false });
+    }
+    if (req.url === '/catalog/reassign') return sendJson(res, catalogReassignmentFixture());
     if (req.url === '/catalog/verify') return sendJson(res, catalogVerificationFixture());
     if (req.url?.startsWith('/catalog/list')) return sendJson(res, catalogPageFixture());
     return sendJsonStatus(res, 404, { error: 'not_found' });
@@ -523,9 +586,22 @@ test('mcp catalog tools forward authenticated HTTP through the real stdio server
   const results = {};
   try {
     await client.connect(transport);
+    results.selectedImport = await client.callTool({
+      name: 'agentify_import_selected_chatgpt_export',
+      arguments: { profileScopeId: 'profile-main' }
+    });
+    results.cancelledImport = await client.callTool({
+      name: 'agentify_import_selected_chatgpt_export',
+      arguments: { profileScopeId: 'profile-cancel' }
+    });
     results.import = await client.callTool({
       name: 'agentify_import_chatgpt_export',
       arguments: { grantId: 'grant-stdio-1', profileScopeId: 'profile-main' }
+    });
+    results.imports = await client.callTool({ name: 'agentify_list_chatgpt_imports', arguments: {} });
+    results.reassign = await client.callTool({
+      name: 'agentify_reassign_chatgpt_import',
+      arguments: { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: true }
     });
     results.verify = await client.callTool({
       name: 'agentify_verify_catalog_conversation',
@@ -558,9 +634,39 @@ test('mcp catalog tools forward authenticated HTTP through the real stdio server
   assert.deepEqual(requests, [
     {
       method: 'POST',
+      path: '/catalog/export-grant',
+      authorization: `Bearer ${token}`,
+      body: { profileScopeId: 'profile-main' }
+    },
+    {
+      method: 'POST',
+      path: '/catalog/import',
+      authorization: `Bearer ${token}`,
+      body: { grantId: 'grant-stdio-picker', profileScopeId: 'profile-main' }
+    },
+    {
+      method: 'POST',
+      path: '/catalog/export-grant',
+      authorization: `Bearer ${token}`,
+      body: { profileScopeId: 'profile-cancel' }
+    },
+    {
+      method: 'POST',
       path: '/catalog/import',
       authorization: `Bearer ${token}`,
       body: { grantId: 'grant-stdio-1', profileScopeId: 'profile-main' }
+    },
+    {
+      method: 'GET',
+      path: '/catalog/imports',
+      authorization: `Bearer ${token}`,
+      body: undefined
+    },
+    {
+      method: 'POST',
+      path: '/catalog/reassign',
+      authorization: `Bearer ${token}`,
+      body: { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: true }
     },
     {
       method: 'POST',
@@ -575,8 +681,19 @@ test('mcp catalog tools forward authenticated HTTP through the real stdio server
       body: undefined
     }
   ]);
+  assert.equal(results.selectedImport.content[0].text, 'status=complete importId=import-1 records=1 snapshots=1 problems=0');
+  assert.deepEqual(results.selectedImport.structuredContent, catalogImportFixture());
+  assert.equal(results.cancelledImport.content[0].text, 'status=cancelled');
+  assert.deepEqual(results.cancelledImport.structuredContent, { status: 'cancelled' });
   assert.equal(results.import.content[0].text, 'status=complete importId=import-1 records=1 snapshots=1 problems=0');
   assert.deepEqual(results.import.structuredContent, catalogImportFixture());
+  assert.equal(results.imports.content[0].text, 'count=1 partial=1 suspended=1');
+  assert.deepEqual(results.imports.structuredContent, {
+    items: [catalogImportSummaryFixture()],
+    truncated: false
+  });
+  assert.equal(results.reassign.content[0].text, 'importId=import-1 status=reassigned');
+  assert.deepEqual(results.reassign.structuredContent, catalogReassignmentFixture());
   assert.equal(results.verify.content[0].text, 'status=verified');
   assert.deepEqual(results.verify.structuredContent, catalogVerificationFixture());
   assert.equal(results.list.content[0].text, 'count=1 nextCursor=available');
@@ -585,6 +702,7 @@ test('mcp catalog tools forward authenticated HTTP through the real stdio server
   assert.equal(results.invalidGrant.isError, true);
   assert.equal(results.invalidVerificationKey.isError, true);
   const serialized = JSON.stringify(results);
+  assert.equal(serialized.includes('grant-stdio-picker'), false);
   assert.equal(serialized.includes('/Users/private'), false);
   assert.equal(serialized.includes('export.zip'), false);
 });
@@ -598,6 +716,9 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
     if (req.url === '/health') return sendJson(res, { ok: true, serverId });
     if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
     const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    if (req.url === '/catalog/export-grant') {
+      return sendJson(res, { ...exportGrantFixture(), archivePath: '/Users/private/export.zip' });
+    }
     if (req.url === '/catalog/import' && body.grantId === 'grant-malformed-200') {
       return sendJson(res, {
         ...catalogImportFixture(),
@@ -618,6 +739,9 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
     if (req.url === '/catalog/import' && body.grantId === 'grant-capacity-error') {
       return sendJsonStatus(res, 409, { error: 'catalog_import_capacity_required' });
     }
+    if (req.url === '/catalog/verify' && body.key === 'tab-busy') {
+      return sendJsonStatus(res, 409, { error: 'tab_busy' });
+    }
     if (req.url === '/catalog/verify' && body.key === 'identity-mismatch') {
       return sendJson(res, {
         status: 'verified',
@@ -635,6 +759,15 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
         archivePath: '/Users/private/export.zip',
         transcript: 'PRIVATE TRANSCRIPT BODY'
       });
+    }
+    if (req.url === '/catalog/imports') {
+      return sendJson(res, {
+        items: [{ ...catalogImportSummaryFixture(), archivePath: '/Users/private/export.zip' }],
+        truncated: false
+      });
+    }
+    if (req.url === '/catalog/reassign') {
+      return sendJson(res, { ...catalogReassignmentFixture(), importId: 'import-other' });
     }
     return sendJsonStatus(res, 404, { error: 'not_found' });
   });
@@ -667,7 +800,7 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
         arguments: { grantId, profileScopeId: 'profile-main' }
       }));
     }
-    for (const key of ['identity-mismatch', 'missing-safe']) {
+    for (const key of ['identity-mismatch', 'missing-safe', 'tab-busy']) {
       results.push(await client.callTool({
         name: 'agentify_verify_catalog_conversation',
         arguments: { identity: catalogIdentity, key }
@@ -676,6 +809,15 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
     results.push(await client.callTool({
       name: 'agentify_list_chatgpt_catalog',
       arguments: { profileScopeId: 'profile-main' }
+    }));
+    results.push(await client.callTool({
+      name: 'agentify_import_selected_chatgpt_export',
+      arguments: { profileScopeId: 'profile-main' }
+    }));
+    results.push(await client.callTool({ name: 'agentify_list_chatgpt_imports', arguments: {} }));
+    results.push(await client.callTool({
+      name: 'agentify_reassign_chatgpt_import',
+      arguments: { importId: 'import-1', newProfileScopeId: 'profile-other', confirm: true }
     }));
   } finally {
     await client.close();
@@ -688,7 +830,11 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
   assert.match(results[3].content[0].text, /catalog_import_capacity_required/);
   assert.match(results[4].content[0].text, /transcript_mcp_response_invalid/);
   assert.match(results[5].content[0].text, /catalog_conversation_not_found/);
-  assert.match(results[6].content[0].text, /transcript_mcp_response_invalid/);
+  assert.match(results[6].content[0].text, /tab_busy/);
+  assert.match(results[7].content[0].text, /transcript_mcp_response_invalid/);
+  assert.match(results[8].content[0].text, /transcript_mcp_response_invalid/);
+  assert.match(results[9].content[0].text, /transcript_mcp_response_invalid/);
+  assert.match(results[10].content[0].text, /transcript_mcp_response_invalid/);
   const serialized = JSON.stringify(results);
   assert.equal(serialized.includes('PRIVATE'), false);
   assert.equal(serialized.includes('/Users/private'), false);

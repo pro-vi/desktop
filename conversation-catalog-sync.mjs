@@ -53,6 +53,10 @@ function serviceError(code) {
   return error;
 }
 
+function isTabBusy(error) {
+  return error?.code === 'tab_busy';
+}
+
 function isRecord(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -391,7 +395,8 @@ export function createConversationCatalogService({
     let outcome;
     try {
       outcome = parseRouteVerificationOutcome(await routeVerifier.verify(identity, key));
-    } catch {
+    } catch (error) {
+      if (isTabBusy(error)) throw serviceError('tab_busy');
       // Route verifiers own provider-state classification and return a closed
       // outcome. An unexpected throw is only a local transport failure; never
       // infer provider state by scanning a potentially private error message.
@@ -451,6 +456,7 @@ function unavailableVerification(identity, reason, retryable, observedAt) {
 
 export function createChatGptRouteVerifier({
   tabs,
+  providerTabOperations,
   navigationTimeoutMs = 30_000,
   clock = () => new Date().toISOString(),
   vendorId = 'chatgpt',
@@ -461,6 +467,14 @@ export function createChatGptRouteVerifier({
   }
   if (!Number.isSafeInteger(navigationTimeoutMs) || navigationTimeoutMs < 1 || navigationTimeoutMs > 10 * 60_000) {
     throw serviceError('catalog_verification_timeout_invalid');
+  }
+  const operationScopes = providerTabOperations;
+  if (
+    !operationScopes ||
+    typeof operationScopes.reserve !== 'function' ||
+    typeof operationScopes.release !== 'function'
+  ) {
+    throw serviceError('catalog_verification_tab_operations_required');
   }
 
   function observedAt() {
@@ -500,42 +514,43 @@ export function createChatGptRouteVerifier({
     const identity = parseConversationIdentity(identityValue);
     const key = parseKey(keyValue);
     const canonicalUrl = `https://chatgpt.com/c/${identity.providerConversationId}`;
+    const ownerId = crypto.randomUUID();
+    const operation = {
+      id: ownerId,
+      kind: 'catalog-verification',
+      key,
+      source: 'transcript-library',
+      phase: 'resolving_tab',
+      startedAt: Date.now()
+    };
+    const acquiredScopes = [];
+    let releaseAfterProviderSettlement = false;
+    let scopesReleased = false;
+    let deadlineExpired = false;
+    let deadline = null;
+    let exclusiveOperation = null;
+    let providerOperation = null;
+    const reserveScope = (scope) => {
+      if (!scope || acquiredScopes.includes(scope)) return;
+      if (operationScopes.reserve(scope, operation)) acquiredScopes.push(scope);
+    };
+    const releaseScopes = () => {
+      if (scopesReleased) return;
+      scopesReleased = true;
+      for (const scope of acquiredScopes.reverse()) operationScopes.release(scope, ownerId);
+    };
     let controller;
-    try {
-      const tabId = await tabs.ensureTab({
-        key,
-        name: 'Catalog verification',
-        url: canonicalUrl,
-        vendorId,
-        vendorName,
-        show: false,
-        projectUrl: null
-      });
-      controller = tabs.getControllerById(tabId);
-    } catch {
-      return failedVerification('transport');
-    }
-    if (!controller) return failedVerification('transport');
-    if (
-      typeof controller.runExclusive !== 'function' ||
-      typeof controller.prepareChatEntry !== 'function' ||
-      typeof controller.inspectConversationRoute !== 'function' ||
-      typeof controller.detectChallenge !== 'function' ||
-      typeof controller.getUrl !== 'function' ||
-      typeof controller.quarantineExclusiveUntil !== 'function'
-    ) {
-      return failedVerification('compatibility-drift');
-    }
     const verifyExclusive = async () => {
-      let expired = false;
+      if (deadlineExpired) return failedVerification('transport');
       const assertActive = () => {
-        if (!expired) return;
+        if (!deadlineExpired) return;
         throw serviceError('catalog_verification_timeout');
       };
       const failureOutcome = async (error) => {
-        if (expired || error?.code === 'catalog_verification_timeout') {
+        if (deadlineExpired || error?.code === 'catalog_verification_timeout') {
           return failedVerification('transport');
         }
+        if (isTabBusy(error)) throw error;
         if (typeof controller.detectChallenge === 'function') {
           const challenge = await controller.detectChallenge().catch(() => null);
           assertActive();
@@ -589,7 +604,7 @@ export function createChatGptRouteVerifier({
         return failedVerification(state.kind === 'login' ? 'login' : 'challenge');
       };
 
-      const operation = (async () => {
+      providerOperation = (async () => {
         try {
           await controller.prepareChatEntry({
             chatUrl: canonicalUrl,
@@ -642,27 +657,64 @@ export function createChatGptRouteVerifier({
           return await failureOutcome(error);
         }
       })();
-      let timeoutId;
-      const timeout = new Promise((resolve) => {
-        timeoutId = setTimeout(() => {
-          expired = true;
-          controller.quarantineExclusiveUntil(operation);
+      return await Promise.race([providerOperation, deadline]);
+    };
+    try {
+      try {
+        reserveScope(`key:${key}`);
+        const existingTabId = (tabs.listTabs?.() || []).find((tab) => tab?.key === key)?.id || null;
+        if (existingTabId) reserveScope(`tab:${existingTabId}`);
+        const tabId = await tabs.ensureTab({
+          key,
+          name: 'Catalog verification',
+          url: canonicalUrl,
+          vendorId,
+          vendorName,
+          show: false,
+          projectUrl: null
+        });
+        reserveScope(`tab:${tabId}`);
+        controller = tabs.getControllerById(tabId);
+      } catch (error) {
+        if (isTabBusy(error)) throw error;
+        return failedVerification('transport');
+      }
+      if (!controller) return failedVerification('transport');
+      if (
+        typeof controller.runExclusive !== 'function' ||
+        typeof controller.prepareChatEntry !== 'function' ||
+        typeof controller.inspectConversationRoute !== 'function' ||
+        typeof controller.detectChallenge !== 'function' ||
+        typeof controller.getUrl !== 'function' ||
+        typeof controller.quarantineExclusiveUntil !== 'function'
+      ) {
+        return failedVerification('compatibility-drift');
+      }
+      let deadlineId;
+      deadline = new Promise((resolve) => {
+        deadlineId = setTimeout(() => {
+          deadlineExpired = true;
+          releaseAfterProviderSettlement = true;
+          // Before callback entry, the queued exclusive promise is the exact
+          // pending operation. After entry, retain ownership for the provider
+          // promise that continues after the exclusive deadline response.
+          const settlementOperation = providerOperation || exclusiveOperation;
+          void settlementOperation.then(releaseScopes, releaseScopes);
+          controller.quarantineExclusiveUntil(settlementOperation);
           resolve(failedVerification('transport'));
         }, navigationTimeoutMs);
       });
       try {
-        return await Promise.race([operation, timeout]);
+        exclusiveOperation = controller.runExclusive(verifyExclusive);
+        return await Promise.race([exclusiveOperation, deadline]);
+      } catch (error) {
+        if (isTabBusy(error)) throw error;
+        return failedVerification('transport');
       } finally {
-        clearTimeout(timeoutId);
+        clearTimeout(deadlineId);
       }
-    };
-    try {
-      return await controller.runExclusive(verifyExclusive);
-    } catch {
-      // A prior timed-out provider operation can quarantine the controller
-      // before this verifier callback starts. Keep the verification port's
-      // closed outcome contract instead of leaking the controller's busy code.
-      return failedVerification('transport');
+    } finally {
+      if (!releaseAfterProviderSettlement) releaseScopes();
     }
   }
 

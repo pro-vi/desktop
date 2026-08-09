@@ -33,6 +33,7 @@ import { createPrivateLibraryBlobStore } from './library-blob-store.mjs';
 import { recoverTranscriptLibraryStartup } from './library-startup.mjs';
 import { privateFileSystem } from './private-filesystem.mjs';
 import { createTranscriptReadService } from './transcript-read.mjs';
+import { createProviderTabOperationLeases } from './provider-tab-operation-leases.mjs';
 import { TabManager } from './tab-manager.mjs';
 import {
   createChatGptTranscriptCapture,
@@ -312,19 +313,24 @@ async function main() {
     fileSystem: privateFileSystem
   });
   const libraryStartup = await recoverTranscriptLibraryStartup({ transcriptStore, catalogStore });
+  const providerTabOperations = createProviderTabOperationLeases();
   exportImportGrants = createElectronExportImportGrants({ dialog });
+  const requestExportGrant = async ({ profileScopeId, browserWindow = null } = {}) => {
+    return await exportImportGrants.request({ profileScopeId, browserWindow });
+  };
   const catalogSync = createConversationCatalogService({
     store: catalogStore,
     blobs: transcriptBlobs,
     grants: exportImportGrants,
     exportReader: createChatGptExportReader(),
-    routeVerifier: createChatGptRouteVerifier({ tabs }),
+    routeVerifier: createChatGptRouteVerifier({ tabs, providerTabOperations }),
     onChanged: emitLibraryChanged
   });
   const transcriptSync = createTranscriptSyncService({
     store: transcriptStore,
     blobs: transcriptBlobs,
-    capture: createChatGptTranscriptCapture({ tabs }),
+    capture: createChatGptTranscriptCapture({ tabs, providerTabOperations }),
+    providerTabOperations,
     onChanged: emitLibraryChanged
   });
   const transcriptRead = createTranscriptReadService({
@@ -433,7 +439,7 @@ async function main() {
   });
 
   ipcMain.handle('agentify:requestExportGrant', async (_evt, args) => {
-    return await exportImportGrants.request({
+    return await requestExportGrant({
       profileScopeId: args?.profileScopeId,
       browserWindow: controlWin && !controlWin.isDestroyed() ? controlWin : null
     });
@@ -742,6 +748,30 @@ async function main() {
   // otherwise early renderer calls can race and fail with missing handlers.
   await showControlCenter().catch(() => {});
 
+  const requestAgentExportGrant = async ({ profileScopeId }) => {
+    let browserWindow = BrowserWindow.getFocusedWindow() || controlWin;
+    if (!browserWindow || browserWindow.isDestroyed?.()) browserWindow = null;
+    if (browserWindow) {
+      // Foregrounding is best-effort. Keep the valid parent when one action is
+      // unavailable, and avoid persistent window-level mutations around a
+      // human-owned native dialog.
+      const foregroundActions = [
+        () => browserWindow.isMinimized?.() && browserWindow.restore?.(),
+        () => browserWindow.show?.(),
+        () => browserWindow.moveTop?.(),
+        () => browserWindow.focus?.(),
+        () => app.show?.(),
+        () => app.focus?.({ steal: true })
+      ];
+      for (const action of foregroundActions) {
+        try {
+          action();
+        } catch {}
+      }
+    }
+    return await requestExportGrant({ profileScopeId, browserWindow });
+  };
+
   let port = basePort;
   const tries = port === 0 ? 1 : 20;
   for (let i = 0; i < tries; i++) {
@@ -757,6 +787,8 @@ async function main() {
         transcriptSync,
         transcriptRead,
         catalogSync,
+        requestExportGrant: requestAgentExportGrant,
+        providerTabOperations,
         getSettings: async () => settings,
         onShow: async ({ tabId }) => {
           const win = tabs.getWindowById(tabId || defaultTabId);

@@ -23,6 +23,9 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_get_transcript'"), 'expected agentify_get_transcript tool');
   assert.ok(src.includes("'agentify_forget_transcript'"), 'expected agentify_forget_transcript tool');
   assert.ok(src.includes("'agentify_import_chatgpt_export'"), 'expected agentify_import_chatgpt_export tool');
+  assert.ok(src.includes("'agentify_import_selected_chatgpt_export'"), 'expected agentify_import_selected_chatgpt_export tool');
+  assert.ok(src.includes("'agentify_list_chatgpt_imports'"), 'expected agentify_list_chatgpt_imports tool');
+  assert.ok(src.includes("'agentify_reassign_chatgpt_import'"), 'expected agentify_reassign_chatgpt_import tool');
   assert.ok(src.includes("'agentify_verify_catalog_conversation'"), 'expected agentify_verify_catalog_conversation tool');
   assert.ok(src.includes("'agentify_list_chatgpt_catalog'"), 'expected agentify_list_chatgpt_catalog tool');
   assert.ok(src.includes("path: '/transcripts/track'"), 'expected transcript track forwarding');
@@ -31,6 +34,9 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("path: '/transcripts/get'"), 'expected transcript get forwarding');
   assert.ok(src.includes("path: '/transcripts/forget'"), 'expected transcript forget forwarding');
   assert.ok(src.includes("path: '/catalog/import'"), 'expected catalog import forwarding');
+  assert.ok(src.includes("path: '/catalog/export-grant'"), 'expected protected export picker forwarding');
+  assert.ok(src.includes("path: '/catalog/imports'"), 'expected catalog import status forwarding');
+  assert.ok(src.includes("path: '/catalog/reassign'"), 'expected catalog scope reassignment forwarding');
   assert.ok(src.includes("path: '/catalog/verify'"), 'expected catalog verification forwarding');
   assert.ok(src.includes("path: `/catalog/list${query.size ? `?${query}` : ''}`"), 'expected catalog list forwarding');
   assert.ok(src.includes("throw transcriptMcpError('transcript_mcp_response_invalid')"), 'expected malformed transcript responses to fail closed');

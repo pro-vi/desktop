@@ -11,14 +11,17 @@ test('mcp tool profiles default to the full compatibility surface', () => {
   const resolved = resolveMcpToolProfile({ argv: [], env: {} });
   assert.deepEqual(resolved.profiles, ['full']);
   assert.deepEqual(new Set(resolved.tools), new Set(ALL_MCP_TOOL_NAMES));
-  assert.equal(resolved.tools.length, 43);
+  assert.equal(resolved.tools.length, 46);
 });
 
 test('mcp tool profiles expose the transcript and import library workflow', () => {
   const resolved = resolveMcpToolProfile({ argv: ['--tool-profile', 'library'], env: {} });
   assert.deepEqual(resolved.profiles, ['library']);
   assert.deepEqual(resolved.tools, [
+    'agentify_import_selected_chatgpt_export',
     'agentify_import_chatgpt_export',
+    'agentify_list_chatgpt_imports',
+    'agentify_reassign_chatgpt_import',
     'agentify_verify_catalog_conversation',
     'agentify_list_chatgpt_catalog',
     'agentify_track_transcript',

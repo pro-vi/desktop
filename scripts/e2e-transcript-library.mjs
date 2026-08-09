@@ -43,7 +43,10 @@ const OWNED_STATE_MARKER = '.agentify-transcript-e2e-owned.json';
 const HTTP_TIMEOUT_MS = 8_000;
 const CDP_TIMEOUT_MS = 8_000;
 const REQUIRED_LIBRARY_TOOLS = Object.freeze([
+  'agentify_import_selected_chatgpt_export',
   'agentify_import_chatgpt_export',
+  'agentify_list_chatgpt_imports',
+  'agentify_reassign_chatgpt_import',
   'agentify_verify_catalog_conversation',
   'agentify_list_chatgpt_catalog',
   'agentify_track_transcript',
@@ -1170,6 +1173,26 @@ async function exerciseMcp(stateDir) {
       identity.provider === IMPORTED_IDENTITY.provider &&
       identity.profileScopeId === IMPORTED_IDENTITY.profileScopeId &&
       identity.providerConversationId === IMPORTED_IDENTITY.providerConversationId), true);
+    const imports = await mcpCall(client.callTool({ name: 'agentify_list_chatgpt_imports', arguments: {} }));
+    assert.equal(imports.isError === true, false);
+    assert.equal(imports.structuredContent.items.length, 1);
+    assert.equal(imports.structuredContent.truncated, false);
+    assert.equal(imports.structuredContent.items[0].profileScopeId, PROFILE_SCOPE_ID);
+    assert.equal(imports.structuredContent.items[0].status, 'complete');
+    const reassigned = await mcpCall(client.callTool({
+      name: 'agentify_reassign_chatgpt_import',
+      arguments: {
+        importId: imports.structuredContent.items[0].importId,
+        newProfileScopeId: PROFILE_SCOPE_ID,
+        confirm: true
+      }
+    }));
+    assert.equal(reassigned.isError === true, false);
+    assert.equal(reassigned.structuredContent.changed, false);
+    assert.equal(reassigned.structuredContent.profileScopeId, PROFILE_SCOPE_ID);
+    const serializedImportStatus = JSON.stringify({ imports, reassigned });
+    assert.equal(serializedImportStatus.includes(RAW_ARCHIVE_SENTINEL), false);
+    assert.equal(serializedImportStatus.includes(PRIVATE_ARCHIVE_BASENAME), false);
   } finally {
     if (connected) await client.close();
     else await transport.close().catch(() => {});

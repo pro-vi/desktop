@@ -2506,20 +2506,16 @@ export class ChatGPTController {
         }
       }
 
-      // The scroller quieted at the top of what the provider served, and that
-      // head is an assistant turn: either the thread truly opens that way or
-      // turn 1 was withheld. Either way the top boundary was proven, so denying
-      // it here would report a scroll that fell short -- a retryable failure --
-      // for a scroll that already finished. Give the condition its own reason
-      // and keep the boundary honest; recovering turn 1 needs the export
-      // import, not another pass.
-      if (topBoundary && transcript[0]?.role === 'assistant') {
-        reason = reason || 'conversation_leading_turn_missing';
-      }
+      const leadingTurnMissing = topBoundary && transcript[0]?.role === 'assistant';
       if (!reason && hasUnresolvedStructuralState()) reason = 'compatibility_drift';
       const captureStructure = !reason ? orderedCaptureStructure() : null;
       if (!reason && captureStructure) {
-        let providerPositionsComplete = startsAtProvenProviderBoundary(captureStructure[0]);
+        // A clean assistant-first head can begin at a later provider turn: that
+        // is the evidence for conversation_leading_turn_missing. It must still
+        // begin at part zero and every served position after it must be ordered.
+        const startsAtProviderTurnBoundary = captureStructure[0]?.providerTurnPartIndex === 0;
+        let providerPositionsComplete = startsAtProvenProviderBoundary(captureStructure[0]) ||
+          (leadingTurnMissing && startsAtProviderTurnBoundary);
         for (let index = 1; providerPositionsComplete && index < captureStructure.length; index += 1) {
           const previous = captureStructure[index - 1];
           const turn = captureStructure[index];
@@ -2552,6 +2548,16 @@ export class ChatGPTController {
         reason = 'compatibility_drift';
       }
       if (!reason && unresolvedMessageSignatures.size > 0) reason = 'conversation_message_text_unavailable';
+      // The scroller quieted at the top of what the provider served, and that
+      // head is an assistant turn: either the thread truly opens that way or
+      // turn 1 was withheld. Report that only after structure and mapped text
+      // are sound; those failures carry stronger evidence about the capture.
+      // The top boundary remains proven, so a caller can distinguish this from
+      // a scroll that fell short. Recovering turn 1 needs export import, not
+      // another capture pass.
+      if (!reason && leadingTurnMissing) {
+        reason = 'conversation_leading_turn_missing';
+      }
       if (!reason && (!topBoundary || !bottomBoundary)) {
         reason = !topBoundary ? 'conversation_top_not_reached' : 'conversation_scroll_stalled';
       }

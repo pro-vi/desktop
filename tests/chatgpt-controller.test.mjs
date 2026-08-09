@@ -4511,8 +4511,12 @@ test('chatgpt-controller: a fully served conversation with no transcript text an
   assert.deepEqual(capture.rawTurns, []);
 });
 
-test('chatgpt-controller: a short textless conversation stays unavailable text rather than drift', async () => {
-  const messages = textlessConversation(3);
+test('chatgpt-controller: assistant-first textless capture still reports compatibility drift', async () => {
+  const messages = Array.from({ length: 4 }, (_, index) => (
+    index % 2 === 0
+      ? { role: 'assistant', text: `Reply ${index}` }
+      : { role: 'user', text: `Prompt ${index}` }
+  ));
   const page = slidingConversationPage(messages, {
     windowSize: messages.length,
     initialStart: 0,
@@ -4523,9 +4527,53 @@ test('chatgpt-controller: a short textless conversation stays unavailable text r
   const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
 
   assert.equal(capture.status, 'partial');
-  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+  assert.equal(capture.reason, 'compatibility_drift');
+  assert.equal(capture.evidence.topBoundary, true);
+  assert.equal(capture.evidence.bottomBoundary, true);
+  assert.equal(capture.evidence.orderedWindowStitching, false);
   assert.deepEqual(capture.rawTurns, []);
 });
+
+test('chatgpt-controller: assistant-first missing text reports unavailable text before leading turn', async () => {
+  const messages = [
+    { role: 'assistant', text: 'First reply' },
+    { role: 'user', text: 'Image-only prompt' },
+    { role: 'assistant', text: 'Final reply' }
+  ];
+  const page = slidingConversationPage(messages, {
+    windowSize: messages.length,
+    initialStart: 0,
+    childNodesForMessage: (_message, index) => index === 1 ? imageOnlyChildNodes() : undefined
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+  assert.equal(capture.evidence.topBoundary, true);
+  assert.equal(capture.evidence.bottomBoundary, true);
+  assert.equal(capture.evidence.orderedWindowStitching, true);
+  assert.deepEqual(capture.rawTurns.map(({ text }) => text), ['First reply', 'Final reply']);
+});
+
+for (const length of [2, 3]) {
+  test(`chatgpt-controller: a ${length}-message textless conversation stays unavailable text rather than drift`, async () => {
+    const messages = textlessConversation(length);
+    const page = slidingConversationPage(messages, {
+      windowSize: messages.length,
+      initialStart: 0,
+      childNodesForMessage: imageOnlyChildNodes
+    });
+    const controller = new ChatGPTController({ page, selectors: {} });
+
+    const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+    assert.equal(capture.status, 'partial');
+    assert.equal(capture.reason, 'conversation_message_text_unavailable');
+    assert.deepEqual(capture.rawTurns, []);
+  });
+}
 
 test('chatgpt-controller: one surviving text turn keeps image-only turns out of compatibility drift', async () => {
   const messages = textlessConversation(6);
@@ -6689,4 +6737,3 @@ test('chatgpt-controller: research export uses native download hook for markdown
     Date.now = realNow;
   }
 });
-

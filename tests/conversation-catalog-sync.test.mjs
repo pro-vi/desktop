@@ -1122,6 +1122,29 @@ test('catalog service: grant and verifier failures expose symbolic outcomes only
   assert.equal((await fixture.store.get(identity(record.id))).route.kind, 'unverified');
 });
 
+test('catalog service: route verification contention rethrows only symbolic tab_busy', async (t) => {
+  const fixture = await harness(t, 'verification-busy');
+  const record = conversationRecord({ conversationId: 'verification-busy-thread' });
+  await importArchive(t, fixture, [record], { grantId: 'grant-verification-busy' });
+  const recordIdentity = identity(record.id);
+  const privateMarker = 'private active query prompt must stay hidden';
+  fixture.routeOutcomes.push(Object.assign(new Error(privateMarker), {
+    code: 'tab_busy',
+    data: { activeQuery: { prompt: privateMarker } }
+  }));
+
+  await assert.rejects(
+    () => fixture.service.verifyByNavigation(recordIdentity, 'owned-route-key'),
+    (error) => {
+      assert.equal(error?.code, 'tab_busy');
+      assert.equal(error?.message, 'tab_busy');
+      assert.equal(JSON.stringify(error?.data ?? null).includes(privateMarker), false);
+      return true;
+    }
+  );
+  assert.equal((await fixture.store.get(recordIdentity)).route.kind, 'unverified');
+});
+
 test('catalog service: exact verification mutates routes, unavailable preserves history, and failed does not mutate', async (t) => {
   const fixture = await harness(t, 'routes');
   const record = conversationRecord({ conversationId: 'route-service-thread' });

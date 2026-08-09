@@ -9,6 +9,7 @@ import {
 import { createEmptyChatGptCompatibilityState } from '../chatgpt-capability-health.mjs';
 import { startHttpApi } from '../http-api.mjs';
 import { normalizeDesktopStatus } from '../mcp-lib.mjs';
+import { createProviderTabOperationLeases } from '../provider-tab-operation-leases.mjs';
 
 const hash = 'a'.repeat(64);
 
@@ -75,6 +76,7 @@ test('compatibility status: authenticated HTTP, MCP normalization, and IPC state
     closeTab: async () => true, getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0, token: 'secret', tabs, defaultTabId: 't0', serverId: 'status-test', stateDir: '/tmp',
     getCompatibilityStatus: () => compatibility,
     getStatus: async () => ({ ok: true, tabs: [] })

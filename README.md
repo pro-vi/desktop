@@ -452,7 +452,7 @@ npm run start -- --chrome-binary "/Applications/Google Chrome.app/Contents/MacOS
 
 ## Transcript Library V0
 
-Transcript Library keeps exact ChatGPT conversations as private local evidence. It supports two paths: manually capture a conversation already open in Agentify, or import a ChatGPT export ZIP into a local catalog (a list of imported conversations). Both paths produce immutable snapshots: saved captures that are never edited in place. ZIP import is optional and is not required for live tracking, retrieval, continuation, or local forgetting.
+Transcript Library keeps exact ChatGPT conversations as private local evidence. The normal workflow is to ask an MCP-connected coding agent to track, sync, list, retrieve, cite, continue, verify, forget, or import an exact conversation. The Control Center remains an optional fallback for the same ZIP picker, content-free status, and recovery actions. Both live capture and import produce immutable snapshots: saved captures that are never edited in place. ZIP import is optional and is not required for live tracking, retrieval, continuation, or local forgetting.
 
 ### Setup and identity
 
@@ -466,9 +466,9 @@ node mcp-server.mjs --tool-profile core,library
 
 A conversation's identity is the profile scope plus its exact ChatGPT conversation ID. Titles, dates, sidebar position, and similar text never identify or merge conversations.
 
-### Manual track, sync, retrieve, and continue
+### Primary workflow: talk to a coding agent
 
-Open the conversation in an existing keyed ChatGPT tab, then use this sequence:
+Open the conversation in an existing keyed ChatGPT tab. Then ask your coding agent, for example: “Track the ChatGPT conversation open on key `thread-key` under profile scope `chatgpt-personal`, sync it once, and retrieve the first 20 turns with citations.” The underlying tool sequence is:
 
 ```text
 agentify_track_transcript({ label: "Local label", tags: [], key: "thread-key", profileScopeId: "chatgpt-personal" })
@@ -480,7 +480,7 @@ Tracking records the exact live route; it does not capture in the background. Sy
 
 Retrieval returns whole structured turns, rendered text, and a citation for each turn. A citation contains the exact conversation identity, snapshot hash, and turn ID. For the next page, pass both the returned `snapshot` and `cursor` (the next-page token) back to `agentify_get_transcript`; a token from another snapshot is rejected. Local paths stay hidden unless the authenticated caller explicitly sets `includePaths: true`.
 
-A page from a tracked live source also returns `liveSourceId`, `sourceKey`, and `conversationUrl`. Continue that same thread with:
+A page from a tracked live source also returns `liveSourceId`, `sourceKey`, and `conversationUrl`. You can ask the agent to continue that exact live-bound conversation. The underlying call is:
 
 ```text
 agentify_query({ liveSourceId: LIVE_SOURCE_ID, key: SOURCE_KEY, chatUrl: CONVERSATION_URL, prompt: "Continue from here." })
@@ -490,23 +490,27 @@ When `liveSourceId` is present, use only that exact `liveSourceId` + `key` + can
 
 ### Import and direct route verification
 
-Download your ChatGPT export yourself; Agentify does not request it, follow export emails, or download it for you. In the Control Center's **Transcript Library** card:
+Download your ChatGPT export yourself; Agentify does not request it, follow export emails, or download it for you. ZIP history import is optional. Ask your coding agent to import the export under the profile scope you choose. The agent uses this sequence:
 
-1. Enter the profile scope for the signed-in account.
-2. Click **Choose ZIP and import** and select one export ZIP in the desktop picker.
-3. Review the import as complete, partial, or rejected, then inspect the catalog for that scope.
+1. `agentify_import_selected_chatgpt_export` opens Agentify Desktop's native picker. You select one ZIP.
+2. Agentify creates and immediately consumes a one-use grant inside the local MCP/HTTP call chain. The agent receives neither the path nor the grant.
+3. The agent reports complete, partial, rejected, or cancelled status and can inspect recovery state with `agentify_list_chatgpt_imports`.
+
+The Control Center's **Transcript Library** card remains an optional fallback for the same picker, import status, and recovery actions.
+
+`agentify_list_chatgpt_imports` returns at most the 100 most recently updated content-free summaries and marks the result when less recently updated imports were omitted. It excludes archive paths, archive hashes, account hints, raw records, transcript text, and per-record identities.
 
 The picker creates a short-lived, one-use file grant. The import API accepts that grant ID, never an arbitrary archive path. Raw archive records are staged before catalog entries become visible. Archives above 20,000 conversation records or above 10,000 catalog-only problems are rejected as unsafe. These are separate limits: a worst-shape 20,000-record import fits an otherwise empty V0 catalog, and the store atomically reserves its conservative final metadata size against the catalog already on disk before making the import visible. That reservation survives interruption and restart until the import reaches a terminal result. The problem ceiling separately bounds the returned partial outcome. If an export contains an ambiguous branch or unsupported message content, that record remains catalog-only instead of becoming a made-up transcript.
 
 Exports may carry an optional account hint. V0 currently has no stable browser-side hint to compare, so scope assignment remains an explicit human confirmation; Agentify never invents an account ID. Imported snapshot ordering uses the durable local import time, not an untrusted provider timestamp from the archive.
 
-Re-importing the same archive under the same scope resumes from its saved position and does not duplicate identities or snapshots. If you assigned the archive to the wrong scope, use the import's explicit reassignment action, confirm the change, then re-select the same ZIP so snapshots can be rebuilt under the new scope.
+Re-importing the same archive under the same scope resumes from its saved position and does not duplicate identities or snapshots. If you assigned the archive to the wrong scope, ask the agent to call `agentify_reassign_chatgpt_import` with explicit confirmation, then re-select the same ZIP so snapshots can be rebuilt under the new scope. The fallback Control Center provides the same confirmed action.
 
-Personal-export acceptance is currently deferred until a user has an export ready. One supported real ZIP fixture exercises the production grant, reader, blob store, catalog store, and import service with a deterministic dialog result and real private-filesystem/subprocess recovery; hostile real ZIP bytes exercise production reader/service rejection. Real Electron, HTTP, MCP, and Control Center entry points then list and retrieve the recovered catalog, while exact route outcomes are covered separately at the controller/service contract seams. This evidence does not claim that a personal ChatGPT export or imported route has been exercised live.
+Personal-export acceptance is currently deferred until a user has an export ready. Automated MCP contract tests prove that the selected-import tool requests the authenticated Electron grant endpoint and immediately consumes the returned one-use grant without exposing it. The controlled real ZIP fixture uses a deterministic dialog adapter, a real subprocess crash point, and the production private filesystem, reader, blob store, catalog store, and import service; hostile real ZIP bytes exercise production reader/service rejection. Real Electron, HTTP, and MCP entry points then list and retrieve the recovered catalog. The native OS panel itself remains part of the deferred user-selected export rehearsal because a background test process cannot perform the required foreground file choice. The optional Control Center fallback is tested separately for content-free import and recovery states, while exact route outcomes are covered at the controller/service seams. This evidence does not claim that a personal ChatGPT export, native file choice, or imported route has been exercised live.
 
-Imported routes start unverified and cannot be used for navigation. Set a verification tab key, then verify one catalog item from the Control Center or call `agentify_verify_catalog_conversation`. Agentify navigates directly to the claimed conversation and promotes the route only when the served ChatGPT conversation ID matches exactly. Not-found, forbidden, foreign-profile, login, challenge, and transport results are observations or failures; none means the provider conversation was deleted.
+Imported routes start unverified and cannot be used for navigation. Ask the agent to call `agentify_verify_catalog_conversation` with a verification tab key; the Control Center button is an optional fallback. Agentify navigates directly to the claimed conversation and promotes the route only when the served ChatGPT conversation ID matches exactly. Not-found, forbidden, foreign-profile, login, challenge, and transport results are observations or failures; none means the provider conversation was deleted.
 
-Control Center V0 shows the first 100 catalog rows for a scope; use paginated HTTP or MCP calls for later pages. A partial import can be resumed but not discarded in V0. Verification tabs are ordinary Agentify tabs: they appear in the main tab list and can be shown or hidden there.
+Use `agentify_list_chatgpt_catalog` for the normal paginated catalog workflow. The optional Control Center fallback shows only the first 100 rows for a scope. A partial import can be resumed but not discarded in V0. Verification tabs are ordinary Agentify tabs: they appear in the main tab list and can be shown or hidden there.
 
 ### Private storage, forgetting, and recovery
 
@@ -514,9 +518,9 @@ Library data lives under `~/.agentify-desktop/transcript-library/`, or under `$A
 
 `agentify_forget_transcript({ sourceId, confirm: true })` removes one tracked source from the active list and keeps a local deletion tombstone. The returned recovery location is a logical identifier only; V0 has no restore UI/API and no physical `local-trash` directory. It never deletes or edits the ChatGPT conversation. V0 does not garbage-collect shared immutable blobs, so forgetting a source is not a promise that every referenced local byte was erased.
 
-On Electron startup, an unfinished live capture becomes `interrupted` without advancing its prior latest snapshot. An unfinished import becomes a visible partial import with a resume position. Recovery is best-effort per store: if one library store cannot recover, Agentify still starts and unrelated tabs and queries remain usable while that library section reports unavailable. Catalogs created before the V2 capacity reservation load in place; re-select the same archive so the full preflight can reserve space before a suspended legacy import resumes. A legacy import above the current 20,000-record safety ceiling keeps its committed identities and snapshots as read-only history: an existing complete import stays complete, while any other state becomes partial. Startup can recognize an oversized import only when more than 20,000 records were already committed; a shorter prefix becomes read-only after re-selecting the exact same archive proves its full size. Control Center labels read-only history and offers neither Resume nor Reassign. Selecting a completed archive again is also safe.
+On Electron startup, an unfinished live capture becomes `interrupted` without advancing its prior latest snapshot. An unfinished import becomes a visible partial import with a resume position. Recovery is best-effort per store: if one library store cannot recover, Agentify still starts and unrelated tabs and queries remain usable while that library section reports unavailable. Catalogs created before the V2 capacity reservation load in place; re-select the same archive so the full preflight can reserve space before a suspended legacy import resumes. A legacy import above the current 20,000-record safety ceiling keeps its committed identities and snapshots as read-only history: an existing complete import stays complete, while any other state becomes partial. Startup can recognize an oversized import only when more than 20,000 records were already committed; a shorter prefix becomes read-only after re-selecting the exact same archive proves its full size. `agentify_list_chatgpt_imports` reports read-only and suspended import state without archive paths or record contents. The optional Control Center fallback labels read-only history and offers neither Resume nor Reassign. Selecting a completed archive again is also safe.
 
-Control Center disables source-row actions while a source is syncing or disabled. Restart Electron to recover a stale syncing attempt. The confirmed HTTP/MCP forget operation remains valid for a disabled source.
+The normal coding-agent workflow inspects source state with `agentify_list_transcripts` and import state with `agentify_list_chatgpt_imports`. The optional Control Center fallback disables source-row actions while a source is syncing or disabled. Restart Electron to recover a stale syncing attempt. The confirmed HTTP/MCP forget operation remains valid for a disabled source.
 
 Electron and the MCP server are separate long-lived processes and neither hot-reloads:
 
@@ -528,9 +532,9 @@ Electron and the MCP server are separate long-lived processes and neither hot-re
 
 ### V0 boundary and account risk
 
-V0 is manual: exact live tracking and sync, immutable paginated retrieval with citations, continuation into an existing live-bound thread, human-selected export import and recovery, direct route verification, Control Center status, and confirmed local source forgetting.
+V0 is manual and agent-led: exact live tracking and sync, immutable paginated retrieval with citations, continuation into an existing live-bound thread, human-selected export import and recovery, direct route verification, and confirmed local source forgetting happen through coding-agent tools. The native picker still requires the human to choose the ZIP. The Control Center remains a supported optional fallback.
 
-Deferred work is explicit. U8 sidebar reconciliation is not present: there is no sidebar discovery, scan, backfill, resurfacing logic, or deletion inference. U5 periodic provider synchronization is not present: there are no timed or background transcript captures. The Control Center receives content-free local change notifications after durable library mutations so import progress and changes made through HTTP or MCP become visible; those notifications never navigate to ChatGPT or start a sync. Export-request automation, embeddings, psychological classification, and audio-file archiving are also outside V0.
+Deferred work is explicit. U8 sidebar reconciliation is not present: there is no sidebar discovery, scan, backfill, resurfacing logic, or deletion inference. U5 periodic provider synchronization is not present: there are no timed or background transcript captures. When it is open, the optional Control Center fallback receives content-free local change notifications after durable library mutations so import progress and changes made through HTTP or MCP become visible; those notifications never navigate to ChatGPT or start a sync. Export-request automation, embeddings, psychological classification, and audio-file archiving are also outside V0.
 
 Transcript capture and route verification use the logged-in provider UI only when you request the operation. Agentify does not bypass login, challenges, rate limits, or other protective measures, and it cannot guarantee account safety. Review the account-risk boundary under [ChatGPT compatibility status](#chatgpt-compatibility-status) before using browser automation.
 
@@ -596,23 +600,23 @@ If you already had your client open, restart it (or start a new session) so it r
 
 ### MCP tool profiles
 
-Agentify exposes the complete 43-tool surface by default for compatibility. Coding agents usually need only the 10-tool core workflow:
+Agentify exposes the complete 46-tool surface by default for compatibility. Transcript Library conversations need the core and library profiles:
 
 ```bash
-node mcp-server.mjs --tool-profile core
+node mcp-server.mjs --tool-profile core,library
 ```
 
 Profiles compose with commas:
 
 ```bash
-node mcp-server.mjs --tool-profile core,browser
-AGENTIFY_MCP_TOOL_PROFILE=core,context node mcp-server.mjs
+node mcp-server.mjs --tool-profile core,library,browser
+AGENTIFY_MCP_TOOL_PROFILE=core,library,context node mcp-server.mjs
 ```
 
 Available profiles:
 
 - `core`: query, research, durable wait/snapshots, stop/status, page reading, and image generation.
-- `library`: ChatGPT export import, catalog listing and route verification, plus transcript track, sync, retrieval, and local forgetting.
+- `library`: native-picker ChatGPT export import, bounded import/recovery status, confirmed scope reassignment, catalog listing and route verification, plus transcript track, sync, retrieval, and local forgetting.
 - `browser`: navigation, readiness, window visibility, and tab controls.
 - `context`: watch folders, bundles, and artifact management.
 - `operations`: listing, opening, retrying, and archiving durable runs.

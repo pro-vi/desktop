@@ -11,6 +11,7 @@ import {
 } from '../chatgpt-compatibility.mjs';
 import { createCompatibilityStore } from '../compatibility-store.mjs';
 import { startHttpApi } from '../http-api.mjs';
+import { createProviderTabOperationLeases } from '../provider-tab-operation-leases.mjs';
 
 const profile = await loadChatGptCompatibilityProfile();
 const selectors = JSON.parse(await fs.readFile(new URL('../selectors.json', import.meta.url), 'utf8'));
@@ -149,6 +150,7 @@ test('terminal integration sentinel: artifact registration failure after DOM dis
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,

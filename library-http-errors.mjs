@@ -33,6 +33,7 @@ const TRANSCRIPT_HTTP_STATUS_BY_ERROR_CODE = createStatusMap([
   [409, [
     'key_vendor_mismatch',
     'owned_conversation_required',
+    'tab_busy',
     'tab_closed',
     'transcript_source_disabled',
     'transcript_source_exists',
@@ -88,6 +89,10 @@ const CATALOG_HTTP_STATUS_BY_ERROR_CODE = createStatusMap([
     'catalog_scope_invalid',
     'catalog_verification_key_invalid',
     'catalog_verification_timeout_invalid',
+    'export_grant_invalid',
+    'export_grant_selection_invalid',
+    'export_grant_symlink',
+    'export_grant_unreadable',
     'invalid_catalog_contract',
     'invalid_conversation_identity',
     'invalid_json',
@@ -111,7 +116,9 @@ const CATALOG_HTTP_STATUS_BY_ERROR_CODE = createStatusMap([
     'catalog_scope_conflict',
     'catalog_cursor_mismatch',
     'catalog_route_identity_mismatch',
-    'catalog_verification_identity_mismatch'
+    'catalog_verification_identity_mismatch',
+    'tab_busy',
+    'export_grant_moved'
   ]],
   [413, ['body_too_large']],
   [500, [
@@ -131,6 +138,9 @@ const CATALOG_HTTP_STATUS_BY_ERROR_CODE = createStatusMap([
     'catalog_store_schema_unsupported',
     'catalog_store_size_limit',
     'catalog_store_state_dir_required',
+    'export_grant_clock_invalid',
+    'export_grant_id_collision',
+    'export_grant_picker_failed',
     'library_blob_corrupt',
     'library_blob_hash_collision',
     'library_blob_hash_failure',

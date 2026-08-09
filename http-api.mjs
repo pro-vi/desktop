@@ -23,8 +23,15 @@ import {
 import {
   LIBRARY_LOCAL_ID_PATTERN,
   identityFromOwnedLocation,
+  parseProfileScopeId,
   sameConversationIdentity
 } from './conversation-identity.mjs';
+import {
+  parseImportCounts,
+  parseImportCursor,
+  parseIsoDateTime
+} from './conversation-catalog-contract.mjs';
+import { parseExportGrantId } from './export-import-grants.mjs';
 import { parseTranscriptSourceKey } from './transcript-source-contract.mjs';
 import {
   ensureArtifactsDir,
@@ -39,6 +46,7 @@ import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
 import { createRunStore } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
+import { providerTabOperationEvidence } from './provider-tab-operation-leases.mjs';
 import { isTerminalRunStatus } from './run-lifecycle.mjs';
 import { atomicWriteFile } from './fs-utils.mjs';
 import {
@@ -154,10 +162,12 @@ const TRANSCRIPT_REQUEST_KEYS = Object.freeze({
 });
 
 const CATALOG_REQUEST_KEYS = Object.freeze({
+  grant: Object.freeze(['profileScopeId']),
   import: Object.freeze(['grantId', 'profileScopeId']),
   verify: Object.freeze(['identity', 'key']),
   reassign: Object.freeze(['importId', 'newProfileScopeId', 'confirm'])
 });
+const MAX_CATALOG_IMPORT_SUMMARIES = 100;
 
 function isExactRecord(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -208,6 +218,64 @@ function transcriptRequestError(code = 'transcript_request_invalid') {
   const error = new Error(code);
   error.code = code;
   return error;
+}
+
+function safeExportGrantOutcome(value, expectedProfileScopeId) {
+  if (value?.status === 'cancelled') return { status: 'cancelled' };
+  try {
+    if (value?.status !== 'granted' || !value.grant || typeof value.grant !== 'object') {
+      throw new Error('invalid_grant_outcome');
+    }
+    const profileScopeId = parseProfileScopeId(value.grant.profileScopeId);
+    if (profileScopeId !== expectedProfileScopeId) throw new Error('grant_scope_mismatch');
+    return {
+      status: 'granted',
+      grant: {
+        grantId: parseExportGrantId(value.grant.grantId),
+        profileScopeId,
+        expiresAt: parseIsoDateTime(value.grant.expiresAt, 'grant.expiresAt')
+      }
+    };
+  } catch {
+    throw catalogRequestError('catalog_service_unavailable');
+  }
+}
+
+function safeCatalogImportSummary(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_import');
+    if (typeof value.id !== 'string' || !LIBRARY_LOCAL_ID_PATTERN.test(value.id)) throw new Error('invalid_import_id');
+    if (!['open', 'complete', 'partial'].includes(value.status)) throw new Error('invalid_import_status');
+    if (value.readOnlyReason !== null && value.readOnlyReason !== 'legacy-record-limit') {
+      throw new Error('invalid_read_only_reason');
+    }
+    const profileScopeId = parseProfileScopeId(value.assignment?.profileScopeId);
+    if (value.assignment?.confirmed !== true) throw new Error('unconfirmed_scope');
+    let suspension = null;
+    if (value.suspension !== null) {
+      if (!value.suspension || !['interrupted', 'scope-reassigned'].includes(value.suspension.reason)) {
+        throw new Error('invalid_suspension');
+      }
+      suspension = {
+        reason: value.suspension.reason,
+        observedAt: parseIsoDateTime(value.suspension.observedAt, 'suspension.observedAt')
+      };
+    }
+    return {
+      schemaVersion: 1,
+      importId: value.id,
+      profileScopeId,
+      status: value.status,
+      readOnlyReason: value.readOnlyReason,
+      cursor: parseImportCursor(value.cursor),
+      counts: parseImportCounts(value.counts),
+      suspension,
+      createdAt: parseIsoDateTime(value.createdAt, 'createdAt'),
+      updatedAt: parseIsoDateTime(value.updatedAt, 'updatedAt')
+    };
+  } catch {
+    throw catalogRequestError('catalog_service_unavailable');
+  }
 }
 
 function getTabIdFromUrl(url) {
@@ -441,6 +509,20 @@ function locationPatchForPersistence({ url = null, projectUrl = null, conversati
     } catch {}
   }
   return patch;
+}
+
+function advisoryTabIdForRequest({ tabs, defaultTabId, body, url, vendors = [], overrideKey = null }) {
+  const explicitTabId = (body?.tabId ? String(body.tabId).trim() : '') || getTabIdFromUrl(url) || null;
+  if (explicitTabId) return explicitTabId;
+  const key = trimOrNull(overrideKey) || trimOrNull(body?.key);
+  const rows = Array.isArray(tabs?.listTabs?.()) ? tabs.listTabs() : [];
+  if (key) return rows.find((item) => item?.key === key)?.id || null;
+  const explicitVendor = resolveVendor({ body, vendors });
+  if (!explicitVendor) return defaultTabId;
+  const defaultMeta = rows.find((item) => String(item?.id || '') === String(defaultTabId || '')) || null;
+  if (listedTabMatchesVendor(defaultMeta, explicitVendor)) return defaultTabId;
+  const vendorKey = `vendor:${explicitVendor.id}`;
+  return rows.find((item) => item?.key === vendorKey)?.id || null;
 }
 
 async function resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault = false, createIfMissing = true, vendors = [] }) {
@@ -841,8 +923,20 @@ export function startHttpApi({
   onRunsChanged,
   transcriptSync,
   transcriptRead,
-  catalogSync
+  catalogSync,
+  requestExportGrant,
+  providerTabOperations
 }) {
+  if (
+    typeof providerTabOperations?.assertAvailable !== 'function' ||
+    typeof providerTabOperations?.reserve !== 'function' ||
+    typeof providerTabOperations?.release !== 'function' ||
+    typeof providerTabOperations?.runWithOwner !== 'function'
+  ) {
+    const error = new Error('http_tab_operations_required');
+    error.code = 'http_tab_operations_required';
+    throw error;
+  }
   const tokenRef = typeof token === 'string' ? { current: token } : token;
 
   // Persistent key -> { projectUrl, conversationUrl, modeIntent } map.
@@ -1007,7 +1101,13 @@ export function startHttpApi({
     return matches[0];
   }
 
-  async function syncLiveTranscriptAfterQuery({ liveSourceId = null, key, conversationUrl, imageGeneration = false } = {}) {
+  async function syncLiveTranscriptAfterQuery({
+    liveSourceId = null,
+    key,
+    conversationUrl,
+    imageGeneration = false,
+    operationId = null
+  } = {}) {
     if (
       imageGeneration ||
       !liveSourceId ||
@@ -1021,7 +1121,12 @@ export function startHttpApi({
       return;
     }
     try {
-      await transcriptSync.sync(liveSourceId, 'post-query');
+      const syncOperation = async () => await transcriptSync.sync(liveSourceId, 'post-query');
+      if (operationId && typeof operationScopes.runWithOwner === 'function') {
+        await operationScopes.runWithOwner(operationId, syncOperation);
+      } else {
+        await syncOperation();
+      }
     } catch {}
   }
 
@@ -1079,8 +1184,8 @@ export function startHttpApi({
     maxSlots: 2,
     onChange: () => emitRuntimeChanged()
   });
+  const operationScopes = providerTabOperations;
   const activeQueries = new Map(); // tabId -> runtime status
-  const activeScopes = new Map(); // request scope -> runtime status
   const lastOutcomes = new Map(); // tabId -> last finished outcome
   const preProviderStops = new Map(); // runId -> local stop marker before provider send
   const lastQueryAt = new Map(); // tabId -> ms
@@ -1630,8 +1735,6 @@ export function startHttpApi({
     const rows = Array.isArray(tabs.listTabs?.()) ? tabs.listTabs() : [];
     const advisoryTab = run?.tabId ? rows.find((item) => String(item?.id || '') === String(run.tabId || '')) || null : null;
     if (advisoryTab) {
-      const patch = chatGptTabMetaPatch({ projectUrl: run?.projectUrl || null, modeIntent: run?.modeIntent || null, modelIntent: run?.modelIntent || null });
-      if (Object.keys(patch).length) tabs.updateTabMeta?.(advisoryTab.id, patch);
       return advisoryTab.id;
     }
     const vendorTab = vendor
@@ -1646,8 +1749,6 @@ export function startHttpApi({
       ) || null
       : null;
     if (vendorTab) {
-      const patch = chatGptTabMetaPatch({ projectUrl: run?.projectUrl || null, modeIntent: run?.modeIntent || null, modelIntent: run?.modelIntent || null });
-      if (Object.keys(patch).length) tabs.updateTabMeta?.(vendorTab.id, patch);
       return vendorTab.id;
     }
     if (vendor) {
@@ -2027,15 +2128,60 @@ export function startHttpApi({
   };
 
   const requestScopeForBody = (body, { overrideKey = null } = {}) => {
-    const tabId = body?.tabId ? String(body.tabId).trim() : '';
-    if (tabId) return `tab:${tabId}`;
     const key = trimOrNull(overrideKey) || (body?.key ? String(body.key).trim() : '');
     if (key) return `key:${key}`;
+    const tabId = body?.tabId ? String(body.tabId).trim() : '';
+    if (tabId) return `tab:${tabId}`;
     const vendorId = body?.vendorId ? String(body.vendorId).trim() : '';
     if (vendorId) return `vendor:${vendorId}`;
     const model = body?.model ? String(body.model).trim() : '';
     if (model) return `vendor:${model}`;
     return `tab:${defaultTabId}`;
+  };
+
+  const scopesForListedTab = (tabIdValue) => {
+    const tabId = trimOrNull(tabIdValue);
+    if (!tabId) return [];
+    const scopes = [`tab:${tabId}`];
+    const tabKey = trimOrNull(getTabMeta(tabs, tabId)?.key);
+    if (tabKey) scopes.push(`key:${tabKey}`);
+    return scopes;
+  };
+
+  const distinctScopes = (...groups) => Array.from(new Set(
+    groups.flat().filter((scope) => typeof scope === 'string' && scope.trim())
+  ));
+
+  const requestOperationScopes = (body, { overrideKey = null, requestUrl = null } = {}) => {
+    const scope = requestScopeForBody(body, { overrideKey });
+    const advisoryTabId = advisoryTabIdForRequest({
+      tabs,
+      defaultTabId,
+      body,
+      url: requestUrl,
+      vendors,
+      overrideKey
+    });
+    return {
+      scope,
+      advisoryTabId,
+      scopes: distinctScopes(scope, scopesForListedTab(advisoryTabId))
+    };
+  };
+
+  const reserveOperationScopes = ({ heldScopes, scopes, operation, tabId = null }) => {
+    const additions = distinctScopes(scopes).filter((scope) => !heldScopes.has(scope));
+    for (const scope of additions) assertScopeNotBusy(scope);
+    for (const scope of additions) {
+      if (reserveScope(scope, { ...operation, ...(tabId ? { tabId } : {}), scope }) === true) {
+        heldScopes.add(scope);
+      }
+    }
+  };
+
+  const releaseOperationScopes = (heldScopes, operationId) => {
+    for (const scope of heldScopes) clearScope(scope, operationId);
+    heldScopes.clear();
   };
 
   const assertTabNotBusy = (tabId) => {
@@ -2044,41 +2190,23 @@ export function startHttpApi({
     const err = new Error('tab_busy');
     err.data = {
       tabId,
-      activeQuery: { ...current }
+      activeQuery: providerTabOperationEvidence(current)
     };
     throw err;
   };
 
   const assertScopeNotBusy = (scope) => {
-    const current = activeScopes.get(scope);
-    if (!current) return;
-    const err = new Error('tab_busy');
-    err.data = {
-      scope,
-      activeQuery: { ...current }
-    };
-    throw err;
+    operationScopes.assertAvailable(scope);
   };
 
   const reserveScope = (scope, item) => {
     if (!scope || !item) return;
-    activeScopes.set(scope, { ...item });
+    return operationScopes.reserve(scope, item);
   };
 
   const clearScope = (scope, expectedId = null) => {
     if (!scope) return;
-    const current = activeScopes.get(scope);
-    if (!current) return;
-    if (expectedId && current.id !== expectedId) return;
-    activeScopes.delete(scope);
-  };
-
-  const clearScopesForRunId = (runId) => {
-    const id = String(runId || '').trim();
-    if (!id) return;
-    for (const [scope, item] of activeScopes.entries()) {
-      if (item?.id === id) activeScopes.delete(scope);
-    }
+    return operationScopes.release(scope, expectedId);
   };
 
   const patchActiveQuery = (tabId, patch) => {
@@ -2303,7 +2431,6 @@ export function startHttpApi({
       });
       clearActiveQuery(active.tabId, id);
     }
-    clearScope(active?.scope, id);
     await durableRunFinalizeFromOutcome(id, {
       status: 'stopped',
       label: 'Stopped',
@@ -2342,7 +2469,6 @@ export function startHttpApi({
       });
       clearActiveQuery(tabId, id);
     }
-    clearScopesForRunId(id);
     await durableRunFinalizeFromOutcome(id, {
       status: 'stopped',
       label: 'Stopped',
@@ -2480,21 +2606,60 @@ export function startHttpApi({
       modeIntent: run.modeIntent || run.logicalRequest?.modeIntent || savedMeta?.modeIntent || null,
       modelIntent: run.modelIntent || run.logicalRequest?.modelIntent || null
     };
-    const tabId = await resolveRunTab({ run: resolvedRun, show: false });
-    const patch = chatGptTabMetaPatch({ projectUrl: resolvedRun.projectUrl || null, modeIntent: resolvedRun.modeIntent || null, modelIntent: resolvedRun.modelIntent || null });
-    if (Object.keys(patch).length) tabs.updateTabMeta?.(tabId, patch);
-    const controller = tabs.getControllerById(tabId);
-    await runExclusive(controller, async () => {
-      await ensureRunLocation({
-        controller,
-        tabId,
-        timeoutMs,
-        conversationUrl: resolvedRun.conversationUrl || null,
-        projectUrl: resolvedRun.projectUrl || null
+    const scope = resolvedRun.key
+      ? `key:${resolvedRun.key}`
+      : resolvedRun.tabId
+        ? `tab:${resolvedRun.tabId}`
+        : resolvedRun.vendorId
+          ? `vendor:${resolvedRun.vendorId}`
+          : `run:${resolvedRun.id}`;
+    const rows = Array.isArray(tabs.listTabs?.()) ? tabs.listTabs() : [];
+    const runVendor = vendorForId(resolvedRun.vendorId);
+    const advisoryTabId = resolvedRun.key
+      ? (rows.find((item) => item?.key === resolvedRun.key)?.id || null)
+      : resolvedRun.tabId
+        ? (rows.find((item) => String(item?.id || '') === String(resolvedRun.tabId))?.id || null)
+        : runVendor
+          ? (rows.find((item) =>
+            listedTabMatchesVendor(item, runVendor) &&
+            listedTabMatchesModeIntent(item, resolvedRun.modeIntent || null) &&
+            (!resolvedRun.projectUrl || String(item?.projectUrl || '').trim() === String(resolvedRun.projectUrl).trim())
+          )?.id || null)
+          : null;
+    const initialScopes = distinctScopes(scope, scopesForListedTab(advisoryTabId));
+    const op = {
+      id: crypto.randomUUID(),
+      kind: 'open-run',
+      tabId: null,
+      startedAt: Date.now(),
+      source: 'ui',
+      phase: 'resolving_tab',
+      scope
+    };
+    const heldScopes = new Set();
+    reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+    let tabId = null;
+    try {
+      tabId = await resolveRunTab({ run: resolvedRun, show: false });
+      assertTabNotBusy(tabId);
+      reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
+      const patch = chatGptTabMetaPatch({ projectUrl: resolvedRun.projectUrl || null, modeIntent: resolvedRun.modeIntent || null, modelIntent: resolvedRun.modelIntent || null });
+      if (Object.keys(patch).length) tabs.updateTabMeta?.(tabId, patch);
+      const controller = tabs.getControllerById(tabId);
+      await runExclusive(controller, async () => {
+        await ensureRunLocation({
+          controller,
+          tabId,
+          timeoutMs,
+          conversationUrl: resolvedRun.conversationUrl || null,
+          projectUrl: resolvedRun.projectUrl || null
+        });
       });
-    });
-    if (show) await onShow?.({ tabId }).catch(() => {});
-    return { ok: true, tabId, run: resolvedRun };
+      if (show) await onShow?.({ tabId }).catch(() => {});
+      return { ok: true, tabId, run: resolvedRun };
+    } finally {
+      releaseOperationScopes(heldScopes, op.id);
+    }
   };
 
   const retryRunAction = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
@@ -2541,7 +2706,12 @@ export function startHttpApi({
         : original.tabId
           ? `tab:${original.tabId}`
           : `run:${original.id}`;
-    assertScopeNotBusy(scope);
+    const advisoryTabId = original.key
+      ? ((tabs.listTabs?.() || []).find((item) => item?.key === original.key)?.id || null)
+      : original.tabId
+        ? ((tabs.listTabs?.() || []).find((item) => String(item?.id || '') === String(original.tabId))?.id || null)
+        : null;
+    const initialScopes = distinctScopes(scope, scopesForListedTab(advisoryTabId));
     const op = {
       id: crypto.randomUUID(),
       kind: nextKind,
@@ -2556,10 +2726,12 @@ export function startHttpApi({
       blockedKind: null,
       scope
     };
-    reserveScope(scope, op);
+    const heldScopes = new Set();
+    reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
     let tabId = null;
     let runCreated = false;
     let outputDir = null;
+    let detachedRetryStarted = false;
     try {
       tabId = await resolveRunTab({
         run: {
@@ -2572,6 +2744,7 @@ export function startHttpApi({
         show
       });
       assertTabNotBusy(tabId);
+      reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
       let tabMeta = getTabMeta(tabs, tabId);
       if (hasLiveContinuation) assertLiveContinuationTab(liveContinuationSource, tabMeta);
       const retryTabPatch = chatGptTabMetaPatch({ projectUrl: originalProjectUrl, modeIntent: originalModeIntent, modelIntent: originalModelIntent });
@@ -2760,13 +2933,15 @@ export function startHttpApi({
       }, executeRetry);
 
       if (fireAndForget) {
+        detachedRetryStarted = true;
         runRetryWithLease().then(async (completed) => {
           if (nextKind === 'query') {
             await syncLiveTranscriptAfterQuery({
               liveSourceId,
               key: effectiveKey,
               conversationUrl: completed?.conversationUrl || null,
-              imageGeneration
+              imageGeneration,
+              operationId: op.id
             });
           }
           return completed;
@@ -2776,7 +2951,7 @@ export function startHttpApi({
           return durableRunFinalizeFromOutcome(op.id, outcome);
         }).finally(() => {
           clearActiveQuery(tabId, op.id);
-          clearScope(scope, op.id);
+          releaseOperationScopes(heldScopes, op.id);
         });
         return { ok: true, async: true, tabId, runId: op.id, retryOf: original.id };
       }
@@ -2787,7 +2962,8 @@ export function startHttpApi({
           liveSourceId,
           key: effectiveKey,
           conversationUrl: completed?.conversationUrl || null,
-          imageGeneration
+          imageGeneration,
+          operationId: op.id
         });
       }
       return { ok: true, tabId, runId: op.id, retryOf: original.id, result: completed?.result || null };
@@ -2799,10 +2975,10 @@ export function startHttpApi({
       }
       throw error;
     } finally {
-      if (!fireAndForget && tabId) {
-        clearActiveQuery(tabId, op.id);
+      if (!detachedRetryStarted) {
+        if (tabId) clearActiveQuery(tabId, op.id);
+        releaseOperationScopes(heldScopes, op.id);
       }
-      if (!fireAndForget) clearScope(scope, op.id);
     }
   };
 
@@ -2860,6 +3036,18 @@ export function startHttpApi({
       if (url.pathname === '/tabs' && req.method === 'GET') {
         return sendJson(res, 200, { ok: true, tabs: tabs.listTabs(), defaultTabId });
       }
+      if (url.pathname === '/catalog/export-grant' && req.method === 'POST') {
+        return await sendCatalogResponse(res, async () => {
+          if (url.search) throw catalogRequestError();
+          const body = await parseBody(req);
+          if (!isExactRecord(body, CATALOG_REQUEST_KEYS.grant) || typeof body.profileScopeId !== 'string') {
+            throw catalogRequestError();
+          }
+          if (typeof requestExportGrant !== 'function') throw catalogRequestError('catalog_service_unavailable');
+          const profileScopeId = parseProfileScopeId(body.profileScopeId);
+          return safeExportGrantOutcome(await requestExportGrant({ profileScopeId }), profileScopeId);
+        });
+      }
       if (url.pathname === '/catalog/import' && req.method === 'POST') {
         return await sendCatalogResponse(res, async () => {
           if (url.search) throw catalogRequestError();
@@ -2909,6 +3097,23 @@ export function startHttpApi({
           return await catalogSync.reassignImportScope(body);
         });
       }
+      if (url.pathname === '/catalog/imports' && req.method === 'GET') {
+        return await sendCatalogResponse(res, async () => {
+          if (url.search) throw catalogRequestError();
+          if (!catalogSync || typeof catalogSync.listImports !== 'function') {
+            throw catalogRequestError('catalog_service_unavailable');
+          }
+          const imports = await catalogSync.listImports();
+          if (!Array.isArray(imports)) throw catalogRequestError('catalog_service_unavailable');
+          const summaries = imports
+            .map(safeCatalogImportSummary)
+            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+          return {
+            items: summaries.slice(0, MAX_CATALOG_IMPORT_SUMMARIES),
+            truncated: summaries.length > MAX_CATALOG_IMPORT_SUMMARIES
+          };
+        });
+      }
       if (url.pathname === '/catalog/list' && req.method === 'GET') {
         return await sendCatalogResponse(res, async () => {
           if (!catalogSync || typeof catalogSync.list !== 'function') {
@@ -2944,46 +3149,73 @@ export function startHttpApi({
             throw transcriptRequestError();
           }
           if (!transcriptSync || typeof transcriptSync.track !== 'function') throw transcriptRequestError('transcript_service_unavailable');
-          const tabId = await resolveTab({
+          const scope = `key:${body.key}`;
+          const advisoryTabId = advisoryTabIdForRequest({
             tabs,
             defaultTabId,
             body: { key: body.key },
             url,
-            showTabsByDefault: governor.showTabsByDefault,
-            createIfMissing: false,
             vendors
           });
-          const controller = tabs.getControllerById(tabId);
-          const tabMeta = getTabMeta(tabs, tabId);
-          if (normalizeVendorToken(tabMeta?.vendorId) !== 'chatgpt') {
-            throw transcriptRequestError('owned_conversation_required');
-          }
-          if (
-            !controller ||
-            typeof controller.runExclusive !== 'function' ||
-            typeof controller.getUrl !== 'function'
-          ) {
-            throw transcriptRequestError('transcript_controller_unavailable');
-          }
-          const currentUrl = await runExclusive(controller, async () => await controller.getUrl());
-          let target;
-          try {
-            target = parseChatGptEntryTarget(currentUrl);
-          } catch {
-            throw transcriptRequestError('owned_conversation_required');
-          }
-          if (target?.kind !== 'canonical-conversation') {
-            throw transcriptRequestError('owned_conversation_required');
-          }
-          const location = locationFromConversationUrl(target.chatUrl);
-          const identity = identityFromOwnedLocation(body.profileScopeId, location);
-          return await transcriptSync.track({
-            label: body.label,
-            tags: body.tags,
+          const initialScopes = distinctScopes(scope, scopesForListedTab(advisoryTabId));
+          const op = {
+            id: crypto.randomUUID(),
+            kind: 'transcript-track',
+            tabId: null,
             key: body.key,
-            identity,
-            location
-          });
+            startedAt: Date.now(),
+            source: requestSourceForBody(body),
+            phase: 'resolving_tab',
+            scope
+          };
+          const heldScopes = new Set();
+          reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+          try {
+            const tabId = await resolveTab({
+              tabs,
+              defaultTabId,
+              body: { key: body.key },
+              url,
+              showTabsByDefault: governor.showTabsByDefault,
+              createIfMissing: false,
+              vendors
+            });
+            assertTabNotBusy(tabId);
+            reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
+            const controller = tabs.getControllerById(tabId);
+            const tabMeta = getTabMeta(tabs, tabId);
+            if (normalizeVendorToken(tabMeta?.vendorId) !== 'chatgpt') {
+              throw transcriptRequestError('owned_conversation_required');
+            }
+            if (
+              !controller ||
+              typeof controller.runExclusive !== 'function' ||
+              typeof controller.getUrl !== 'function'
+            ) {
+              throw transcriptRequestError('transcript_controller_unavailable');
+            }
+            const currentUrl = await runExclusive(controller, async () => await controller.getUrl());
+            let target;
+            try {
+              target = parseChatGptEntryTarget(currentUrl);
+            } catch {
+              throw transcriptRequestError('owned_conversation_required');
+            }
+            if (target?.kind !== 'canonical-conversation') {
+              throw transcriptRequestError('owned_conversation_required');
+            }
+            const location = locationFromConversationUrl(target.chatUrl);
+            const identity = identityFromOwnedLocation(body.profileScopeId, location);
+            return await transcriptSync.track({
+              label: body.label,
+              tags: body.tags,
+              key: body.key,
+              identity,
+              location
+            });
+          } finally {
+            releaseOperationScopes(heldScopes, op.id);
+          }
         });
       }
       if (url.pathname === '/transcripts/sync' && req.method === 'POST') {
@@ -3146,17 +3378,35 @@ export function startHttpApi({
         const body = await parseBody(req);
         const to = String(body.url || '').trim();
         if (!to) return sendJson(res, 400, { error: 'missing_url' });
-        const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
-        const controller = tabs.getControllerById(tabId);
-        await runExclusive(controller, async () => controller.navigate(to));
-        const currentUrl = await controller.getUrl();
-        const tabMeta = getTabMeta(tabs, tabId);
-        const tabKey = (body.key ? String(body.key).trim() : '') || tabMeta?.key || null;
-        const persistedLocation = tabKey
-          ? await persistKeyLocation(tabKey, { url: currentUrl, projectUrl: tabMeta?.projectUrl || null })
-          : null;
-        if (persistedLocation?.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: persistedLocation.projectUrl });
-        return sendJson(res, 200, { ok: true, tabId, url: currentUrl });
+        const { scope, scopes: initialScopes } = requestOperationScopes(body, { requestUrl: url });
+        const op = {
+          id: crypto.randomUUID(),
+          kind: 'navigate',
+          tabId: null,
+          startedAt: Date.now(),
+          source: requestSourceForBody(body),
+          phase: 'resolving_tab',
+          scope
+        };
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+        try {
+          const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
+          assertTabNotBusy(tabId);
+          reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
+          const controller = tabs.getControllerById(tabId);
+          await runExclusive(controller, async () => controller.navigate(to));
+          const currentUrl = await controller.getUrl();
+          const tabMeta = getTabMeta(tabs, tabId);
+          const tabKey = (body.key ? String(body.key).trim() : '') || tabMeta?.key || null;
+          const persistedLocation = tabKey
+            ? await persistKeyLocation(tabKey, { url: currentUrl, projectUrl: tabMeta?.projectUrl || null })
+            : null;
+          if (persistedLocation?.projectUrl) tabs.updateTabMeta?.(tabId, { projectUrl: persistedLocation.projectUrl });
+          return sendJson(res, 200, { ok: true, tabId, url: currentUrl });
+        } finally {
+          releaseOperationScopes(heldScopes, op.id);
+        }
       }
 
       if (url.pathname === '/ensure-ready' && req.method === 'POST') {
@@ -3195,21 +3445,10 @@ export function startHttpApi({
         const projectUrl = chatProfile.projectUrl;
         const savedConversationUrl = chatProfile.conversationUrl;
         const modeIntent = chatProfile.modeIntent;
-        const scope = requestScopeForBody(researchBody, { overrideKey: chatProfile.requestedKey });
-        assertScopeNotBusy(scope);
-        const advisoryTabId = body?.tabId
-          ? String(body.tabId).trim() || null
-          : tabKey
-            ? (() => {
-              const existing = (tabs.listTabs?.() || []).find((item) => item?.key === tabKey) || null;
-              return normalizeVendorToken(existing?.vendorId || '') === 'chatgpt' ? existing.id : null;
-            })()
-            : (() => {
-              const defaultMeta = getTabMeta(tabs, defaultTabId);
-              return normalizeVendorToken(defaultMeta?.vendorId || '') === 'chatgpt' ? defaultMeta.id : null;
-            })();
-        const advisoryTabScope = advisoryTabId && `tab:${advisoryTabId}` !== scope ? `tab:${advisoryTabId}` : null;
-        if (advisoryTabScope) assertScopeNotBusy(advisoryTabScope);
+        const { scope, scopes: initialScopes } = requestOperationScopes(researchBody, {
+          overrideKey: chatProfile.requestedKey,
+          requestUrl: url
+        });
         const op = {
           id: crypto.randomUUID(),
           kind: 'research',
@@ -3224,8 +3463,9 @@ export function startHttpApi({
           blockedKind: null,
           scope
         };
-        reserveScope(scope, op);
-        if (advisoryTabScope) reserveScope(advisoryTabScope, op);
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+        let detachedResearchStarted = false;
         try {
           const researchPersistPatch = chatGptPersistedMetaPatch({
             projectUrl: trimOrNull(body.projectUrl),
@@ -3261,9 +3501,9 @@ export function startHttpApi({
             researchMeta: defaultResearchMeta({ tabId: op.tabId || null })
           });
 
+          detachedResearchStarted = true;
           void (async () => {
           let tabId = null;
-          let resolvedTabScope = null;
           try {
             tabId = await resolveTab({
               tabs,
@@ -3275,11 +3515,7 @@ export function startHttpApi({
               vendors
             });
             assertTabNotBusy(tabId);
-            resolvedTabScope = tabId ? `tab:${tabId}` : null;
-            if (resolvedTabScope && resolvedTabScope !== scope && resolvedTabScope !== advisoryTabScope) {
-              assertScopeNotBusy(resolvedTabScope);
-              reserveScope(resolvedTabScope, { ...op, tabId, scope: resolvedTabScope });
-            }
+            reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
             let tabMeta = assertResearchTab(tabId);
             const researchTabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
             if (Object.keys(researchTabPatch).length) tabs.updateTabMeta?.(tabId, researchTabPatch);
@@ -3395,9 +3631,7 @@ export function startHttpApi({
             await durableRunFinalizeFromOutcome(op.id, outcome);
           } finally {
             if (tabId) clearActiveQuery(tabId, op.id);
-            clearScope(scope, op.id);
-            if (advisoryTabScope) clearScope(advisoryTabScope, op.id);
-            if (resolvedTabScope) clearScope(resolvedTabScope, op.id);
+            releaseOperationScopes(heldScopes, op.id);
           }
           })();
 
@@ -3409,10 +3643,8 @@ export function startHttpApi({
             key: tabKey || null,
             tabId: op.tabId || null
           });
-        } catch (error) {
-          clearScope(scope, op.id);
-          if (advisoryTabScope) clearScope(advisoryTabScope, op.id);
-          throw error;
+        } finally {
+          if (!detachedResearchStarted) releaseOperationScopes(heldScopes, op.id);
         }
       }
 
@@ -3472,8 +3704,10 @@ export function startHttpApi({
           })
           : null;
         const requestedKey = chatProfile?.requestedKey || tabKey;
-        const scope = requestScopeForBody(body, { overrideKey: requestedKey });
-        assertScopeNotBusy(scope);
+        const { scope, scopes: initialScopes } = requestOperationScopes(body, {
+          overrideKey: requestedKey,
+          requestUrl: url
+        });
         const savedMeta = getPersistedKeyMeta(requestedKey);
         const projectUrl = chatProfile
           ? chatProfile.projectUrl
@@ -3499,13 +3733,16 @@ export function startHttpApi({
           blockedKind: null,
           scope
         };
-        reserveScope(scope, op);
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
         let tabId = null;
         let runCreated = false;
+        let detachedQueryStarted = false;
         try {
           const resolutionBody = requestedKey && !tabKey ? { ...body, key: requestedKey } : body;
           tabId = await resolveTab({ tabs, defaultTabId, body: resolutionBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
+          reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
           const tabMeta = getTabMeta(tabs, tabId);
           if (hasLiveSourceId) assertLiveContinuationTab(liveContinuationSource, tabMeta);
           const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
@@ -3723,12 +3960,14 @@ export function startHttpApi({
 
             if (fireAndForget) {
               const tabMeta = getTabMeta(tabs, tabId);
+              detachedQueryStarted = true;
               runQueryWithLease().then(async (completed) => {
                 await syncLiveTranscriptAfterQuery({
                   liveSourceId,
                   key: effectiveKey,
                   conversationUrl: completed?.conversationUrl || null,
-                  imageGeneration
+                  imageGeneration,
+                  operationId: op.id
                 });
                 return completed;
               }).catch((error) => {
@@ -3737,7 +3976,7 @@ export function startHttpApi({
                 return durableRunFinalizeFromOutcome(op.id, outcome);
               }).finally(() => {
                 clearActiveQuery(tabId, op.id);
-                clearScope(scope, op.id);
+                releaseOperationScopes(heldScopes, op.id);
               });
               return sendJson(res, 202, {
                 ok: true,
@@ -3755,7 +3994,8 @@ export function startHttpApi({
               liveSourceId,
               key: effectiveKey,
               conversationUrl: completed?.conversationUrl || null,
-              imageGeneration
+              imageGeneration,
+              operationId: op.id
             });
             return sendJson(res, 200, {
               ok: true,
@@ -3772,13 +4012,12 @@ export function startHttpApi({
             setLastOutcome(tabId, outcome);
             if (runCreated) await durableRunFinalizeFromOutcome(op.id, outcome);
             throw error;
-          } finally {
-            if (!fireAndForget) {
-              clearActiveQuery(tabId, op.id);
-            }
           }
         } finally {
-          if (!fireAndForget) clearScope(scope, op.id);
+          if (!detachedQueryStarted) {
+            if (tabId) clearActiveQuery(tabId, op.id);
+            releaseOperationScopes(heldScopes, op.id);
+          }
         }
       }
 
@@ -3800,8 +4039,10 @@ export function startHttpApi({
         const tabKey = (body.key ? String(body.key).trim() : '') ||
           (!body?.tabId && suppliedChatUrl ? derivedChatKey(suppliedChatUrl) : null);
         const sendBody = tabKey && !body.key ? { ...body, key: tabKey } : body;
-        const scope = requestScopeForBody(sendBody, { overrideKey: tabKey });
-        assertScopeNotBusy(scope);
+        const { scope, scopes: initialScopes } = requestOperationScopes(sendBody, {
+          overrideKey: tabKey,
+          requestUrl: url
+        });
         const stopAfterSend = !!body.stopAfterSend;
         const op = {
           id: crypto.randomUUID(),
@@ -3817,12 +4058,14 @@ export function startHttpApi({
           blockedKind: null,
           scope
         };
-        reserveScope(scope, op);
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
         let tabId = null;
         let runCreated = false;
         try {
           tabId = await resolveTab({ tabs, defaultTabId, body: sendBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
+          reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
           op.tabId = tabId;
           const tabMeta = getTabMeta(tabs, tabId);
           const effectiveKey = tabKey || tabMeta?.key || null;
@@ -3946,7 +4189,7 @@ export function startHttpApi({
           throw error;
         } finally {
           if (tabId) clearActiveQuery(tabId, op.id);
-          clearScope(scope, op.id);
+          releaseOperationScopes(heldScopes, op.id);
         }
       }
 
@@ -4108,23 +4351,41 @@ export function startHttpApi({
         await projectsReady;
         const body = await parseBody(req);
         const maxChars = positiveIntOr(body.maxChars, 200_000, 1_000_000);
-        const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
-        const controller = tabs.getControllerById(tabId);
-        const tabKey = (body.key ? String(body.key).trim() : '') || getTabMeta(tabs, tabId)?.key || null;
-        const text = await runExclusive(controller, async () => {
-          // If tab is on base URL after restart, navigate to saved conversation
-          if (tabKey && typeof controller.getUrl === 'function') {
-            const currentUrl = await controller.getUrl().catch(() => '');
-            const meta = getPersistedKeyMeta(tabKey);
-            if (meta?.conversationUrl && meta.conversationUrl !== currentUrl &&
-                (currentUrl === 'https://chatgpt.com/' || currentUrl === 'about:blank' || !currentUrl)) {
-              await controller.navigate(meta.conversationUrl);
-              await controller.ensureReady({ timeoutMs: 30_000 });
+        const { scope, scopes: initialScopes } = requestOperationScopes(body, { requestUrl: url });
+        const op = {
+          id: crypto.randomUUID(),
+          kind: 'read-page',
+          tabId: null,
+          startedAt: Date.now(),
+          source: requestSourceForBody(body),
+          phase: 'resolving_tab',
+          scope
+        };
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+        try {
+          const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
+          assertTabNotBusy(tabId);
+          reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
+          const controller = tabs.getControllerById(tabId);
+          const tabKey = (body.key ? String(body.key).trim() : '') || getTabMeta(tabs, tabId)?.key || null;
+          const text = await runExclusive(controller, async () => {
+            // If tab is on base URL after restart, navigate to saved conversation
+            if (tabKey && typeof controller.getUrl === 'function') {
+              const currentUrl = await controller.getUrl().catch(() => '');
+              const meta = getPersistedKeyMeta(tabKey);
+              if (meta?.conversationUrl && meta.conversationUrl !== currentUrl &&
+                  (currentUrl === 'https://chatgpt.com/' || currentUrl === 'about:blank' || !currentUrl)) {
+                await controller.navigate(meta.conversationUrl);
+                await controller.ensureReady({ timeoutMs: 30_000 });
+              }
             }
-          }
-          return controller.readPageText({ maxChars });
-        });
-        return sendJson(res, 200, { ok: true, tabId, text });
+            return controller.readPageText({ maxChars });
+          });
+          return sendJson(res, 200, { ok: true, tabId, text });
+        } finally {
+          releaseOperationScopes(heldScopes, op.id);
+        }
       }
 
       if (url.pathname === '/read-conversation' && req.method === 'POST') {
@@ -4136,16 +4397,34 @@ export function startHttpApi({
         // supplied conversation cannot append a turn to it. Parse before resolving
         // a tab so an unusable URL fails without creating one.
         const entryTarget = body.chatUrl ? parseChatGptEntryTarget(body.chatUrl) : null;
-        const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
-        const controller = tabs.getControllerById(tabId);
-        if (typeof controller?.readConversationText !== 'function') {
-          return sendJson(res, 501, { error: 'conversation_read_unsupported' });
+        const { scope, scopes: initialScopes } = requestOperationScopes(body, { requestUrl: url });
+        const op = {
+          id: crypto.randomUUID(),
+          kind: 'read-conversation',
+          tabId: null,
+          startedAt: Date.now(),
+          source: requestSourceForBody(body),
+          phase: 'resolving_tab',
+          scope
+        };
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+        try {
+          const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
+          assertTabNotBusy(tabId);
+          reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
+          const controller = tabs.getControllerById(tabId);
+          if (typeof controller?.readConversationText !== 'function') {
+            return sendJson(res, 501, { error: 'conversation_read_unsupported' });
+          }
+          const capture = await runExclusive(controller, async () => {
+            if (entryTarget) await controller.prepareChatEntry({ chatUrl: entryTarget.chatUrl });
+            return await controller.readConversationText({ maxChars });
+          });
+          return sendJson(res, 200, { ok: true, tabId, ...capture });
+        } finally {
+          releaseOperationScopes(heldScopes, op.id);
         }
-        const capture = await runExclusive(controller, async () => {
-          if (entryTarget) await controller.prepareChatEntry({ chatUrl: entryTarget.chatUrl });
-          return await controller.readConversationText({ maxChars });
-        });
-        return sendJson(res, 200, { ok: true, tabId, ...capture });
       }
 
       if (url.pathname === '/download-images' && req.method === 'POST') {

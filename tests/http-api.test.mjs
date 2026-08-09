@@ -6,6 +6,15 @@ import fs from 'node:fs/promises';
 
 import { startHttpApi } from '../http-api.mjs';
 import { writeProjects } from '../state.mjs';
+import { identityFromOwnedLocation } from '../conversation-identity.mjs';
+import { locationFromConversationUrl } from '../chatgpt-location.mjs';
+import { createPrivateLibraryBlobStore } from '../library-blob-store.mjs';
+import { createProviderTabOperationLeases } from '../provider-tab-operation-leases.mjs';
+import { createTranscriptStore } from '../transcript-store.mjs';
+import {
+  createChatGptTranscriptCapture,
+  createTranscriptSyncService
+} from '../transcript-sync.mjs';
 
 async function req({ port, token, method, pth, body, headers = {} }) {
   const res = await fetch(`http://127.0.0.1:${port}${pth}`, {
@@ -31,9 +40,50 @@ async function waitFor(check, { timeoutMs = 1_000, intervalMs = 10 } = {}) {
   throw new Error('wait_for_timeout');
 }
 
+test('http-api: requires the shared provider tab operation coordinator', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-required-tab-operations-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const tabs = {
+    listTabs: () => [],
+    ensureTab: async () => 't1',
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: () => ({})
+  };
+  const options = {
+    port: 0,
+    token: 't',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-required-tab-operations',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  };
+  const unexpectedServers = [];
+  try {
+    for (const providerTabOperations of [undefined, {}]) {
+      assert.throws(() => {
+        unexpectedServers.push(startHttpApi({ ...options, providerTabOperations }));
+      }, (error) => {
+        assert.equal(error?.code, 'http_tab_operations_required');
+        assert.equal(error?.message, 'http_tab_operations_required');
+        return true;
+      });
+    }
+  } finally {
+    await Promise.all(unexpectedServers.map(async (server) => {
+      await new Promise((resolve) => {
+        if (server.listening) return server.close(resolve);
+        server.once('listening', () => server.close(resolve));
+      });
+    }));
+  }
+});
+
 test('http-api: health is public and returns serverId', async (t) => {
   const tabs = { listTabs: () => [], ensureTab: async () => 't1', createTab: async () => 't1', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 't',
     tabs,
@@ -54,6 +104,7 @@ test('http-api: health is public and returns serverId', async (t) => {
 test('http-api: rejects unauthorized', async (t) => {
   const tabs = { listTabs: () => [], ensureTab: async () => 't1', createTab: async () => 't1', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -68,6 +119,56 @@ test('http-api: rejects unauthorized', async (t) => {
   const { res, data } = await req({ port, method: 'GET', pth: '/status' });
   assert.equal(res.status, 401);
   assert.equal(data.error, 'unauthorized');
+});
+
+test('http-api: releases only operation scopes that reserve reports as acquired', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-unowned-operation-scope-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const releaseCalls = [];
+  const providerTabOperations = {
+    assertAvailable: () => {},
+    reserve: () => false,
+    release: (...args) => {
+      releaseCalls.push(args);
+      return false;
+    },
+    runWithOwner: async (_operationId, operation) => await operation()
+  };
+  const controller = {
+    runExclusive: async (operation) => await operation(),
+    navigate: async () => {},
+    getUrl: async () => 'https://chatgpt.com/'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't1', key: 'scope-key', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't1',
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-unowned-operation-scope',
+    stateDir,
+    providerTabOperations,
+    getSettings: async () => ({ showTabsByDefault: false })
+  });
+  t.after(async () => {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  });
+
+  const result = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/navigate',
+    body: { key: 'scope-key', url: 'https://chatgpt.com/' }
+  });
+  assert.equal(result.res.status, 200);
+  assert.deepEqual(releaseCalls, []);
 });
 
 async function startTranscriptHttp(t, {
@@ -96,6 +197,7 @@ async function startTranscriptHttp(t, {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -110,7 +212,7 @@ async function startTranscriptHttp(t, {
   return { port: server.address().port, state, tabs };
 }
 
-async function startCatalogHttp(t, catalogSync) {
+async function startCatalogHttp(t, catalogSync, { requestExportGrant } = {}) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-catalog-'));
   const tabs = {
     listTabs: () => [],
@@ -120,6 +222,7 @@ async function startCatalogHttp(t, catalogSync) {
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -127,6 +230,7 @@ async function startCatalogHttp(t, catalogSync) {
     serverId: 'sid-catalog',
     stateDir,
     catalogSync,
+    requestExportGrant,
     getSettings: async () => ({ showTabsByDefault: false })
   });
   t.after(async () => {
@@ -412,6 +516,7 @@ test('http-api: transcript service states have stable content-free HTTP mappings
     ['/transcripts/track', { ...trackBase, label: 'transcript_source_exists' }, 409, 'transcript_source_exists'],
     ['/transcripts/track', { ...trackBase, label: 'transcript_source_key_exists' }, 409, 'transcript_source_key_exists'],
     ['/transcripts/sync', { sourceId: 'transcript_sync_active' }, 409, 'transcript_sync_active'],
+    ['/transcripts/sync', { sourceId: 'tab_busy' }, 409, 'tab_busy'],
     ['/transcripts/sync', { sourceId: 'transcript_source_disabled' }, 409, 'transcript_source_disabled'],
     ['/transcripts/sync', { sourceId: 'transcript_source_not_found' }, 404, 'transcript_source_not_found'],
     ['/transcripts/forget', { sourceId: 'transcript_sync_active', confirm: true }, 409, 'transcript_sync_active'],
@@ -540,7 +645,38 @@ test('http-api: catalog routes require auth and round-trip every closed outcome 
     profileScopeId: 'profile-other',
     cursor: { schemaVersion: 1, recordIndex: 0 }
   };
+  const exportGrant = {
+    status: 'granted',
+    grant: {
+      grantId: 'grant-picker-1',
+      displayName: 'private-export.zip',
+      profileScopeId: 'profile-main',
+      expiresAt: '2026-07-31T12:10:00.000Z'
+    }
+  };
+  const importSummary = {
+    schemaVersion: 2,
+    id: 'import-complete',
+    manifest: {
+      archiveHash: 'd'.repeat(64),
+      layout: 'single-conversations-json',
+      accountHint: null
+    },
+    assignment: { profileScopeId: 'profile-main', confirmed: true },
+    readOnlyReason: null,
+    status: 'complete',
+    cursor: { schemaVersion: 1, recordIndex: 1 },
+    counts: { recordsSeen: 1, cataloged: 1, snapshots: 1, problems: 0 },
+    problems: [],
+    suspension: null,
+    createdAt: '2026-07-31T12:00:00.000Z',
+    updatedAt: '2026-07-31T12:01:00.000Z'
+  };
   const calls = [];
+  const requestExportGrant = async (request) => {
+    calls.push(['grant', request]);
+    return exportGrant;
+  };
   const catalogSync = {
     importExport: async (request) => {
       calls.push(['import', request]);
@@ -557,15 +693,21 @@ test('http-api: catalog routes require auth and round-trip every closed outcome 
     list: async (request) => {
       calls.push(['list', request]);
       return page;
+    },
+    listImports: async () => {
+      calls.push(['imports']);
+      return [importSummary];
     }
   };
-  const { port } = await startCatalogHttp(t, catalogSync);
+  const { port } = await startCatalogHttp(t, catalogSync, { requestExportGrant });
 
   const unauthorizedRequests = [
+    { method: 'POST', pth: '/catalog/export-grant', body: { profileScopeId: 'profile-main' } },
     { method: 'POST', pth: '/catalog/import', body: { grantId: 'grant-complete', profileScopeId: 'profile-main' } },
     { method: 'POST', pth: '/catalog/verify', body: { identity: catalogIdentity, key: 'verify-key' } },
     { method: 'POST', pth: '/catalog/reassign', body: { importId: 'import-complete', newProfileScopeId: 'profile-other', confirm: true } },
-    { method: 'GET', pth: '/catalog/list?profileScopeId=profile-main' }
+    { method: 'GET', pth: '/catalog/list?profileScopeId=profile-main' },
+    { method: 'GET', pth: '/catalog/imports' }
   ];
   for (const request of unauthorizedRequests) {
     const result = await req({ port, ...request });
@@ -573,6 +715,24 @@ test('http-api: catalog routes require auth and round-trip every closed outcome 
     assert.deepEqual(result.data, { error: 'unauthorized' }, request.pth);
   }
   assert.deepEqual(calls, []);
+
+  const grantResult = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/catalog/export-grant',
+    body: { profileScopeId: 'profile-main' }
+  });
+  assert.equal(grantResult.res.status, 200);
+  assert.deepEqual(grantResult.data, {
+    status: 'granted',
+    grant: {
+      grantId: 'grant-picker-1',
+      profileScopeId: 'profile-main',
+      expiresAt: '2026-07-31T12:10:00.000Z'
+    }
+  });
+  assert.deepEqual(calls.at(-1), ['grant', { profileScopeId: 'profile-main' }]);
 
   for (const [grantId, expected] of importOutcomes) {
     const request = { grantId, profileScopeId: 'profile-main' };
@@ -617,6 +777,25 @@ test('http-api: catalog routes require auth and round-trip every closed outcome 
   assert.deepEqual(reassignResult.data, reassignment);
   assert.deepEqual(calls.at(-1), ['reassign', reassignRequest]);
 
+  const importsResult = await req({ port, token: 'secret', method: 'GET', pth: '/catalog/imports' });
+  assert.equal(importsResult.res.status, 200);
+  assert.deepEqual(importsResult.data, {
+    items: [{
+      schemaVersion: 1,
+      importId: 'import-complete',
+      profileScopeId: 'profile-main',
+      status: 'complete',
+      readOnlyReason: null,
+      cursor: { schemaVersion: 1, recordIndex: 1 },
+      counts: { recordsSeen: 1, cataloged: 1, snapshots: 1, problems: 0 },
+      suspension: null,
+      createdAt: '2026-07-31T12:00:00.000Z',
+      updatedAt: '2026-07-31T12:01:00.000Z'
+    }],
+    truncated: false
+  });
+  assert.deepEqual(calls.at(-1), ['imports']);
+
   const listResult = await req({
     port,
     token: 'secret',
@@ -634,6 +813,10 @@ test('http-api: catalog routes require auth and round-trip every closed outcome 
 
 test('http-api: catalog request bodies and list query parameters are exact', async (t) => {
   const calls = [];
+  const requestExportGrant = async (request) => {
+    calls.push(['grant', request]);
+    return { status: 'cancelled' };
+  };
   const catalogSync = {
     importExport: async (request) => { calls.push(['import', request]); return { status: 'rejected', reason: 'not-a-zip' }; },
     verifyByNavigation: async (identity, key) => { calls.push(['verify', identity, key]); return { status: 'failed', reason: 'transport' }; },
@@ -644,15 +827,19 @@ test('http-api: catalog request bodies and list query parameters are exact', asy
       }
       return { ok: true };
     },
-    list: async (request) => { calls.push(['list', request]); return { items: [], nextCursor: null }; }
+    list: async (request) => { calls.push(['list', request]); return { items: [], nextCursor: null }; },
+    listImports: async () => { calls.push(['imports']); return []; }
   };
-  const { port } = await startCatalogHttp(t, catalogSync);
+  const { port } = await startCatalogHttp(t, catalogSync, { requestExportGrant });
   const catalogIdentity = {
     provider: 'chatgpt',
     profileScopeId: 'profile-main',
     providerConversationId: 'catalog-thread-123'
   };
   const invalidRequests = [
+    ['/catalog/export-grant', {}],
+    ['/catalog/export-grant', { profileScopeId: 'profile-main', path: '/private/export.zip' }],
+    ['/catalog/export-grant', { profileScopeId: 1 }],
     ['/catalog/import', { grantId: 'grant-1' }],
     ['/catalog/import', { grantId: 'grant-1', profileScopeId: 'profile-main', path: '/private/export.zip' }],
     ['/catalog/import', { grantId: 1, profileScopeId: 'profile-main' }],
@@ -668,11 +855,14 @@ test('http-api: catalog request bodies and list query parameters are exact', asy
     assert.deepEqual(result.data, { error: 'catalog_request_invalid' });
   }
   for (const pth of [
+    '/catalog/export-grant?extra=true',
     '/catalog/import?extra=true',
     '/catalog/verify?extra=true',
     '/catalog/reassign?extra=true'
   ]) {
-    const body = pth.startsWith('/catalog/import')
+    const body = pth.startsWith('/catalog/export-grant')
+      ? { profileScopeId: 'profile-main' }
+      : pth.startsWith('/catalog/import')
       ? { grantId: 'grant-1', profileScopeId: 'profile-main' }
       : pth.startsWith('/catalog/verify')
         ? { identity: catalogIdentity, key: 'route-key' }
@@ -682,6 +872,7 @@ test('http-api: catalog request bodies and list query parameters are exact', asy
     assert.deepEqual(result.data, { error: 'catalog_request_invalid' }, pth);
   }
   for (const pth of [
+    '/catalog/imports?extra=true',
     '/catalog/list?extra=true',
     '/catalog/list?limit=1&limit=2',
     '/catalog/list?profileScopeId=one&profileScopeId=two',
@@ -716,6 +907,46 @@ test('http-api: catalog request bodies and list query parameters are exact', asy
   assert.deepEqual(calls.at(-1), ['list', {}]);
 });
 
+test('http-api: import recovery summaries are bounded and strip archive evidence', async (t) => {
+  const imports = Array.from({ length: 101 }, (_, index) => ({
+    schemaVersion: 2,
+    id: `import-${String(index).padStart(3, '0')}`,
+    manifest: {
+      archiveHash: 'd'.repeat(64),
+      layout: 'single-conversations-json',
+      accountHint: `chatgpt-user-id:sha256:${'e'.repeat(64)}`
+    },
+    assignment: { profileScopeId: 'profile-main', confirmed: true },
+    readOnlyReason: null,
+    status: 'partial',
+    cursor: { schemaVersion: 1, recordIndex: index },
+    counts: { recordsSeen: index, cataloged: index, snapshots: index, problems: 0 },
+    problems: [],
+    suspension: { reason: 'interrupted', observedAt: '2026-07-31T12:00:00.000Z' },
+    createdAt: '2026-07-31T12:00:00.000Z',
+    updatedAt: new Date(Date.parse('2026-07-31T12:01:00.000Z') + index * 1_000).toISOString(),
+    archivePath: '/Users/private/export.zip',
+    transcript: 'PRIVATE TRANSCRIPT BODY'
+  }));
+  const { port } = await startCatalogHttp(t, {
+    importExport: async () => ({ status: 'rejected', reason: 'not-a-zip' }),
+    verifyByNavigation: async () => ({ status: 'failed', reason: 'transport' }),
+    reassignImportScope: async () => ({ ok: true }),
+    list: async () => ({ items: [], nextCursor: null }),
+    listImports: async () => imports
+  });
+  const result = await req({ port, token: 'secret', method: 'GET', pth: '/catalog/imports' });
+  assert.equal(result.res.status, 200);
+  assert.equal(result.data.items.length, 100);
+  assert.equal(result.data.truncated, true);
+  assert.deepEqual(
+    result.data.items.map((item) => item.importId),
+    Array.from({ length: 100 }, (_, index) => `import-${String(100 - index).padStart(3, '0')}`)
+  );
+  const serialized = JSON.stringify(result.data);
+  assert.doesNotMatch(serialized, /archiveHash|accountHint|archivePath|PRIVATE|export\.zip|chatgpt-user-id/);
+});
+
 test('http-api: catalog service states have stable content-free status mappings', async (t) => {
   const hidden = 'private transcript /Users/private/export.zip <div data-message-id="secret">';
   const catalogSync = {
@@ -731,6 +962,7 @@ test('http-api: catalog service states have stable content-free status mappings'
   };
   const { port } = await startCatalogHttp(t, catalogSync);
   const cases = [
+    ['tab_busy', 409, 'tab_busy'],
     ['body_too_large', 413, 'body_too_large'],
     ['invalid_catalog_contract', 400, 'invalid_catalog_contract'],
     ['invalid_profile_scope_id', 400, 'invalid_profile_scope_id'],
@@ -795,6 +1027,50 @@ test('http-api: catalog routes redact unknown exception messages and data', asyn
     assert.equal(result.res.status, 500, grantId);
     assert.deepEqual(result.data, { error: 'internal_error' }, grantId);
     assert.doesNotMatch(JSON.stringify(result.data), /private|export\.zip|data-message-id|secret/i, grantId);
+  }
+});
+
+test('http-api: export picker cancellation and errors stay content-free', async (t) => {
+  const privateMarker = 'private transcript /Users/private/export.zip <div data-message-id="secret">';
+  const requestExportGrant = async ({ profileScopeId }) => {
+    if (profileScopeId === 'cancel') return { status: 'cancelled' };
+    const error = new Error(privateMarker);
+    error.code = profileScopeId === 'safe-error' ? 'export_grant_picker_failed' : privateMarker;
+    error.data = { path: '/Users/private/export.zip', transcript: privateMarker };
+    throw error;
+  };
+  const { port } = await startCatalogHttp(t, {
+    importExport: async () => ({ status: 'rejected', reason: 'not-a-zip' }),
+    verifyByNavigation: async () => ({ status: 'failed', reason: 'transport' }),
+    reassignImportScope: async () => ({ ok: true }),
+    list: async () => ({ items: [], nextCursor: null }),
+    listImports: async () => []
+  }, { requestExportGrant });
+
+  const cancelled = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/catalog/export-grant',
+    body: { profileScopeId: 'cancel' }
+  });
+  assert.equal(cancelled.res.status, 200);
+  assert.deepEqual(cancelled.data, { status: 'cancelled' });
+
+  for (const [profileScopeId, expected] of [
+    ['safe-error', 'export_grant_picker_failed'],
+    ['private-error', 'internal_error']
+  ]) {
+    const result = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/catalog/export-grant',
+      body: { profileScopeId }
+    });
+    assert.equal(result.res.status, 500);
+    assert.deepEqual(result.data, { error: expected });
+    assert.doesNotMatch(JSON.stringify(result.data), /private|export\.zip|data-message-id|secret/i);
   }
 });
 
@@ -927,6 +1203,7 @@ async function startContinuationHttp(t, {
     }
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1502,9 +1779,122 @@ test('http-api: post-query sync keeps its key reserved after releasing the provi
   });
 });
 
+test('http-api: post-query sync re-enters shared tab ownership and publishes a real snapshot', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-real-post-sync-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const conversationUrl = 'https://chatgpt.com/c/33333333-3333-8333-8333-333333333333';
+  const location = locationFromConversationUrl(conversationUrl);
+  const providerTabOperations = createProviderTabOperationLeases();
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'message-1', role: 'user', text: 'Fixture prompt' },
+    { ordinal: 1, providerMessageId: 'message-2', role: 'assistant', text: 'Fixture reply' }
+  ];
+  const capture = {
+    status: 'complete',
+    conversationUrl,
+    capturedAt: '2026-08-08T12:00:00.000Z',
+    rawTurns,
+    evidence: {
+      topBoundary: true,
+      bottomBoundary: true,
+      orderedWindowStitching: true,
+      scrollPasses: 2,
+      windowCount: 1,
+      messageCount: rawTurns.length,
+      providerIdCount: rawTurns.length,
+      byteCount: rawTurns.reduce((total, turn) => total +
+        Buffer.byteLength(turn.role) +
+        Buffer.byteLength(turn.text) +
+        Buffer.byteLength(turn.providerMessageId), 0)
+    }
+  };
+  let captureCalls = 0;
+  let currentUrl = conversationUrl;
+  const controller = {
+    runExclusive: async (operation) => await operation(),
+    prepareChatEntry: async ({ chatUrl }) => { currentUrl = chatUrl; },
+    query: async () => ({ text: 'receipt-backed continuation', codeBlocks: [], meta: {} }),
+    getUrl: async () => currentUrl,
+    captureConversation: async () => {
+      captureCalls += 1;
+      assert.equal(providerTabOperations.current('key:live-key')?.kind, 'query');
+      assert.equal(providerTabOperations.current('tab:t0')?.kind, 'query');
+      return capture;
+    }
+  };
+  const listedTabs = [{
+    id: 't0',
+    key: 'live-key',
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT'
+  }];
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller,
+    updateTabMeta: () => {}
+  };
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = createTranscriptStore({ stateDir, blobs });
+  const transcriptSync = createTranscriptSyncService({
+    store,
+    blobs,
+    capture: createChatGptTranscriptCapture({ tabs, providerTabOperations }),
+    providerTabOperations
+  });
+  const source = await transcriptSync.track({
+    label: 'Live fixture',
+    tags: [],
+    key: 'live-key',
+    identity: identityFromOwnedLocation('profile-main', location),
+    location
+  });
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-real-post-sync',
+    stateDir,
+    transcriptSync,
+    providerTabOperations,
+    getSettings: async () => ({
+      maxInflightQueries: 1,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    }),
+    getStatus: async () => ({ ok: true, url: currentUrl, blocked: false })
+  });
+  t.after(() => server.close());
+
+  const response = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: {
+      liveSourceId: source.id,
+      key: 'live-key',
+      chatUrl: conversationUrl,
+      prompt: 'harmless continuation fixture'
+    }
+  });
+
+  assert.equal(response.res.status, 200);
+  assert.equal(captureCalls, 1);
+  const [updated] = await transcriptSync.list();
+  assert.equal(updated.latestLiveSnapshot?.kind, 'snapshot');
+  assert.deepEqual(providerTabOperations.snapshot(), []);
+});
+
 test('http-api: status returns getStatus output', async (t) => {
   const tabs = { listTabs: () => [], ensureTab: async () => 't1', createTab: async () => 't1', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1551,6 +1941,7 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1618,6 +2009,7 @@ test('http-api: status surfaces source, phase, blocked state, and last outcome f
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1702,6 +2094,7 @@ test('http-api: query returns runId and persists durable run state', async (t) =
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1771,6 +2164,7 @@ test('http-api: fire-and-forget query finalizes durable run on async error', asy
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1809,6 +2203,105 @@ test('http-api: fire-and-forget query finalizes durable run on async error', asy
   assert.equal(typeof persisted.finishedAt, 'number');
 });
 
+test('http-api: query setup failures release the active query and every scope', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-pre-detach-failure-'));
+  let queryCalls = 0;
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => {
+      queryCalls += 1;
+      return { text: 'recovered', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/11111111-1111-8111-8111-111111111111'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'shared', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true }),
+    getSettings: async () => ({
+      maxInflightQueries: 1,
+      maxQueriesPerMinute: 999,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    })
+  });
+  t.after(async () => {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const port = server.address().port;
+
+  const failed = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'fail before detach', bundleName: 'missing', fireAndForget: true }
+  });
+  assert.equal(failed.res.status, 404);
+  assert.equal(failed.data.error, 'bundle_not_found');
+
+  const retried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'retry after cleanup' }
+  });
+  assert.equal(retried.res.status, 200);
+  assert.equal(retried.data.result.text, 'recovered');
+  assert.equal(queryCalls, 1);
+
+  const status = await req({ port, token: 'secret', method: 'GET', pth: '/status?tabId=t0' });
+  assert.equal(status.res.status, 200);
+  assert.equal(status.data.activeQuery, null);
+  assert.deepEqual(status.data.runtime?.activeQueries, []);
+
+  const runsDir = path.join(stateDir, 'runs');
+  let writeFailure;
+  await fs.chmod(runsDir, 0o500);
+  try {
+    writeFailure = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/query',
+      body: { key: 'shared', prompt: 'fail the durable run write' }
+    });
+  } finally {
+    await fs.chmod(runsDir, 0o700);
+  }
+  assert.equal(writeFailure.res.status, 500);
+
+  const afterWriteFailure = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'retry after write cleanup' }
+  });
+  assert.equal(afterWriteFailure.res.status, 200);
+  assert.equal(afterWriteFailure.data.result.text, 'recovered');
+  assert.equal(queryCalls, 2);
+
+  const finalStatus = await req({ port, token: 'secret', method: 'GET', pth: '/status?tabId=t0' });
+  assert.equal(finalStatus.data.activeQuery, null);
+  assert.deepEqual(finalStatus.data.runtime?.activeQueries, []);
+});
+
 test('http-api: runs/wait follows a reconciling background query through durable success', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-wait-'));
   const controller = {
@@ -1829,6 +2322,7 @@ test('http-api: runs/wait follows a reconciling background query through durable
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1904,6 +2398,7 @@ test('http-api: query forwards explicit model intent without persisting it as ke
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -1964,6 +2459,7 @@ test('http-api: explicit model intent fails if controller returns without confir
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2027,6 +2523,7 @@ test('http-api: query fails closed when actual mode used downgrades from request
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2079,6 +2576,7 @@ test('http-api: runs list/get/archive expose durable query history', async (t) =
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2174,6 +2672,7 @@ test('http-api: compact runs/get payload is materially smaller than full replay 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2238,6 +2737,7 @@ test('http-api: runs get reloads query output manifest after restart', async () 
     getControllerById: () => controller
   };
   const common = {
+    providerTabOperations: createProviderTabOperationLeases(),
     token: 'secret',
     tabs,
     defaultTabId: 't0',
@@ -2280,6 +2780,9 @@ test('http-api: runs open saved conversations and retry exact materialized repla
   const queryCalls = [];
   const navigateCalls = [];
   const ensureReadyCalls = [];
+  let holdNextQuery = false;
+  let markHeldQueryStarted;
+  let releaseHeldQuery;
   const listedTabs = [{ id: 't0', key: 'retry-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -2294,6 +2797,11 @@ test('http-api: runs open saved conversations and retry exact materialized repla
     query: async (args) => {
       queryCalls.push(args);
       currentUrl = `https://chatgpt.com/c/thread-${queryCalls.length}`;
+      if (holdNextQuery) {
+        holdNextQuery = false;
+        markHeldQueryStarted();
+        await new Promise((resolve) => { releaseHeldQuery = resolve; });
+      }
       return { text: `answer ${queryCalls.length}`, codeBlocks: [], meta: {} };
     },
     getUrl: async () => currentUrl
@@ -2325,6 +2833,7 @@ test('http-api: runs open saved conversations and retry exact materialized repla
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2394,6 +2903,50 @@ test('http-api: runs open saved conversations and retry exact materialized repla
   assert.equal(retriedRun.data.run.retryOf, originalRunId);
   assert.equal(retriedRun.data.run.materializedReplay.prompt, queryCalls[0].prompt);
   assert.equal(retriedRun.data.run.source, 'mcp');
+
+  holdNextQuery = true;
+  const heldQueryStarted = new Promise((resolve) => { markHeldQueryStarted = resolve; });
+  const detachedRetry = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: originalRunId, fireAndForget: true }
+  });
+  assert.equal(detachedRetry.res.status, 202);
+  await heldQueryStarted;
+
+  const conflict = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'retry-key', prompt: 'must remain excluded' }
+  });
+  assert.equal(conflict.res.status, 409);
+  assert.equal(conflict.data.error, 'tab_busy');
+
+  releaseHeldQuery();
+  await waitFor(async () => {
+    const run = await req({
+      port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/runs/get',
+      body: { runId: detachedRetry.data.runId }
+    });
+    return run.data.run?.status === 'success';
+  });
+  const idle = await req({ port, token: 'secret', method: 'GET', pth: '/status' });
+  assert.equal(idle.data.activeQuery, null);
+  const afterDetachedCleanup = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'retry-key', prompt: 'after detached cleanup' }
+  });
+  assert.equal(afterDetachedCleanup.res.status, 200);
 });
 
 test('http-api: fire-and-forget query persists in-flight conversationUrl for reopen after restart', async (t) => {
@@ -2427,6 +2980,7 @@ test('http-api: fire-and-forget query persists in-flight conversationUrl for reo
     getControllerById: () => controller1
   };
   const server1 = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs: tabs1,
@@ -2503,6 +3057,7 @@ test('http-api: fire-and-forget query persists in-flight conversationUrl for reo
     getControllerById: () => controller2
   };
   const server2 = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs: tabs2,
@@ -2556,6 +3111,7 @@ test('http-api: keyed navigate persists conversationUrl for later query recovery
     getControllerById: () => controller1
   };
   const server1 = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs: tabs1,
@@ -2620,6 +3176,7 @@ test('http-api: keyed navigate persists conversationUrl for later query recovery
     getControllerById: () => controller2
   };
   const server2 = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs: tabs2,
@@ -2678,6 +3235,7 @@ test('http-api: explicit shared chat materializes outside the default project an
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2719,6 +3277,7 @@ test('http-api: explicit shared chat materializes outside the default project an
 test('http-api: chatUrl and projectUrl conflict before navigation', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-chat-conflict-'));
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs: { listTabs: () => [], createTab: async () => { throw new Error('should_not_navigate'); } },
@@ -2765,6 +3324,7 @@ test('http-api: failed shared materialization preserves keyed project affinity w
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2865,6 +3425,7 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -2992,6 +3553,7 @@ test('http-api: research merges saved bundle promptPrefix into packed prompt and
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3073,6 +3635,7 @@ test('http-api: research marks placeholder shell text as an error when no export
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3151,6 +3714,7 @@ test('http-api: research canonical response uses exported markdown when captured
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3204,6 +3768,7 @@ test('http-api: research bundle resolution fails asynchronously after run creati
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3280,6 +3845,7 @@ test('http-api: research reserves the underlying tab against concurrent query ca
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3368,6 +3934,106 @@ test('http-api: research reserves the underlying tab against concurrent query ca
   assert.equal(finished.data.run.status, 'success');
 });
 
+test('http-api: detached research keeps its operation leases when writing the 202 response fails', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-response-failure-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  let releaseResearch = null;
+  let markResearchEntered;
+  const researchEntered = new Promise((resolve) => {
+    markResearchEntered = resolve;
+  });
+  const leases = createProviderTabOperationLeases();
+  const releaseCalls = [];
+  const providerTabOperations = {
+    assertAvailable: (...args) => leases.assertAvailable(...args),
+    reserve: (...args) => leases.reserve(...args),
+    release: (...args) => {
+      releaseCalls.push(args);
+      return leases.release(...args);
+    },
+    runWithOwner: (...args) => leases.runWithOwner(...args)
+  };
+  const listedTabs = [{ id: 't1', key: 'proj', vendorId: 'chatgpt', vendorName: 'ChatGPT' }];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    research: async () => {
+      markResearchEntered();
+      await new Promise((resolve) => { releaseResearch = resolve; });
+      return {
+        text: 'done',
+        codeBlocks: [],
+        meta: {},
+        research: { files: [], exportedMarkdownPath: null, exportState: null },
+        researchMeta: {
+          activation: {
+            requested: true,
+            activated: true,
+            error: null,
+            tabId: 't1',
+            conversationUrl: 'https://chatgpt.com/c/response-failure'
+          }
+        }
+      };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/response-failure'
+  };
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async () => 't1',
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-research-response-failure',
+    stateDir,
+    providerTabOperations,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    })
+  });
+  t.after(async () => {
+    releaseResearch?.();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  });
+  server.prependListener('request', (request, response) => {
+    if (request.url !== '/research') return;
+    const writeHead = response.writeHead.bind(response);
+    let failAcceptedResponse = true;
+    response.writeHead = (statusCode, ...args) => {
+      if (failAcceptedResponse && statusCode === 202) {
+        failAcceptedResponse = false;
+        throw new Error('forced_research_response_failure');
+      }
+      return writeHead(statusCode, ...args);
+    };
+  });
+
+  const failedResponse = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: { key: 'proj', prompt: 'Keep the worker lease after detaching.' }
+  });
+  assert.equal(failedResponse.res.status, 500);
+  await researchEntered;
+  assert.equal(leases.current('key:proj')?.kind, 'research');
+  assert.equal(leases.current('tab:t1')?.kind, 'research');
+  assert.deepEqual(releaseCalls, []);
+
+  releaseResearch();
+  await waitFor(() => leases.snapshot().length === 0);
+});
+
 test('http-api: research without tab/key does not lock an unrelated default non-chatgpt tab', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-multivendor-'));
   let releaseResearch = null;
@@ -3420,6 +4086,7 @@ test('http-api: research without tab/key does not lock an unrelated default non-
     getControllerById: (id) => controllers[id]
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3469,6 +4136,9 @@ test('http-api: research without tab/key does not lock an unrelated default non-
 
 test('http-api: unkeyed run reopen and retry prefer the recorded tab over another vendor tab', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-unkeyed-'));
+  const providerTabOperations = createProviderTabOperationLeases();
+  const recordedProjectUrl = 'https://chatgpt.com/g/g-p-old/project';
+  const activeProjectUrl = 'https://chatgpt.com/g/g-p-active/project';
   const currentUrls = new Map([
     ['t-old', 'about:blank'],
     ['t-new', 'https://chatgpt.com/c/unrelated-thread']
@@ -3515,11 +4185,16 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
     { id: 't-new', key: null, vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null },
     { id: 't-old', key: null, vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }
   ];
+  const metadataUpdates = [];
   const tabs = {
     listTabs: () => listedTabs,
     ensureTab: async () => 't-old',
     createTab: async () => 't-created',
-    updateTabMeta: () => {},
+    updateTabMeta: (tabId, patch) => {
+      metadataUpdates.push({ tabId, patch: { ...patch } });
+      const row = listedTabs.find((item) => item.id === tabId);
+      if (row) Object.assign(row, patch);
+    },
     closeTab: async () => true,
     getControllerById: (tabId) => controllers[tabId]
   };
@@ -3530,6 +4205,7 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
     defaultTabId: 't-old',
     serverId: 'sid-test',
     stateDir,
+    providerTabOperations,
     getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
     getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrls.get(tabId) || '', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
   });
@@ -3541,7 +4217,7 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
     token: 'secret',
     method: 'POST',
     pth: '/query',
-    body: { prompt: 'unkeyed base prompt' }
+    body: { prompt: 'unkeyed base prompt', projectUrl: recordedProjectUrl }
   });
   assert.equal(queried.res.status, 200);
   const runId = queried.data.runId;
@@ -3573,6 +4249,82 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
   assert.equal(retried.data.tabId, 't-old');
   assert.equal(oldCalls.query.length, 2);
   assert.equal(newCalls.query.length, 0);
+  const durableRun = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId }
+  });
+  assert.equal(durableRun.res.status, 200);
+
+  // A stale recorded tab can fall back to another tab for the same provider.
+  // Selection must stay read-only until the fallback tab lease is acquired.
+  listedTabs.splice(0, listedTabs.length, {
+    id: 't-active',
+    key: 'active-key',
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT',
+    projectUrl: activeProjectUrl,
+    modeIntent: durableRun.data.run.modeIntent || null
+  });
+  let releaseActiveQuery;
+  let markActiveQueryStarted;
+  const activeQueryStarted = new Promise((resolve) => { markActiveQueryStarted = resolve; });
+  const activeQueryGate = new Promise((resolve) => { releaseActiveQuery = resolve; });
+  currentUrls.set('t-active', 'https://chatgpt.com/c/active-thread');
+  controllers['t-active'] = {
+    runExclusive: async (operation) => await operation(),
+    navigate: async (to) => { currentUrls.set('t-active', to); },
+    ensureReady: async () => ({ ok: true }),
+    query: async () => {
+      markActiveQueryStarted();
+      await activeQueryGate;
+      return { text: 'active result', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => currentUrls.get('t-active')
+  };
+  const activeQueryPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't-active', prompt: 'private busy prompt sentinel' }
+  });
+  await Promise.race([
+    activeQueryStarted,
+    activeQueryPromise.then(({ res, data }) => {
+      assert.fail(`active query ended before provider admission: ${res.status} ${JSON.stringify(data)}`);
+    })
+  ]);
+  const metadataBeforeConflict = JSON.parse(JSON.stringify(listedTabs[0]));
+  const updateCountBeforeConflict = metadataUpdates.length;
+
+  const blockedOpen = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/open',
+    body: { runId }
+  });
+  const blockedRetry = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId }
+  });
+
+  assert.equal(blockedOpen.res.status, 409, JSON.stringify(blockedOpen.data));
+  assert.equal(blockedOpen.data.error, 'tab_busy');
+  assert.equal(blockedRetry.res.status, 409);
+  assert.equal(blockedRetry.data.error, 'tab_busy');
+  assert.deepEqual(listedTabs[0], metadataBeforeConflict);
+  assert.equal(metadataUpdates.length, updateCountBeforeConflict);
+  assert.equal(JSON.stringify([blockedOpen.data, blockedRetry.data]).includes('private busy prompt sentinel'), false);
+  assert.equal(JSON.stringify([blockedOpen.data, blockedRetry.data]).includes('promptPreview'), false);
+  releaseActiveQuery();
+  assert.equal((await activeQueryPromise).res.status, 200);
 });
 
 test('http-api: same-tab query/send requests are rejected while a run is already active', async (t) => {
@@ -3595,6 +4347,7 @@ test('http-api: same-tab query/send requests are rejected while a run is already
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3613,7 +4366,8 @@ test('http-api: same-tab query/send requests are rejected while a run is already
   const q2 = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'second' } });
   assert.equal(q2.res.status, 409);
   assert.equal(q2.data.error, 'tab_busy');
-  assert.equal(q2.data.data?.activeQuery?.promptPreview, 'first');
+  assert.equal(Object.hasOwn(q2.data.data?.activeQuery || {}, 'promptPreview'), false);
+  assert.equal(JSON.stringify(q2.data).includes('first'), false);
 
   const s2 = await req({ port, token: 'secret', method: 'POST', pth: '/send', body: { text: 'third' } });
   assert.equal(s2.res.status, 409);
@@ -3643,6 +4397,7 @@ test('http-api: status invalid tabId returns 404', async (t) => {
     }
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3675,6 +4430,7 @@ test('http-api: status routes key/model selectors to the requested vendor tab', 
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3713,6 +4469,7 @@ test('http-api: body_too_large returns 413', async (t) => {
     getControllerById: () => ({ readPageText: async () => '' })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3744,6 +4501,7 @@ test('http-api: invalid JSON returns 400', async (t) => {
     getControllerById: () => ({ readPageText: async () => '' })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3787,6 +4545,7 @@ test('http-api: tabs list/create/close', async (t) => {
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3825,6 +4584,7 @@ test('http-api: tabs/create returns 409 when max tabs reached', async (t) => {
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3854,6 +4614,7 @@ test('http-api: tabs/create routes keyed tabs to the requested vendor', async (t
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3898,6 +4659,7 @@ test('http-api: tabs/create persists ChatGPT mode intent on keyed tabs', async (
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3938,6 +4700,7 @@ test('http-api: tabs/create rejects sticky model intent defaults', async (t) => 
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -3983,6 +4746,7 @@ test('http-api: show creates missing key tab (and hide does not)', async (t) => 
   let shown = [];
   let hidden = [];
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4062,6 +4826,7 @@ test('http-api: operations run through controller.runExclusive when available', 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4115,6 +4880,7 @@ test('http-api: read-conversation exposes complete transcript capture through th
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4168,6 +4934,7 @@ test('http-api: read-conversation enters a supplied chatUrl without sending anyt
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4209,6 +4976,7 @@ test('http-api: read-conversation rejects an unusable chatUrl before touching a 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4232,6 +5000,555 @@ test('http-api: read-conversation rejects an unusable chatUrl before touching a 
   assert.deepEqual(calls, []);
 });
 
+test('http-api: route-changing operations exclude provider work across key and tab selectors', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-read-scope-'));
+  const originalUrl = 'https://chatgpt.com/c/11111111-1111-8111-8111-111111111111';
+  const readUrl = 'https://chatgpt.com/c/22222222-2222-8222-8222-222222222222';
+  let currentUrl = originalUrl;
+  let ensureTabCalls = 0;
+  let releaseFirstResolution;
+  let markFirstResolutionStarted;
+  let blockRead = false;
+  let releaseRead;
+  let markReadStarted;
+  let blockNextResolution = false;
+  let releaseNextResolution;
+  let markNextResolutionStarted;
+  let blockNavigate = false;
+  let releaseNavigate;
+  let markNavigateStarted;
+  let blockTrack = false;
+  let releaseTrack;
+  let markTrackStarted;
+  let trackCalls = 0;
+  const firstResolutionStarted = new Promise((resolve) => { markFirstResolutionStarted = resolve; });
+  const firstResolutionGate = new Promise((resolve) => { releaseFirstResolution = resolve; });
+  let readStarted = new Promise((resolve) => { markReadStarted = resolve; });
+  let readGate = new Promise((resolve) => { releaseRead = resolve; });
+  const sentAt = [];
+  const rawSentAt = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async ({ chatUrl }) => { currentUrl = chatUrl; },
+    readConversationText: async () => {
+      if (blockRead) {
+        markReadStarted();
+        await readGate;
+      }
+      return { text: 'redacted fixture', complete: true, truncated: false, reason: null, messageCount: 1, scrollPasses: 1 };
+    },
+    query: async () => {
+      sentAt.push(currentUrl);
+      return { text: 'ok', codeBlocks: [], meta: {} };
+    },
+    send: async () => {
+      rawSentAt.push(currentUrl);
+      return { ok: true };
+    },
+    readPageText: async () => 'redacted fixture',
+    ensureReady: async () => ({ ok: true }),
+    getUrl: async () => currentUrl,
+    navigate: async (to) => {
+      if (blockNavigate) {
+        markNavigateStarted();
+        await new Promise((resolve) => { releaseNavigate = resolve; });
+        blockNavigate = false;
+      }
+      currentUrl = to;
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'shared', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => {
+      ensureTabCalls += 1;
+      if (ensureTabCalls === 1) {
+        markFirstResolutionStarted();
+        await firstResolutionGate;
+      } else if (blockNextResolution) {
+        markNextResolutionStarted();
+        await new Promise((resolve) => { releaseNextResolution = resolve; });
+        blockNextResolution = false;
+      }
+      return 't0';
+    },
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    transcriptSync: {
+      track: async (input) => {
+        trackCalls += 1;
+        if (blockTrack) {
+          markTrackStarted();
+          await new Promise((resolve) => { releaseTrack = resolve; });
+          blockTrack = false;
+        }
+        return { id: 'source-1', identity: input.identity, key: input.key };
+      }
+    },
+    getStatus: async () => ({ ok: true }),
+    getSettings: async () => ({
+      maxInflightQueries: 1,
+      maxQueriesPerMinute: 999,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    })
+  });
+  t.after(async () => {
+    releaseFirstResolution?.();
+    releaseRead?.();
+    releaseNextResolution?.();
+    releaseNavigate?.();
+    releaseTrack?.();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const port = server.address().port;
+
+  // A key-selected query owns the listed tab while tab resolution is still
+  // pending. An explicit-tab read must not navigate that tab in the gap.
+  const firstQueryPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'first query' }
+  });
+  await firstResolutionStarted;
+  const readDuringQuery = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { tabId: 't0', chatUrl: readUrl }
+  });
+  releaseFirstResolution();
+  const firstQuery = await firstQueryPromise;
+
+  assert.equal(readDuringQuery.res.status, 409);
+  assert.equal(readDuringQuery.data.error, 'tab_busy');
+  assert.equal(firstQuery.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl]);
+
+  // The inverse direction uses the same aliases: an explicit-tab read owns the
+  // tab's key until capture finishes, so a keyed query cannot enter behind it.
+  currentUrl = originalUrl;
+  blockRead = true;
+  readStarted = new Promise((resolve) => { markReadStarted = resolve; });
+  readGate = new Promise((resolve) => { releaseRead = resolve; });
+  const heldReadPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { tabId: 't0', chatUrl: readUrl }
+  });
+  await readStarted;
+  const queryDuringRead = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'second query' }
+  });
+  releaseRead();
+  const heldRead = await heldReadPromise;
+
+  assert.equal(queryDuringRead.res.status, 409);
+  assert.equal(queryDuringRead.data.error, 'tab_busy');
+  assert.equal(heldRead.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl]);
+
+  // A key-selected URL read also claims its already-listed tab before its own
+  // resolution finishes. An explicit-tab query must not enter that gap.
+  blockRead = false;
+  blockNextResolution = true;
+  const nextResolutionStarted = new Promise((resolve) => { markNextResolutionStarted = resolve; });
+  const keyedReadPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { key: 'shared', chatUrl: originalUrl }
+  });
+  await nextResolutionStarted;
+  const queryDuringReadResolution = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't0', prompt: 'third query' }
+  });
+  releaseNextResolution();
+  const keyedRead = await keyedReadPromise;
+
+  assert.equal(queryDuringReadResolution.res.status, 409);
+  assert.equal(queryDuringReadResolution.data.error, 'tab_busy');
+  assert.equal(keyedRead.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl]);
+
+  // Raw sends have the same ownership requirement as queries.
+  currentUrl = originalUrl;
+  blockNextResolution = true;
+  const sendResolutionStarted = new Promise((resolve) => { markNextResolutionStarted = resolve; });
+  const sendPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/send',
+    body: { key: 'shared', text: 'raw send' }
+  });
+  await sendResolutionStarted;
+  const readDuringSend = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { tabId: 't0', chatUrl: readUrl }
+  });
+  releaseNextResolution();
+  const sent = await sendPromise;
+
+  assert.equal(readDuringSend.res.status, 409);
+  assert.equal(readDuringSend.data.error, 'tab_busy');
+  assert.equal(sent.res.status, 200);
+  assert.deepEqual(rawSentAt, [originalUrl]);
+
+  // A retry also owns the recorded tab before keyed tab resolution finishes.
+  currentUrl = originalUrl;
+  blockNextResolution = true;
+  const retryResolutionStarted = new Promise((resolve) => { markNextResolutionStarted = resolve; });
+  const retryPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: firstQuery.data.runId }
+  });
+  await retryResolutionStarted;
+  const readDuringRetry = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { tabId: 't0', chatUrl: readUrl }
+  });
+  releaseNextResolution();
+  const retried = await retryPromise;
+
+  assert.equal(readDuringRetry.res.status, 409);
+  assert.equal(readDuringRetry.data.error, 'tab_busy');
+  assert.equal(retried.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl]);
+
+  // Opening a durable run resolves and may navigate its recorded tab. It owns
+  // that tab before resolution so an explicit-tab query cannot enter first.
+  currentUrl = originalUrl;
+  blockNextResolution = true;
+  const openResolutionStarted = new Promise((resolve) => { markNextResolutionStarted = resolve; });
+  const openPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/open',
+    body: { runId: firstQuery.data.runId, show: false }
+  });
+  await openResolutionStarted;
+  const queryDuringOpen = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't0', prompt: 'query during open' }
+  });
+  releaseNextResolution();
+  const opened = await openPromise;
+
+  assert.equal(queryDuringOpen.res.status, 409);
+  assert.equal(queryDuringOpen.data.error, 'tab_busy');
+  assert.equal(opened.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl]);
+
+  // Direct navigation must also respect a query that already owns the tab.
+  currentUrl = originalUrl;
+  blockNextResolution = true;
+  const navigateConflictResolutionStarted = new Promise((resolve) => { markNextResolutionStarted = resolve; });
+  const queryBeforeNavigatePromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'query before navigate' }
+  });
+  await navigateConflictResolutionStarted;
+  const navigateDuringQuery = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/navigate',
+    body: { tabId: 't0', url: readUrl }
+  });
+  releaseNextResolution();
+  const queryBeforeNavigate = await queryBeforeNavigatePromise;
+
+  assert.equal(navigateDuringQuery.res.status, 409);
+  assert.equal(navigateDuringQuery.data.error, 'tab_busy');
+  assert.equal(queryBeforeNavigate.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl, originalUrl]);
+
+  // Page reads can restore a persisted route from about:blank, so they must be
+  // excluded while a query owns the tab even before query resolution settles.
+  currentUrl = originalUrl;
+  blockNextResolution = true;
+  const readPageConflictResolutionStarted = new Promise((resolve) => { markNextResolutionStarted = resolve; });
+  const queryBeforeReadPagePromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'query before page read' }
+  });
+  await readPageConflictResolutionStarted;
+  const readPageDuringQuery = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { tabId: 't0', key: 'shared', maxChars: 100 }
+  });
+  const trackDuringQuery = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/track',
+    body: { label: 'Thread', tags: [], key: 'shared', profileScopeId: 'profile-main' }
+  });
+  releaseNextResolution();
+  const queryBeforeReadPage = await queryBeforeReadPagePromise;
+
+  assert.equal(readPageDuringQuery.res.status, 409);
+  assert.equal(readPageDuringQuery.data.error, 'tab_busy');
+  assert.equal(trackDuringQuery.res.status, 409);
+  assert.equal(trackDuringQuery.data.error, 'tab_busy');
+  assert.equal(trackCalls, 0);
+  assert.equal(queryBeforeReadPage.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl, originalUrl, originalUrl]);
+
+  // A track request keeps the tab stable through the durable source commit.
+  blockTrack = true;
+  const trackStarted = new Promise((resolve) => { markTrackStarted = resolve; });
+  const heldTrackPromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/transcripts/track',
+    body: { label: 'Thread', tags: [], key: 'shared', profileScopeId: 'profile-main' }
+  });
+  await trackStarted;
+  const queryDuringTrack = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't0', prompt: 'query during track' }
+  });
+  releaseTrack();
+  const heldTrack = await heldTrackPromise;
+
+  assert.equal(queryDuringTrack.res.status, 409);
+  assert.equal(queryDuringTrack.data.error, 'tab_busy');
+  assert.equal(heldTrack.res.status, 200);
+  assert.equal(trackCalls, 1);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl, originalUrl, originalUrl]);
+
+  // The inverse page-read order is closed while read-page restores the saved
+  // route and reads it under the same operation leases.
+  currentUrl = 'about:blank';
+  blockNavigate = true;
+  const readPageNavigateStarted = new Promise((resolve) => { markNavigateStarted = resolve; });
+  const heldReadPagePromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { key: 'shared', maxChars: 100 }
+  });
+  await readPageNavigateStarted;
+  const queryDuringReadPage = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't0', prompt: 'query during page read' }
+  });
+  releaseNavigate();
+  const heldReadPage = await heldReadPagePromise;
+
+  assert.equal(queryDuringReadPage.res.status, 409);
+  assert.equal(queryDuringReadPage.data.error, 'tab_busy');
+  assert.equal(heldReadPage.res.status, 200);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl, originalUrl, originalUrl]);
+
+  // The inverse order is also closed: a held navigation owns the tab's route
+  // until its persistence step finishes.
+  currentUrl = originalUrl;
+  blockNavigate = true;
+  const navigateStarted = new Promise((resolve) => { markNavigateStarted = resolve; });
+  const heldNavigatePromise = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/navigate',
+    body: { tabId: 't0', url: readUrl }
+  });
+  await navigateStarted;
+  const queryDuringNavigate = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'shared', prompt: 'query during navigate' }
+  });
+  releaseNavigate();
+  const heldNavigate = await heldNavigatePromise;
+
+  assert.equal(queryDuringNavigate.res.status, 409);
+  assert.equal(queryDuringNavigate.data.error, 'tab_busy');
+  assert.equal(heldNavigate.res.status, 200);
+  assert.equal(heldNavigate.data.url, readUrl);
+  assert.deepEqual(sentAt, [originalUrl, originalUrl, originalUrl, originalUrl]);
+});
+
+test('http-api: an explicit tab cannot bypass ownership of the same logical key', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-key-alias-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const providerTabOperations = createProviderTabOperationLeases();
+  let releaseFirst;
+  let firstStarted = false;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const sends = [];
+  let secondUrl = 'https://chatgpt.com/c/22222222-2222-8222-8222-222222222222';
+  const controllers = new Map([
+    ['t1', {
+      runExclusive: async (operation) => await operation(),
+      query: async () => {
+        firstStarted = true;
+        await firstGate;
+        sends.push('t1');
+        return { text: 'first', codeBlocks: [], meta: {} };
+      },
+      getUrl: async () => 'https://chatgpt.com/c/11111111-1111-8111-8111-111111111111'
+    }],
+    ['t2', {
+      runExclusive: async (operation) => await operation(),
+      query: async () => {
+        sends.push('t2');
+        return { text: 'second', codeBlocks: [], meta: {} };
+      },
+      navigate: async (url) => { secondUrl = url; },
+      ensureReady: async () => ({ ok: true }),
+      getUrl: async () => secondUrl
+    }]
+  ]);
+  const tabs = {
+    listTabs: () => [
+      { id: 't1', key: 'left', vendorId: 'chatgpt', vendorName: 'ChatGPT' },
+      { id: 't2', key: 'right', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+    ],
+    ensureTab: async () => { throw new Error('explicit tabs must not be resolved by key'); },
+    createTab: async () => 't1',
+    closeTab: async () => true,
+    getControllerById: (tabId) => controllers.get(tabId)
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't1',
+    serverId: 'sid-key-alias',
+    stateDir,
+    providerTabOperations,
+    getSettings: async () => ({
+      maxInflightQueries: 2,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => {
+    releaseFirst?.();
+    server.close();
+  });
+
+  const firstPromise = req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't1', key: 'shared-key', prompt: 'first' }
+  });
+  await waitFor(() => firstStarted);
+  assert.equal(providerTabOperations.current('key:shared-key')?.kind, 'query');
+  assert.equal(providerTabOperations.current('tab:t1')?.kind, 'query');
+  assert.equal(providerTabOperations.current('key:left')?.kind, 'query');
+  assert.throws(
+    () => providerTabOperations.reserve('key:left', { id: 'manual-sync', kind: 'transcript-sync' }),
+    (error) => error?.code === 'tab_busy'
+  );
+  const conflict = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't2', key: 'shared-key', prompt: 'conflict' }
+  });
+
+  assert.equal(conflict.res.status, 409);
+  assert.equal(conflict.data.error, 'tab_busy');
+  assert.deepEqual(sends, []);
+
+  releaseFirst();
+  assert.equal((await firstPromise).res.status, 200);
+  const afterCleanup = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't2', key: 'shared-key', prompt: 'after cleanup' }
+  });
+  assert.equal(afterCleanup.res.status, 200);
+  assert.deepEqual(sends, ['t1', 't2']);
+
+  providerTabOperations.reserve('key:left', {
+    id: 'manual-sync',
+    kind: 'transcript-sync',
+    key: 'left',
+    phase: 'capturing'
+  });
+  const tabOnlyConflict = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { tabId: 't1', prompt: 'must not bypass the listed key' }
+  });
+  assert.equal(tabOnlyConflict.res.status, 409);
+  assert.equal(tabOnlyConflict.data.error, 'tab_busy');
+  assert.deepEqual(sends, ['t1', 't2']);
+  providerTabOperations.release('key:left', 'manual-sync');
+});
+
 test('http-api: query packs context paths before forwarding to controller', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-context-'));
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');
@@ -4253,6 +5570,7 @@ test('http-api: query packs context paths before forwarding to controller', asyn
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4307,6 +5625,7 @@ test('http-api: query merges saved bundle inputs', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4372,6 +5691,7 @@ test('http-api: query with keyed tab uses default vendor metadata when no model 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4451,6 +5771,7 @@ test('http-api: image-generation queries prefer the default image project and do
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4552,6 +5873,7 @@ test('http-api: image-generation queries without an explicit key use the dedicat
     getControllerById: (tabId) => controllers[tabId]
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4636,6 +5958,7 @@ test('http-api: image-generation queries use the image-key scope instead of rese
     getControllerById: (tabId) => controllers[tabId]
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4694,6 +6017,7 @@ test('http-api: bundle save/list/get/delete work', async (t) => {
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4749,6 +6073,7 @@ test('http-api: bundles/save rejects relative local paths on the direct HTTP sur
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4786,6 +6111,7 @@ test('http-api: query returns 404 for missing bundle', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4818,6 +6144,7 @@ test('http-api: get bundle returns 404 when missing', async (t) => {
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4854,6 +6181,7 @@ test('http-api: query returns 400 for missing context path', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4892,6 +6220,7 @@ test('http-api: query returns 400 for missing explicit attachment path', async (
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4929,6 +6258,7 @@ test('http-api: query rejects relative local paths on the direct HTTP surface', 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -4972,6 +6302,7 @@ test('http-api: invalid query input does not consume rate-limit budget', async (
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5029,6 +6360,7 @@ test('http-api: artifacts save/list/open-folder work', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5089,6 +6421,7 @@ test('http-api: artifacts open-folder ignores blank scoped selectors and opens g
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5130,6 +6463,7 @@ test('http-api: artifacts save rejects invalid mode', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5177,6 +6511,7 @@ test('http-api: artifacts save routes model hint to the requested vendor tab', a
     }
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5224,6 +6559,7 @@ test('http-api: artifacts save fails cleanly before partial writes when controll
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5272,6 +6608,7 @@ test('http-api: artifacts save fails if controller reports a non-existent artifa
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5323,6 +6660,7 @@ test('http-api: artifacts save rejects files outside the tab artifacts directory
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5376,6 +6714,7 @@ test('http-api: artifacts save rejects symlink escape outside the tab artifacts 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5434,6 +6773,7 @@ test('http-api: artifacts save rejects mixed candidates atomically when one is a
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5487,6 +6827,7 @@ test('http-api: artifacts save rejects hard-link escape outside the tab artifact
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5538,6 +6879,7 @@ test('http-api: artifacts list without tab scope returns global artifacts', asyn
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5580,6 +6922,7 @@ test('http-api: watch-folder list/open/scan work', async (t) => {
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5622,6 +6965,7 @@ test('http-api: watch-folder add/delete work', async (t) => {
   let added = null;
   let removed = null;
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5673,6 +7017,7 @@ test('http-api: watch-folder add rejects filesystem root', async (t) => {
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5708,6 +7053,7 @@ test('http-api: watch-folder add rejects file paths cleanly', async (t) => {
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5743,6 +7089,7 @@ test('http-api: watch-folders/add rejects relative paths on the direct HTTP surf
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5779,6 +7126,7 @@ test('http-api: opening unknown watch folder returns 404', async (t) => {
     getControllerById: () => ({ runExclusive: async (fn) => await fn() })
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5817,6 +7165,7 @@ test('http-api: query returns vendor-specific context budget', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5855,6 +7204,7 @@ test('http-api: query returns effective override context budget metadata', async
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5905,6 +7255,7 @@ test('http-api: query ignores invalid non-positive context budget overrides', as
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -5966,6 +7317,7 @@ test('http-api: non-positive timeoutMs values fall back to safe defaults', async
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6044,6 +7396,7 @@ test('http-api: oversized numeric overrides are clamped to bounded ceilings', as
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6133,6 +7486,7 @@ test('http-api: research export forces the controller export path and registers 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6188,6 +7542,7 @@ test('http-api: query model hint routes to a vendor-scoped tab when default tab 
     }
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6233,6 +7588,7 @@ test('http-api: query rejects unknown vendor hint', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6274,6 +7630,7 @@ test('http-api: ensure-ready timeout maps to 408 with details', async (t) => {
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6324,6 +7681,7 @@ test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) =
   };
 
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6404,6 +7762,7 @@ test('http-api: fire-and-forget query queues for provider slot and can be stoppe
   };
 
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6463,6 +7822,8 @@ test('http-api: fire-and-forget query stopped before provider-slot admission nev
 
   const controller = {
     runExclusive: async (fn) => await fn(),
+    navigate: async () => {},
+    getUrl: async () => 'https://chatgpt.com/',
     requestStop: async () => {
       stopCalls += 1;
       return { ok: true, requested: false, clicked: false };
@@ -6481,6 +7842,7 @@ test('http-api: fire-and-forget query stopped before provider-slot admission nev
   };
 
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6510,6 +7872,18 @@ test('http-api: fire-and-forget query stopped before provider-slot admission nev
   assert.equal(stopped.data.clicked, false);
   assert.equal(stopCalls, 0);
 
+  // Stop only marks the pending operation. Its tab aliases remain owned until
+  // the blocked admission step unwinds through the query's lexical cleanup.
+  const navigateBeforeUnwind = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/navigate',
+    body: { tabId: 't1', url: 'https://chatgpt.com/' }
+  });
+  assert.equal(navigateBeforeUnwind.res.status, 409);
+  assert.equal(navigateBeforeUnwind.data.error, 'tab_busy');
+
   releaseAdmission();
   assert.equal(stopped.data.activeQuery?.stopRequested, true);
   const stoppedRun = await waitFor(async () => {
@@ -6519,6 +7893,14 @@ test('http-api: fire-and-forget query stopped before provider-slot admission nev
   assert.equal(stoppedRun.status, 'stopped');
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(queryStarted, false);
+  const navigateAfterUnwind = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/navigate',
+    body: { tabId: 't1', url: 'https://chatgpt.com/' }
+  });
+  assert.equal(navigateAfterUnwind.res.status, 200);
 });
 
 test('http-api: research stopped before active tab resolution never sends', async (t) => {
@@ -6553,6 +7935,7 @@ test('http-api: research stopped before active tab resolution never sends', asyn
   };
 
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6601,6 +7984,7 @@ test('http-api: query pacing returns 429 with retryAfterMs when max wait is 0', 
     getControllerById: () => controller
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6637,6 +8021,7 @@ test('http-api: invalid tabId returns 404', async (t) => {
     }
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6662,6 +8047,7 @@ test('http-api: default tab cannot be closed', async (t) => {
     getControllerById: () => ({})
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6689,6 +8075,7 @@ test('http-api: tab_closed returns 409', async (t) => {
     }
   };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6709,6 +8096,7 @@ test('http-api: rotate-token updates auth', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-desktop-state-'));
   const tabs = { listTabs: () => [], ensureTab: async () => 't0', createTab: async () => 't0', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'old',
     tabs,
@@ -6731,6 +8119,7 @@ test('http-api: shutdown calls onShutdown', async (t) => {
   let called = 0;
   const tabs = { listTabs: () => [], ensureTab: async () => 't0', createTab: async () => 't0', closeTab: async () => true, getControllerById: () => ({}) };
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6771,6 +8160,7 @@ test('http-api: query rate limits (qpm + inflight)', async (t) => {
 
   let inflightBlock = false;
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,
@@ -6833,6 +8223,7 @@ test('http-api: send uses governor too', async (t) => {
 
   let qpm = 1;
   const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
     port: 0,
     token: 'secret',
     tabs,

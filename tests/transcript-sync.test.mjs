@@ -12,6 +12,7 @@ import {
   createTranscriptSyncService
 } from '../transcript-sync.mjs';
 import { createTranscriptStore } from '../transcript-store.mjs';
+import { createProviderTabOperationLeases } from '../provider-tab-operation-leases.mjs';
 
 async function tempState(t, name) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `agentify-sync-${name}-`));
@@ -90,10 +91,40 @@ async function realParts(t, name, handler, { onChanged = null } = {}) {
     store,
     blobs,
     capture: capturePort(handler),
+    providerTabOperations: createProviderTabOperationLeases(),
     ...(onChanged ? { onChanged } : {})
   });
   return { stateDir, blobs, store, service };
 }
+
+test('transcript factories require a shared provider tab operation authority', async (t) => {
+  const tabs = {
+    ensureTab: async () => 'tab-1',
+    getControllerById: () => null
+  };
+  assert.throws(
+    () => createChatGptTranscriptCapture({ tabs }),
+    (error) => (
+      error?.code === 'transcript_tab_operations_required' &&
+      error?.message === 'transcript_tab_operations_required'
+    )
+  );
+
+  const stateDir = await tempState(t, 'required-tab-operations');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = createTranscriptStore({ stateDir, blobs });
+  assert.throws(
+    () => createTranscriptSyncService({
+      store,
+      blobs,
+      capture: capturePort(async () => completeCapture())
+    }),
+    (error) => (
+      error?.code === 'transcript_tab_operations_required' &&
+      error?.message === 'transcript_tab_operations_required'
+    )
+  );
+});
 
 test('transcript capture port: recreation, navigation, and capture share one exclusive section', async () => {
   const events = [];
@@ -125,6 +156,7 @@ test('transcript capture port: recreation, navigation, and capture share one exc
   };
   const port = createChatGptTranscriptCapture({
     tabs,
+    providerTabOperations: createProviderTabOperationLeases(),
     maxCaptureBytes: 123_456,
     navigationTimeoutMs: 12_000
   });
@@ -154,6 +186,40 @@ test('transcript capture port: recreation, navigation, and capture share one exc
   assert.deepEqual(events[4][1], { maxCaptureBytes: 123_456 });
 });
 
+test('transcript capture port: shared tab ownership rejects capture before navigation', async () => {
+  const providerTabOperations = createProviderTabOperationLeases();
+  providerTabOperations.reserve('tab:tab-1', {
+    id: 'query-1',
+    kind: 'query',
+    tabId: 'tab-1',
+    phase: 'preparing_context'
+  });
+  let ensureCalls = 0;
+  const tabs = {
+    listTabs: () => [{ id: 'tab-1', key: 'sync-key', vendorId: 'chatgpt' }],
+    async ensureTab() {
+      ensureCalls += 1;
+      return 'tab-1';
+    },
+    getControllerById() {
+      throw new Error('controller must not be resolved while the tab is busy');
+    }
+  };
+  const port = createChatGptTranscriptCapture({ tabs, providerTabOperations });
+  const input = trackInput();
+
+  await assert.rejects(
+    () => port.captureOwnedSource({
+      ...input,
+      target: { kind: 'owned-conversation', location: input.location }
+    }),
+    (error) => error?.code === 'navigation_failed' && error?.message === 'navigation_failed'
+  );
+  assert.equal(ensureCalls, 0);
+  assert.equal(providerTabOperations.current('key:sync-key'), null);
+  assert.equal(providerTabOperations.current('tab:tab-1')?.id, 'query-1');
+});
+
 test('transcript capture port: a served route with another exact identity fails closed', async () => {
   const tabs = {
     async ensureTab() { return 'tab-1'; },
@@ -166,7 +232,10 @@ test('transcript capture port: a served route with another exact identity fails 
     }
   };
   const input = trackInput();
-  const port = createChatGptTranscriptCapture({ tabs });
+  const port = createChatGptTranscriptCapture({
+    tabs,
+    providerTabOperations: createProviderTabOperationLeases()
+  });
   await assert.rejects(() => port.captureOwnedSource({
     ...input,
     target: { kind: 'owned-conversation', location: input.location }
@@ -185,7 +254,10 @@ test('transcript capture port: raw Electron load failures become a safe navigati
     }
   };
   const input = trackInput();
-  const port = createChatGptTranscriptCapture({ tabs });
+  const port = createChatGptTranscriptCapture({
+    tabs,
+    providerTabOperations: createProviderTabOperationLeases()
+  });
 
   await assert.rejects(() => port.captureOwnedSource({
     ...input,
@@ -215,7 +287,10 @@ test('transcript capture port: a tab destroyed after controller resolution remai
     }
   };
   const input = trackInput();
-  const port = createChatGptTranscriptCapture({ tabs });
+  const port = createChatGptTranscriptCapture({
+    tabs,
+    providerTabOperations: createProviderTabOperationLeases()
+  });
 
   await assert.rejects(() => port.captureOwnedSource({
     ...input,
@@ -236,6 +311,52 @@ test('transcript sync: track delegates the exact owned target and rejects extra 
   assert.deepEqual(source.target, { kind: 'owned-conversation', location: input.location });
   assert.deepEqual(await store.findSource(input.identity), source);
   await assert.rejects(() => service.track({ ...trackInput({ thread: 'extra' }), extra: true }), /transcript_track_invalid/);
+});
+
+test('transcript sync: a conflicting query rejects manual sync before an attempt begins, including from its ambient context', async (t) => {
+  const stateDir = await tempState(t, 'busy-before-attempt');
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = createTranscriptStore({
+    stateDir,
+    blobs,
+    clock: clockAt(),
+    randomId: ids('busy-before-attempt')
+  });
+  const providerTabOperations = createProviderTabOperationLeases();
+  let captureCalls = 0;
+  const service = createTranscriptSyncService({
+    store,
+    blobs,
+    capture: capturePort(async () => {
+      captureCalls += 1;
+      return completeCapture();
+    }),
+    providerTabOperations
+  });
+  const source = await service.track(trackInput());
+  providerTabOperations.reserve('key:sync-key', {
+    id: 'query-1',
+    kind: 'query',
+    key: 'sync-key',
+    phase: 'preparing_context'
+  });
+
+  await assert.rejects(
+    () => service.sync(source.id, 'manual'),
+    (error) => error?.code === 'tab_busy' && error?.message === 'tab_busy'
+  );
+  await providerTabOperations.runWithOwner('query-1', async () => {
+    await assert.rejects(
+      () => service.sync(source.id, 'manual'),
+      (error) => error?.code === 'tab_busy' && error?.message === 'tab_busy'
+    );
+  });
+  assert.equal(captureCalls, 0);
+  assert.equal(JSON.parse(await fs.readFile(store.statePath, 'utf8')).attempts.length, 0);
+
+  providerTabOperations.release('key:sync-key', 'query-1');
+  assert.equal((await service.sync(source.id, 'manual')).status, 'complete');
+  assert.equal(captureCalls, 1);
 });
 
 test('transcript sync: content-free change notifications cover durable track, attempt, completion, and forget states', async (t) => {
@@ -282,6 +403,7 @@ test('transcript sync: complete flow is begin then capture then blob then one at
   const service = createTranscriptSyncService({
     store,
     blobs,
+    providerTabOperations: createProviderTabOperationLeases(),
     capture: capturePort(async () => {
       events.push('capture');
       return completeCapture();
@@ -313,6 +435,7 @@ test('transcript sync: partial capture is durable and never publishes a snapshot
   const service = createTranscriptSyncService({
     store,
     blobs,
+    providerTabOperations: createProviderTabOperationLeases(),
     capture: capturePort(async () => partialCapture())
   });
   const source = await service.track(trackInput());
@@ -372,6 +495,7 @@ test('transcript sync: blob failure is terminalized without persisting exception
   const store = createTranscriptStore({ stateDir, blobs: realBlobs, clock: clockAt(), randomId: ids('blob-failure') });
   const service = createTranscriptSyncService({
     store,
+    providerTabOperations: createProviderTabOperationLeases(),
     blobs: {
       ...realBlobs,
       async putSnapshot() {
@@ -403,6 +527,7 @@ test('transcript sync: metadata commit failure propagates and restart recovers t
   const service = createTranscriptSyncService({
     store,
     blobs,
+    providerTabOperations: createProviderTabOperationLeases(),
     capture: capturePort(async () => completeCapture())
   });
   const source = await service.track(trackInput());
@@ -441,6 +566,7 @@ test('transcript sync: corrupt-after-publication verification failure is durable
   const service = createTranscriptSyncService({
     store,
     blobs,
+    providerTabOperations: createProviderTabOperationLeases(),
     capture: capturePort(async () => completeCapture())
   });
   const source = await service.track(trackInput());
@@ -466,6 +592,7 @@ test('transcript sync: restart and unchanged recapture preserve content hash wit
   const firstService = createTranscriptSyncService({
     store: firstStore,
     blobs: firstBlobs,
+    providerTabOperations: createProviderTabOperationLeases(),
     capture: capturePort(async () => firstCapture)
   });
   const source = await firstService.track(trackInput());
@@ -477,6 +604,7 @@ test('transcript sync: restart and unchanged recapture preserve content hash wit
   const secondService = createTranscriptSyncService({
     store: secondStore,
     blobs: secondBlobs,
+    providerTabOperations: createProviderTabOperationLeases(),
     capture: capturePort(async () => completeCapture({ capturedAt: '2026-07-30T14:02:00.000Z' }))
   });
   const second = await secondService.sync(source.id);

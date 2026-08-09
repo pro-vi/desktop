@@ -9,6 +9,9 @@ import {
   CATALOG_LIST_CURSOR_PATTERN,
   parseCatalogPage,
   parseExportImportOutcome,
+  parseImportCounts,
+  parseImportCursor,
+  parseIsoDateTime,
   parseRouteVerificationOutcome
 } from './conversation-catalog-contract.mjs';
 import {
@@ -17,6 +20,7 @@ import {
   PROFILE_SCOPE_ID_PATTERN,
   formatConversationIdentity,
   parseConversationIdentity,
+  parseProfileScopeId,
   providerConversationIdFromOwnedLocation,
   sameConversationIdentity
 } from './conversation-identity.mjs';
@@ -34,7 +38,7 @@ import {
   parseTranscriptSourceLabel,
   parseTranscriptSourceTags
 } from './transcript-source-contract.mjs';
-import { EXPORT_GRANT_ID_PATTERN } from './export-import-grants.mjs';
+import { EXPORT_GRANT_ID_PATTERN, parseExportGrantId } from './export-import-grants.mjs';
 import { defaultStateDir } from './state.mjs';
 import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from './mcp-lib.mjs';
 import { waitForRun } from './run-waiter.mjs';
@@ -336,6 +340,47 @@ const catalogImportOutcomeSchema = z.discriminatedUnion('status', [
     ])
   }).strict()
 ]);
+
+const exportGrantOutcomeSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('cancelled') }).strict(),
+  z.object({
+    status: z.literal('granted'),
+    grant: z.object({
+      grantId: z.string().regex(EXPORT_GRANT_ID_PATTERN),
+      profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN),
+      expiresAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME)
+    }).strict()
+  }).strict()
+]);
+
+const catalogImportSummarySchema = z.object({
+  schemaVersion: z.literal(1),
+  importId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+  profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN),
+  status: z.enum(['open', 'complete', 'partial']),
+  readOnlyReason: z.literal('legacy-record-limit').nullable(),
+  cursor: catalogImportCursorSchema,
+  counts: catalogCountsSchema,
+  suspension: z.object({
+    reason: z.enum(['interrupted', 'scope-reassigned']),
+    observedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME)
+  }).strict().nullable(),
+  createdAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME),
+  updatedAt: z.string().regex(TRANSCRIPT_ISO_DATE_TIME)
+}).strict();
+
+const catalogImportSummaryPageSchema = z.object({
+  items: z.array(catalogImportSummarySchema).max(100),
+  truncated: z.boolean()
+}).strict();
+
+const catalogReassignmentSchema = z.object({
+  importId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN),
+  changed: z.boolean(),
+  previousProfileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN),
+  profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN),
+  cursor: catalogImportCursorSchema
+}).strict();
 
 const catalogRouteSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -643,6 +688,74 @@ function parseCatalogImportResponse(value) {
   }
 }
 
+function parseExportGrantResponse(value, expectedProfileScopeId) {
+  const shaped = parseTranscriptResponse(exportGrantOutcomeSchema, value);
+  if (shaped.status === 'cancelled') return shaped;
+  try {
+    parseExportGrantId(shaped.grant.grantId);
+    const profileScopeId = parseProfileScopeId(shaped.grant.profileScopeId);
+    parseIsoDateTime(shaped.grant.expiresAt, 'grant.expiresAt');
+    if (profileScopeId !== expectedProfileScopeId) throw new Error('grant_scope_mismatch');
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  return shaped;
+}
+
+function parseCatalogImportSummaryPageResponse(value) {
+  const shaped = parseTranscriptResponse(catalogImportSummaryPageSchema, value);
+  try {
+    for (const catalogImport of shaped.items) {
+      parseProfileScopeId(catalogImport.profileScopeId);
+      parseImportCursor(catalogImport.cursor);
+      parseImportCounts(catalogImport.counts);
+      parseIsoDateTime(catalogImport.createdAt, 'createdAt');
+      parseIsoDateTime(catalogImport.updatedAt, 'updatedAt');
+      if (catalogImport.suspension) {
+        parseIsoDateTime(catalogImport.suspension.observedAt, 'suspension.observedAt');
+        if (catalogImport.status !== 'partial') throw new Error('invalid_suspension_status');
+      }
+      if (catalogImport.readOnlyReason !== null && catalogImport.status === 'open') {
+        throw new Error('invalid_read_only_status');
+      }
+    }
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  return shaped;
+}
+
+function parseCatalogReassignmentResponse(value, { importId, newProfileScopeId }) {
+  const shaped = parseTranscriptResponse(catalogReassignmentSchema, value);
+  try {
+    parseImportCursor(shaped.cursor);
+    if (shaped.importId !== importId || shaped.profileScopeId !== newProfileScopeId) {
+      throw new Error('reassignment_mismatch');
+    }
+    if (
+      (shaped.changed && shaped.previousProfileScopeId === shaped.profileScopeId) ||
+      (!shaped.changed && shaped.previousProfileScopeId !== shaped.profileScopeId)
+    ) {
+      throw new Error('reassignment_state_mismatch');
+    }
+  } catch {
+    throw transcriptMcpError('transcript_mcp_response_invalid');
+  }
+  return shaped;
+}
+
+function catalogImportToolResult(outcome) {
+  const counts = outcome.status === 'rejected'
+    ? ''
+    : ` records=${outcome.counts.recordsSeen} snapshots=${outcome.counts.snapshots} problems=${outcome.counts.problems}`;
+  const detail = outcome.status === 'rejected' ? ` reason=${outcome.reason}` : ` importId=${outcome.importId}${counts}`;
+  return {
+    content: [{ type: 'text', text: `status=${outcome.status}${detail}` }],
+    structuredContent: outcome,
+    isError: outcome.status === 'rejected'
+  };
+}
+
 function parseCatalogPageResponse(value) {
   const shaped = parseTranscriptResponse(catalogPageSchema, value);
   try {
@@ -855,7 +968,7 @@ registerTool(
   'agentify_read_conversation',
   {
     description:
-      'Read a complete ChatGPT conversation. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_chatgpt_export instead.',
+      'Read a complete ChatGPT conversation. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT for complete conversation capture.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
@@ -881,9 +994,39 @@ registerTool(
 );
 
 registerTool(
+  'agentify_import_selected_chatgpt_export',
+  {
+    description: 'Open Agentify Desktop\'s native ZIP picker for human selection, then import the selected ChatGPT export without returning its path or one-use grant to the agent.',
+    inputSchema: z.object({
+      profileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN)
+        .describe('Stable local ChatGPT profile scope confirmed for this import.')
+    }).strict()
+  },
+  async ({ profileScopeId }) => {
+    const grantOutcome = parseExportGrantResponse(await requestTranscriptJson({
+      method: 'POST',
+      path: '/catalog/export-grant',
+      body: { profileScopeId }
+    }), profileScopeId);
+    if (grantOutcome.status === 'cancelled') {
+      return {
+        content: [{ type: 'text', text: 'status=cancelled' }],
+        structuredContent: grantOutcome
+      };
+    }
+    const outcome = parseCatalogImportResponse(await requestTranscriptJson({
+      method: 'POST',
+      path: '/catalog/import',
+      body: { grantId: grantOutcome.grant.grantId, profileScopeId }
+    }));
+    return catalogImportToolResult(outcome);
+  }
+);
+
+registerTool(
   'agentify_import_chatgpt_export',
   {
-    description: 'Import a ChatGPT export selected by the human in Agentify Desktop. The one-use grant never exposes a local path.',
+    description: 'Consume an existing one-use ChatGPT export grant. For the normal agent workflow, use agentify_import_selected_chatgpt_export so the human can choose the ZIP in the native picker.',
     inputSchema: z.object({
       grantId: z.string().regex(EXPORT_GRANT_ID_PATTERN)
         .describe('One-use grant id returned by the Agentify Desktop file picker.'),
@@ -897,14 +1040,49 @@ registerTool(
       path: '/catalog/import',
       body: { grantId, profileScopeId }
     }));
-    const counts = outcome.status === 'rejected'
-      ? ''
-      : ` records=${outcome.counts.recordsSeen} snapshots=${outcome.counts.snapshots} problems=${outcome.counts.problems}`;
-    const detail = outcome.status === 'rejected' ? ` reason=${outcome.reason}` : ` importId=${outcome.importId}${counts}`;
+    return catalogImportToolResult(outcome);
+  }
+);
+
+registerTool(
+  'agentify_list_chatgpt_imports',
+  {
+    description: 'List the latest bounded ChatGPT import and recovery summaries without archive paths, raw records, transcript text, or account hints.',
+    inputSchema: z.object({}).strict()
+  },
+  async () => {
+    const page = parseCatalogImportSummaryPageResponse(await requestTranscriptJson({
+      method: 'GET',
+      path: '/catalog/imports'
+    }));
+    const partial = page.items.filter(({ status }) => status === 'partial').length;
+    const suspended = page.items.filter(({ suspension }) => suspension !== null).length;
     return {
-      content: [{ type: 'text', text: `status=${outcome.status}${detail}` }],
-      structuredContent: outcome,
-      isError: outcome.status === 'rejected'
+      content: [{ type: 'text', text: `count=${page.items.length} partial=${partial} suspended=${suspended}${page.truncated ? ' truncated=true' : ''}` }],
+      structuredContent: page
+    };
+  }
+);
+
+registerTool(
+  'agentify_reassign_chatgpt_import',
+  {
+    description: 'Reassign one ChatGPT import to a different local profile scope. Confirmation clears imported snapshots and requires selecting the same ZIP again.',
+    inputSchema: z.object({
+      importId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).describe('Catalog import id.'),
+      newProfileScopeId: z.string().regex(PROFILE_SCOPE_ID_PATTERN).describe('Confirmed replacement local profile scope.'),
+      confirm: z.literal(true).describe('Must be true to confirm scope reassignment and snapshot clearing.')
+    }).strict()
+  },
+  async ({ importId, newProfileScopeId, confirm }) => {
+    const outcome = parseCatalogReassignmentResponse(await requestTranscriptJson({
+      method: 'POST',
+      path: '/catalog/reassign',
+      body: { importId, newProfileScopeId, confirm }
+    }), { importId, newProfileScopeId });
+    return {
+      content: [{ type: 'text', text: `importId=${outcome.importId} status=${outcome.changed ? 'reassigned' : 'unchanged'}` }],
+      structuredContent: outcome
     };
   }
 );

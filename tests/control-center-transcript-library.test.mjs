@@ -542,6 +542,14 @@ test('Transcript Library source rows expose busy/disabled state and unchanged sy
   assert.equal(syncButton.disabled, false);
   await syncButton.onclick();
   assert.match(harness.elements.get('libraryActionStatus').textContent, /content was unchanged/i);
+
+  harness.bridge.syncTranscript = async () => {
+    const error = new Error('tab_busy');
+    error.code = 'tab_busy';
+    throw error;
+  };
+  await syncButton.onclick();
+  assert.equal(harness.elements.get('libraryActionStatus').textContent, 'Action failed: tab_busy');
 });
 
 test('Transcript Library renderer accepts a profile scope only after backend validation', async () => {

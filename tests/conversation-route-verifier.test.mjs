@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createChatGptRouteVerifier } from '../conversation-catalog-sync.mjs';
+import { createProviderTabOperationLeases } from '../provider-tab-operation-leases.mjs';
 
 const OBSERVED_AT = '2026-07-31T13:00:00.000Z';
 const NAVIGATION_TIMEOUT_MS = 12_345;
@@ -25,6 +26,7 @@ function verifierFixture({
   challengeResults = null,
   challengeError = null,
   navigationTimeoutMs = NAVIGATION_TIMEOUT_MS,
+  providerTabOperations = createProviderTabOperationLeases(),
   controllerPatch = {}
 } = {}) {
   const events = [];
@@ -88,6 +90,9 @@ function verifierFixture({
     ...controllerPatch
   };
   const tabs = {
+    listTabs() {
+      return [{ id: 'verification-tab', key: 'owned-catalog-key', vendorId: 'chatgpt' }];
+    },
     async ensureTab(input) {
       events.push(['ensure', input]);
       if (ensureError) throw ensureError;
@@ -102,12 +107,50 @@ function verifierFixture({
     events,
     verifier: createChatGptRouteVerifier({
       tabs,
+      providerTabOperations,
       navigationTimeoutMs,
       clock: () => OBSERVED_AT
     }),
     controller
   };
 }
+
+test('route verifier: shared tab ownership prevents navigation before tab resolution', async () => {
+  const providerTabOperations = createProviderTabOperationLeases();
+  providerTabOperations.reserve('tab:verification-tab', {
+    id: 'query-1',
+    kind: 'query',
+    tabId: 'verification-tab',
+    phase: 'preparing_context'
+  });
+  const fixture = verifierFixture({ providerTabOperations });
+
+  await assert.rejects(
+    () => fixture.verifier.verify(identity(), 'owned-catalog-key'),
+    (error) => error?.code === 'tab_busy' && error?.message === 'tab_busy'
+  );
+  assert.equal(fixture.events.some(([kind]) => kind === 'ensure'), false);
+  assert.equal(providerTabOperations.current('key:owned-catalog-key'), null);
+  assert.equal(providerTabOperations.current('tab:verification-tab')?.id, 'query-1');
+
+  providerTabOperations.release('tab:verification-tab', 'query-1');
+  assert.equal((await fixture.verifier.verify(identity(), 'owned-catalog-key')).status, 'verified');
+});
+
+test('route verifier: a shared provider tab operation authority is required', () => {
+  assert.throws(
+    () => createChatGptRouteVerifier({
+      tabs: {
+        ensureTab: async () => 'verification-tab',
+        getControllerById: () => null
+      }
+    }),
+    (error) => (
+      error?.code === 'catalog_verification_tab_operations_required' &&
+      error?.message === 'catalog_verification_tab_operations_required'
+    )
+  );
+});
 
 function unavailable(expectedIdentity, reason, retryable) {
   return {
@@ -370,6 +413,7 @@ test('route verifier: transport and compatibility failures never become availabi
           };
         }
       },
+      providerTabOperations: createProviderTabOperationLeases(),
       clock: () => OBSERVED_AT
     });
     assert.deepEqual(
@@ -408,6 +452,7 @@ test('route verifier: failures before a provider document is observed remain tra
           return null;
         }
       },
+      providerTabOperations: createProviderTabOperationLeases(),
       clock: () => OBSERVED_AT
     });
     assert.deepEqual(
@@ -418,9 +463,62 @@ test('route verifier: failures before a provider document is observed remain tra
   });
 });
 
-test('route verifier: a hung provider inspection times out and quarantines later controller work', async () => {
+test('route verifier: the deadline covers controller lock acquisition and retains leases until settlement', async () => {
+  const providerTabOperations = createProviderTabOperationLeases();
+  let releaseExclusiveEntry;
+  const exclusiveEntry = new Promise((resolve) => {
+    releaseExclusiveEntry = resolve;
+  });
   const fixture = verifierFixture({
     navigationTimeoutMs: 25,
+    providerTabOperations,
+    controllerPatch: {
+      async runExclusive(operation) {
+        fixture.events.push(['exclusive:queued']);
+        await exclusiveEntry;
+        fixture.events.push(['exclusive:entered']);
+        return await operation();
+      }
+    }
+  });
+  const verification = fixture.verifier.verify(identity(), 'owned-catalog-key');
+  const deadlineMissed = Symbol('deadline-missed');
+  let watchdogId;
+  const watchdog = new Promise((resolve) => {
+    watchdogId = setTimeout(() => resolve(deadlineMissed), 250);
+  });
+
+  try {
+    const outcome = await Promise.race([verification, watchdog]);
+    assert.notEqual(outcome, deadlineMissed, 'verification waited past its controller-lock deadline');
+    assert.deepEqual(outcome, { status: 'failed', reason: 'transport' });
+    assert.equal(providerTabOperations.current('key:owned-catalog-key')?.kind, 'catalog-verification');
+    assert.equal(providerTabOperations.current('tab:verification-tab')?.kind, 'catalog-verification');
+    assert.equal(fixture.events.some(([event]) => event === 'prepare'), false);
+    assert.equal(fixture.events.some(([event]) => event === 'exclusive:quarantine'), true);
+  } finally {
+    clearTimeout(watchdogId);
+    releaseExclusiveEntry();
+    await verification;
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (
+      providerTabOperations.current('key:owned-catalog-key') === null &&
+      providerTabOperations.current('tab:verification-tab') === null
+    ) break;
+  }
+  assert.equal(providerTabOperations.current('key:owned-catalog-key'), null);
+  assert.equal(providerTabOperations.current('tab:verification-tab'), null);
+  assert.equal(fixture.events.some(([event]) => event === 'prepare'), false);
+});
+
+test('route verifier: a hung provider inspection times out and quarantines later controller work', async () => {
+  const providerTabOperations = createProviderTabOperationLeases();
+  const fixture = verifierFixture({
+    navigationTimeoutMs: 25,
+    providerTabOperations,
     controllerPatch: {
       async inspectConversationRoute() {
         fixture.events.push(['inspect:hung']);
@@ -435,9 +533,11 @@ test('route verifier: a hung provider inspection times out and quarantines later
   assert.deepEqual(outcome, { status: 'failed', reason: 'transport' });
   assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(fixture.events.at(-1)[0], 'exclusive:end');
-  assert.deepEqual(
-    await fixture.verifier.verify(identity(), 'still-quarantined-key'),
-    { status: 'failed', reason: 'transport' }
+  assert.equal(providerTabOperations.current('key:bounded-verification-key')?.kind, 'catalog-verification');
+  assert.equal(providerTabOperations.current('tab:verification-tab')?.kind, 'catalog-verification');
+  await assert.rejects(
+    () => fixture.verifier.verify(identity(), 'still-quarantined-key'),
+    (error) => error?.code === 'tab_busy' && error?.message === 'tab_busy'
   );
   await assert.rejects(
     fixture.controller.runExclusive(async () => 'unsafe-overlap'),
@@ -446,12 +546,14 @@ test('route verifier: a hung provider inspection times out and quarantines later
 });
 
 test('route verifier: late provider completion clears quarantine before the next exclusive operation', async () => {
+  const providerTabOperations = createProviderTabOperationLeases();
   let releasePreparation;
   const preparation = new Promise((resolve) => {
     releasePreparation = resolve;
   });
   const fixture = verifierFixture({
     navigationTimeoutMs: 25,
+    providerTabOperations,
     controllerPatch: {
       async prepareChatEntry() {
         fixture.events.push(['prepare:pending']);
@@ -469,12 +571,16 @@ test('route verifier: late provider completion clears quarantine before the next
     fixture.controller.runExclusive(async () => 'unsafe-overlap'),
     (error) => error?.code === 'tab_busy'
   );
+  assert.equal(providerTabOperations.current('key:late-completion-key')?.kind, 'catalog-verification');
+  assert.equal(providerTabOperations.current('tab:verification-tab')?.kind, 'catalog-verification');
 
   releasePreparation();
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
     try {
       assert.equal(await fixture.controller.runExclusive(async () => 'released'), 'released');
+      assert.equal(providerTabOperations.current('key:late-completion-key'), null);
+      assert.equal(providerTabOperations.current('tab:verification-tab'), null);
       return;
     } catch (error) {
       if (error?.code !== 'tab_busy') throw error;
