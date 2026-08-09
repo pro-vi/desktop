@@ -2968,15 +2968,22 @@ export class ChatGPTController {
       let quietPasses = 0;
       while (performance.now() < deadline) {
         const owners = Array.from(document.querySelectorAll(turnOrdinalSelector)).filter(served);
-        const exactOwner = owners.find((owner) => turnOrdinal(owner) === target.providerTurnIndex) || null;
+        const exactMessages = Array.from(document.querySelectorAll(messageSelector))
+          .filter(served)
+          .filter((node) => String(node.getAttribute?.('data-message-author-role') || '').trim().toLowerCase() === 'assistant')
+          .filter((node) => messageId(node) === target.providerMessageId);
+        if (exactMessages.length > 1) return { status: 'capture_unavailable' };
+        const exactOwner = exactMessages[0]?.closest?.(turnOrdinalSelector) ||
+          owners.find((owner) => turnOrdinal(owner) === target.providerTurnIndex) || null;
         if (exactOwner) {
-          const matchingMessages = messagesIn(exactOwner)
+          const matchingMessages = (exactMessages.length ? exactMessages : messagesIn(exactOwner))
+            .filter(served)
             .filter((node) => String(node.getAttribute?.('data-message-author-role') || '').trim().toLowerCase() === 'assistant')
             .filter((node) => messageId(node) === target.providerMessageId);
-          if (matchingMessages.length !== 1) return { status: 'not_found' };
+          if (matchingMessages.length !== 1) return { status: 'capture_unavailable' };
           const downloads = Array.from(exactOwner.querySelectorAll?.(artifactDownloadSelector) || []).filter(served);
           const button = downloads[target.occurrenceWithinMessage] || null;
-          if (!button) return { status: 'not_found' };
+          if (!button) return { status: 'capture_unavailable' };
           const name = artifactName(exactOwner, button);
           if (name !== target.name) return { status: 'name_mismatch' };
           button.scrollIntoView?.({ block: 'center', inline: 'center' });
@@ -3056,9 +3063,15 @@ export class ChatGPTController {
       const firstTarget = await this.#locateConversationArtifactTarget(descriptor, { timeoutMs });
       if (firstTarget?.status !== 'found') {
         outcomes.push({
-          status: firstTarget?.status === 'name_mismatch' ? 'download_failed' : 'not_found',
+          status: firstTarget?.status === 'name_mismatch' || firstTarget?.status === 'capture_unavailable'
+            ? 'download_failed'
+            : 'not_found',
           artifactKey,
-          ...(firstTarget?.status === 'name_mismatch' ? { reason: 'name_mismatch' } : {})
+          ...(firstTarget?.status === 'name_mismatch'
+            ? { reason: 'name_mismatch' }
+            : firstTarget?.status === 'capture_unavailable'
+              ? { reason: 'capture_unavailable' }
+              : {})
         });
         continue;
       }
@@ -3099,9 +3112,15 @@ export class ChatGPTController {
         capture.cancel?.();
         await capture.outcome;
         outcomes.push({
-          status: stableTarget?.status === 'name_mismatch' ? 'download_failed' : 'not_found',
+          status: stableTarget?.status === 'name_mismatch' || stableTarget?.status === 'capture_unavailable'
+            ? 'download_failed'
+            : 'not_found',
           artifactKey,
-          ...(stableTarget?.status === 'name_mismatch' ? { reason: 'name_mismatch' } : {})
+          ...(stableTarget?.status === 'name_mismatch'
+            ? { reason: 'name_mismatch' }
+            : stableTarget?.status === 'capture_unavailable'
+              ? { reason: 'capture_unavailable' }
+              : {})
         });
         continue;
       }

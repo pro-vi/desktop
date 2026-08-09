@@ -3733,6 +3733,7 @@ test('chatgpt-controller: conversation download arms capture before clicking and
     name: 'report.md'
   });
   const order = [];
+  const locatorScripts = [];
   let resolveDownload;
   const downloadOutcome = new Promise((resolve) => { resolveDownload = resolve; });
   const page = {
@@ -3742,6 +3743,7 @@ test('chatgpt-controller: conversation download arms capture before clicking and
     async evaluate(js) {
       if (js.includes('locate-conversation-artifact')) {
         order.push('locate');
+        locatorScripts.push(js);
         return { status: 'found', x: 100, y: 200 };
       }
       return {
@@ -3814,6 +3816,8 @@ test('chatgpt-controller: conversation download arms capture before clicking and
   assert.equal(JSON.stringify(outcomes).includes('signed=private'), false);
   assert.equal(order.indexOf('capture') < order.indexOf('mouseDown'), true);
   assert.equal(order.filter((entry) => entry === 'locate').length, 2);
+  assert.equal(locatorScripts.every((script) => script.includes('messageId(node) === target.providerMessageId')), true);
+  assert.equal(locatorScripts.every((script) => script.includes('exactMessages[0]?.closest')), true);
 });
 
 test('chatgpt-controller: legacy transcript projection reads DOM windows while library capture stays canonical-only', async (t) => {
