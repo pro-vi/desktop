@@ -11,7 +11,7 @@ test('mcp tool profiles default to the full compatibility surface', () => {
   const resolved = resolveMcpToolProfile({ argv: [], env: {} });
   assert.deepEqual(resolved.profiles, ['full']);
   assert.deepEqual(new Set(resolved.tools), new Set(ALL_MCP_TOOL_NAMES));
-  assert.equal(resolved.tools.length, 46);
+  assert.equal(resolved.tools.length, 47);
 });
 
 test('mcp tool profiles expose the transcript and import library workflow', () => {
@@ -42,6 +42,7 @@ test('mcp tool profiles expose a narrow core workflow', () => {
     'agentify_research',
     'agentify_read_page',
     'agentify_read_conversation',
+    'agentify_download_conversation_artifacts',
     'agentify_status',
     'agentify_stop_query',
     'agentify_list_runs',

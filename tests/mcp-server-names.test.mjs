@@ -17,6 +17,7 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_query'"), 'expected agentify_query tool');
   assert.ok(src.includes("'agentify_research'"), 'expected agentify_research tool');
   assert.ok(src.includes("'agentify_read_conversation'"), 'expected agentify_read_conversation tool');
+  assert.ok(src.includes("'agentify_download_conversation_artifacts'"), 'expected conversation artifact download tool');
   assert.ok(src.includes("'agentify_track_transcript'"), 'expected agentify_track_transcript tool');
   assert.ok(src.includes("'agentify_sync_transcript'"), 'expected agentify_sync_transcript tool');
   assert.ok(src.includes("'agentify_list_transcripts'"), 'expected agentify_list_transcripts tool');
@@ -82,6 +83,7 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(!tabCreateBlock[0].includes('modelIntent,'), 'tab_create should not forward sticky modelIntent');
   assert.ok(src.includes("body: { model, tabId, key, maxChars: maxChars || 200_000 }"), 'expected model hint on read_page');
   assert.ok(src.includes("path: '/read-conversation'"), 'expected read_conversation to hit its dedicated endpoint');
+  assert.ok(src.includes("path: '/conversation-artifacts/download'"), 'expected conversation artifact download forwarding');
   assert.ok(src.includes("body: { model, tabId, key, timeoutMs: timeoutMs || 10 * 60_000 }"), 'expected model hint on ensure_ready');
   assert.ok(src.includes("body: { model, tabId, key, mode: mode || 'all', maxImages: maxImages || 6, maxFiles: maxFiles || 6 }"), 'expected model hint on save_artifacts');
   assert.ok(src.includes("key: effectiveKey"), 'expected effectiveKey forwarding on query');

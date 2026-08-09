@@ -7,6 +7,7 @@ import vm from 'node:vm';
 
 import { ChatGPTController } from '../chatgpt-controller.mjs';
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
+import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 
 function readyState() {
   return {
@@ -3719,6 +3720,100 @@ test('chatgpt-controller: inventory completeness remains independent from transc
   assert.equal(result.reason, 'leading_turn_missing');
   assert.equal(result.artifactInventory.status, 'complete');
   assert.deepEqual(result.artifactInventory.items.map((item) => item.name), ['result.md']);
+});
+
+test('chatgpt-controller: conversation download arms capture before clicking and strips provider source', async (t) => {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-conversation-download-'));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+  const descriptor = createConversationArtifactDescriptor({
+    providerConversationId: 'conversation-download',
+    providerMessageId: 'message-download',
+    providerTurnIndex: 4,
+    occurrenceWithinMessage: 0,
+    name: 'report.md'
+  });
+  const order = [];
+  let resolveDownload;
+  const downloadOutcome = new Promise((resolve) => { resolveDownload = resolve; });
+  const page = {
+    async getUrl() {
+      return 'https://chatgpt.com/c/conversation-download';
+    },
+    async evaluate(js) {
+      if (js.includes('locate-conversation-artifact')) {
+        order.push('locate');
+        return { status: 'found', x: 100, y: 200 };
+      }
+      return {
+        captureWindow: {
+          status: 'complete',
+          rawTurns: [
+            { ordinal: 0, providerMessageId: 'message-user', role: 'user', text: 'Prompt' },
+            { ordinal: 1, providerMessageId: 'message-download', role: 'assistant', text: 'Reply' }
+          ],
+          evidence: {
+            topBoundary: true,
+            bottomBoundary: true,
+            orderedWindowStitching: true,
+            scrollPasses: 2,
+            windowCount: 1,
+            messageCount: 2,
+            providerIdCount: 2,
+            byteCount: Buffer.byteLength('user') + Buffer.byteLength('Prompt') + Buffer.byteLength('message-user') +
+              Buffer.byteLength('assistant') + Buffer.byteLength('Reply') + Buffer.byteLength('message-download')
+          }
+        },
+        artifactInventory: {
+          status: 'complete',
+          items: [{
+            providerMessageId: descriptor.providerMessageId,
+            providerTurnIndex: descriptor.providerTurnIndex,
+            occurrenceWithinMessage: descriptor.occurrenceWithinMessage,
+            name: descriptor.name,
+            kind: descriptor.kind
+          }]
+        }
+      };
+    },
+    beginDownloadCapture() {
+      order.push('capture');
+      return { ready: Promise.resolve(true), outcome: downloadOutcome, cancel() {} };
+    },
+    async moveMouse() {},
+    async mouseDown() {
+      order.push('mouseDown');
+    },
+    async mouseUp() {
+      order.push('mouseUp');
+      const filePath = path.join(outDir, 'report.md');
+      await fs.writeFile(filePath, '# report\n', 'utf8');
+      resolveDownload({
+        status: 'completed',
+        path: filePath,
+        name: 'report.md',
+        suggestedName: 'report.md',
+        mime: 'text/markdown',
+        source: 'https://chatgpt.com/backend-api/estuary/content?signed=private'
+      });
+    }
+  };
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const outcomes = await controller.downloadConversationArtifacts({
+    artifactKeys: [descriptor.artifactKey],
+    maxFiles: 1,
+    maxBytesPerFile: 1_024,
+    timeoutMs: 2_000,
+    outDir
+  });
+
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].status, 'downloaded');
+  assert.equal(outcomes[0].artifactKey, descriptor.artifactKey);
+  assert.equal(outcomes[0].originalName, 'report.md');
+  assert.equal(JSON.stringify(outcomes).includes('signed=private'), false);
+  assert.equal(order.indexOf('capture') < order.indexOf('mouseDown'), true);
+  assert.equal(order.filter((entry) => entry === 'locate').length, 2);
 });
 
 test('chatgpt-controller: legacy transcript projection reads DOM windows while library capture stays canonical-only', async (t) => {

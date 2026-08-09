@@ -994,6 +994,53 @@ registerTool(
 );
 
 registerTool(
+  'agentify_download_conversation_artifacts',
+  {
+    description:
+      'Download selected file artifacts from anywhere in a ChatGPT conversation. First call agentify_read_conversation and pass artifactKey values from artifactInventory. Agentify uses the authenticated browser session, saves files to its local artifact store without opening a native Save dialog, and returns one outcome per requested key.',
+    inputSchema: {
+      model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT.'),
+      tabId: z.string().optional().describe('Tab/session id to use.'),
+      key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
+      chatUrl: z.string().optional().describe('Canonical ChatGPT conversation URL containing the inventoried artifacts.'),
+      artifactKeys: z.array(z.string()).describe('Stable artifactKey values returned by agentify_read_conversation.'),
+      maxFiles: z.number().optional().describe('Maximum selected files to process. Default 6, maximum 50.'),
+      maxBytesPerFile: z.number().optional().describe('Maximum bytes allowed for each file. Default 100 MiB, maximum 1 GiB.'),
+      timeoutMs: z.number().optional().describe('Per-file download timeout in milliseconds. Default 20000, maximum 120000.')
+    }
+  },
+  async ({ model, tabId, key, chatUrl, artifactKeys, maxFiles, maxBytesPerFile, timeoutMs }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/conversation-artifacts/download',
+      body: {
+        model,
+        tabId,
+        key,
+        chatUrl,
+        artifactKeys,
+        maxFiles: maxFiles || 6,
+        maxBytesPerFile: maxBytesPerFile || 100 * 1024 * 1024,
+        timeoutMs: timeoutMs || 20_000
+      }
+    });
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          requestedCount: data.requestedCount || 0,
+          savedCount: data.savedCount || 0,
+          outcomes: data.outcomes || []
+        }, null, 2)
+      }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
   'agentify_import_selected_chatgpt_export',
   {
     description: 'Open Agentify Desktop\'s native ZIP picker for human selection, then import the selected ChatGPT export without returning its path or one-use grant to the agent.',

@@ -284,9 +284,10 @@ function catalogVerificationFixture() {
 test('mcp server tools/list exposes only the selected core profile', async () => {
   const toolDefinitions = await listedToolDefinitions('core');
   const tools = toolDefinitions.map((tool) => tool.name);
-  assert.equal(tools.length, 10);
+  assert.equal(tools.length, 11);
   assert.ok(tools.includes('agentify_query'));
   assert.ok(tools.includes('agentify_wait_run'));
+  assert.ok(tools.includes('agentify_download_conversation_artifacts'));
   assert.equal(tools.includes('agentify_shutdown'), false);
   assert.equal(tools.includes('agentify_navigate'), false);
 
@@ -299,6 +300,11 @@ test('mcp server tools/list exposes only the selected core profile', async () =>
   const query = toolDefinitions.find((tool) => tool.name === 'agentify_query');
   assert.equal(query.inputSchema?.properties?.liveSourceId?.type, 'string');
   assert.equal(query.inputSchema?.required?.includes('liveSourceId') || false, false);
+
+  const artifactDownload = toolDefinitions.find((tool) => tool.name === 'agentify_download_conversation_artifacts');
+  assert.equal(artifactDownload.inputSchema?.properties?.artifactKeys?.type, 'array');
+  assert.equal(artifactDownload.inputSchema?.properties?.artifactKeys?.items?.type, 'string');
+  assert.equal(artifactDownload.inputSchema?.required?.includes('artifactKeys'), true);
 });
 
 test('mcp query forwards an optional live continuation binding through real stdio and preserves generic queries', async (t) => {

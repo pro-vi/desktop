@@ -3,6 +3,7 @@ const CORE_TOOLS = [
   'agentify_research',
   'agentify_read_page',
   'agentify_read_conversation',
+  'agentify_download_conversation_artifacts',
   'agentify_status',
   'agentify_stop_query',
   'agentify_list_runs',

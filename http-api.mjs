@@ -34,6 +34,12 @@ import {
 import { parseExportGrantId } from './export-import-grants.mjs';
 import { parseTranscriptSourceKey } from './transcript-source-contract.mjs';
 import {
+  parseConversationArtifactDownloadBatch,
+  parseConversationArtifactDownloadOutcome,
+  parseConversationArtifactDownloadRequest,
+  parseConversationArtifactProvenance
+} from './conversation-artifact-contract.mjs';
+import {
   ensureArtifactsDir,
   ensureRunArtifactsDir,
   listArtifacts,
@@ -96,6 +102,9 @@ function authOk(req, token) {
 
 function mapErrorToHttp(error) {
   const msg = String(error?.message || '');
+  if (error?.code === 'invalid_conversation_artifact_contract') {
+    return { code: 400, body: { error: 'invalid_conversation_artifact_contract', data: error?.data || null } };
+  }
   if (msg === 'body_too_large') return { code: 413, body: { error: 'body_too_large' } };
   if (msg === 'invalid_json') return { code: 400, body: { error: 'invalid_json' } };
   if (msg === 'invalid_vendor') return { code: 400, body: { error: 'invalid_vendor', data: error?.data || null } };
@@ -835,6 +844,63 @@ async function saveArtifactsForTab({
   });
 
   return { dir: outDir, items: saved };
+}
+
+async function registerConversationArtifactOutcome({
+  stateDir,
+  tabs,
+  tabId,
+  outDir,
+  controllerOutcome
+}) {
+  const artifactKey = String(controllerOutcome?.artifactKey || '');
+  if (controllerOutcome?.status !== 'downloaded') {
+    return parseConversationArtifactDownloadOutcome(controllerOutcome);
+  }
+  const rawPath = String(controllerOutcome.filePath || '').trim();
+  try {
+    const provenance = parseConversationArtifactProvenance(controllerOutcome.provenance);
+    if (provenance.artifactKey !== artifactKey) throw new Error('artifact_key_mismatch');
+    const ready = await assertArtifactFileReady(rawPath);
+    const realOutDir = await fs.realpath(outDir);
+    assertWithin({
+      filePath: ready.realFilePath || ready.filePath,
+      allowedRoots: [realOutDir]
+    });
+    const tabMeta = getTabMeta(tabs, tabId);
+    const record = await registerArtifact({
+      stateDir,
+      tabId,
+      tabKey: tabMeta?.key || null,
+      vendorId: tabMeta?.vendorId || null,
+      kind: 'file',
+      filePath: ready.realFilePath || ready.filePath,
+      originalName: provenance.name,
+      mime: controllerOutcome.mime || null,
+      source: null,
+      meta: { conversationArtifact: provenance }
+    });
+    return parseConversationArtifactDownloadOutcome({
+      status: 'saved',
+      artifactKey,
+      artifact: {
+        id: record.id,
+        path: record.path,
+        name: record.name,
+        mime: record.mime,
+        kind: 'file',
+        savedAt: record.savedAt
+      },
+      provenance
+    });
+  } catch {
+    if (rawPath) await fs.rm(rawPath, { force: true }).catch(() => {});
+    return parseConversationArtifactDownloadOutcome({
+      status: 'download_failed',
+      artifactKey,
+      reason: 'artifact_invalid'
+    });
+  }
 }
 
 async function exportResearchArtifactsForTab({
@@ -4422,6 +4488,109 @@ export function startHttpApi({
             return await controller.readConversationText({ maxChars });
           });
           return sendJson(res, 200, { ok: true, tabId, ...capture });
+        } finally {
+          releaseOperationScopes(heldScopes, op.id);
+        }
+      }
+
+      if (url.pathname === '/conversation-artifacts/download' && req.method === 'POST') {
+        await projectsReady;
+        const body = await parseBody(req);
+        const downloadRequest = parseConversationArtifactDownloadRequest({
+          artifactKeys: Array.isArray(body.artifactKeys) ? body.artifactKeys : [],
+          maxFiles: positiveIntOr(body.maxFiles, 6, 50),
+          maxBytesPerFile: positiveIntOr(body.maxBytesPerFile, 100 * 1024 * 1024, 1024 * 1024 * 1024),
+          timeoutMs: positiveIntOr(body.timeoutMs, 20_000, 120_000)
+        });
+        const entryTarget = body.chatUrl ? parseChatGptEntryTarget(body.chatUrl) : null;
+        const { scope, scopes: initialScopes } = requestOperationScopes(body, { requestUrl: url });
+        const op = {
+          id: crypto.randomUUID(),
+          kind: 'conversation-artifact-download',
+          tabId: null,
+          startedAt: Date.now(),
+          source: requestSourceForBody(body),
+          phase: 'resolving_tab',
+          scope
+        };
+        const heldScopes = new Set();
+        reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
+        try {
+          const tabId = await resolveTab({
+            tabs,
+            defaultTabId,
+            body,
+            url,
+            showTabsByDefault: governor.showTabsByDefault,
+            createIfMissing: true,
+            vendors
+          });
+          assertTabNotBusy(tabId);
+          reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
+          const controller = tabs.getControllerById(tabId);
+          if (typeof controller?.downloadConversationArtifacts !== 'function') {
+            return sendJson(res, 501, { error: 'conversation_artifact_download_unsupported' });
+          }
+          const result = await runExclusive(controller, async () => {
+            if (entryTarget) await controller.prepareChatEntry({ chatUrl: entryTarget.chatUrl });
+            const tabMeta = getTabMeta(tabs, tabId);
+            const outDir = await ensureArtifactsDir({
+              stateDir,
+              tabId,
+              tabKey: tabMeta?.key || null,
+              vendorId: tabMeta?.vendorId || null
+            });
+            const controllerOutcomes = await controller.downloadConversationArtifacts({
+              ...downloadRequest,
+              outDir
+            });
+            const requestedKeys = new Set(downloadRequest.artifactKeys);
+            const outcomesByKey = new Map();
+            const duplicateKeys = new Set();
+            for (const controllerOutcome of Array.isArray(controllerOutcomes) ? controllerOutcomes : []) {
+              const artifactKey = String(controllerOutcome?.artifactKey || '');
+              if (!requestedKeys.has(artifactKey)) continue;
+              if (outcomesByKey.has(artifactKey)) duplicateKeys.add(artifactKey);
+              else outcomesByKey.set(artifactKey, controllerOutcome);
+            }
+            const outcomes = [];
+            for (const artifactKey of downloadRequest.artifactKeys) {
+              const controllerOutcome = duplicateKeys.has(artifactKey)
+                ? null
+                : outcomesByKey.get(artifactKey);
+              try {
+                outcomes.push(await registerConversationArtifactOutcome({
+                  stateDir,
+                  tabs,
+                  tabId,
+                  outDir,
+                  controllerOutcome: controllerOutcome || {
+                    status: 'download_failed',
+                    artifactKey,
+                    reason: 'artifact_invalid'
+                  }
+                }));
+              } catch {
+                outcomes.push(parseConversationArtifactDownloadOutcome({
+                  status: 'download_failed',
+                  artifactKey,
+                  reason: 'artifact_invalid'
+                }));
+              }
+            }
+            const batch = parseConversationArtifactDownloadBatch({
+              outcomes,
+              requestedCount: downloadRequest.artifactKeys.length,
+              savedCount: outcomes.filter((outcome) => outcome.status === 'saved').length
+            });
+            return { dir: outDir, batch };
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            tabId,
+            dir: result.dir,
+            ...result.batch
+          });
         } finally {
           releaseOperationScopes(heldScopes, op.id);
         }

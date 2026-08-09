@@ -988,9 +988,7 @@ export class ChatGPTController {
       !ownerSelector ||
       !turnOrdinalSelector ||
       !stopSelector ||
-      !generationIndicatorSelector ||
-      !artifactDownloadSelector ||
-      !artifactNamedButtonSelector
+      !generationIndicatorSelector
     ) {
       return {
         captureWindow: partialCaptureWindow(),
@@ -1014,6 +1012,7 @@ export class ChatGPTController {
       const generationIndicatorSelector = ${JSON.stringify(generationIndicatorSelector)};
       const artifactDownloadSelector = ${JSON.stringify(artifactDownloadSelector)};
       const artifactNamedButtonSelector = ${JSON.stringify(artifactNamedButtonSelector)};
+      const artifactSelectorsAvailable = !!artifactDownloadSelector && !!artifactNamedButtonSelector;
       const transcriptTextForNode = ${extractChatGptTranscriptMessageText.toString()};
       const utf8Bytes = (value) => {
         let bytes = 0;
@@ -1223,7 +1222,7 @@ export class ChatGPTController {
           ? 'id:' + message.providerMessageId
           : 'unpositioned';
       const conversationArtifacts = new Map();
-      let artifactInputInvalid = false;
+      let artifactInputInvalid = !artifactSelectorsAvailable;
       const artifactNodeIsServed = (node) => {
         if (!node || node.isConnected === false || node.hidden === true) return false;
         if (node.getAttribute?.('aria-hidden') === 'true' || node.hasAttribute?.('inert')) return false;
@@ -1247,6 +1246,7 @@ export class ChatGPTController {
         providerMessageId,
         providerTurnIndex
       }) => {
+        if (!artifactSelectorsAvailable) return;
         if (String(role || '').trim().toLowerCase() !== 'assistant') return;
         let downloadButtons;
         try {
@@ -1347,7 +1347,7 @@ export class ChatGPTController {
           grouped.push(message);
           assistantRecordsByOwner.set(scopeNode, grouped);
         }
-        for (const [scopeNode, assistantRecords] of assistantRecordsByOwner) {
+        for (const [scopeNode, assistantRecords] of artifactSelectorsAvailable ? assistantRecordsByOwner : []) {
           let scopedDownloads = [];
           try {
             scopedDownloads = Array.from(scopeNode.querySelectorAll?.(artifactDownloadSelector) || []);
@@ -2874,6 +2874,285 @@ export class ChatGPTController {
       }),
       artifactInventory
     };
+  }
+
+  async #locateConversationArtifactTarget(descriptor, { timeoutMs = 20_000 } = {}) {
+    const messageSelector = this.#transcriptDependencySelector(
+      'transcript-message',
+      '[data-message-author-role]'
+    );
+    const ownerSelector = this.#transcriptDependencySelector(
+      'transcript-message-id',
+      '[data-message-id]'
+    );
+    const turnOrdinalSelector = this.#transcriptDependencySelector(
+      'transcript-turn-ordinal',
+      '[data-testid^="conversation-turn-"]'
+    );
+    const artifactDownloadSelector = this.#transcriptDependencySelector(
+      'conversation-artifact-download-button',
+      'button[aria-label="Download file"]'
+    );
+    const artifactNamedButtonSelector = this.#transcriptDependencySelector(
+      'conversation-artifact-named-button',
+      'button[aria-label]'
+    );
+    if (
+      !messageSelector ||
+      !ownerSelector ||
+      !turnOrdinalSelector ||
+      !artifactDownloadSelector ||
+      !artifactNamedButtonSelector
+    ) return { status: 'capture_unavailable' };
+    const cap = Math.max(1_000, Math.min(60_000, Math.floor(Number(timeoutMs) || 20_000)));
+    return await this.#eval(`(async () => {
+      const operation = 'locate-conversation-artifact';
+      const target = ${JSON.stringify(descriptor)};
+      const messageSelector = ${JSON.stringify(messageSelector)};
+      const ownerSelector = ${JSON.stringify(ownerSelector)};
+      const turnOrdinalSelector = ${JSON.stringify(turnOrdinalSelector)};
+      const artifactDownloadSelector = ${JSON.stringify(artifactDownloadSelector)};
+      const artifactNamedButtonSelector = ${JSON.stringify(artifactNamedButtonSelector)};
+      const deadline = performance.now() + ${cap};
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const served = (node) => {
+        if (!node || node.isConnected === false || node.hidden === true) return false;
+        if (node.getAttribute?.('aria-hidden') === 'true' || node.hasAttribute?.('inert')) return false;
+        if (node.closest?.('[aria-hidden="true"], [inert]')) return false;
+        try {
+          const style = window.getComputedStyle?.(node);
+          return style?.display !== 'none' && style?.visibility !== 'hidden' &&
+            style?.visibility !== 'collapse' && style?.contentVisibility !== 'hidden';
+        } catch {
+          return false;
+        }
+      };
+      const turnOrdinal = (owner) => {
+        const matched = /^conversation-turn-(\d+)$/.exec(owner?.getAttribute?.('data-testid') || '');
+        return matched ? Number(matched[1]) : null;
+      };
+      const messageId = (node) => node?.getAttribute?.('data-message-id') ||
+        node?.closest?.(ownerSelector)?.getAttribute?.('data-message-id') || null;
+      const messagesIn = (owner) => {
+        const nodes = Array.from(owner?.querySelectorAll?.(messageSelector) || []);
+        if (owner?.matches?.(messageSelector)) nodes.unshift(owner);
+        return [...new Set(nodes)];
+      };
+      const artifactName = (scopeNode, downloadButton) => {
+        let container = downloadButton?.parentElement || null;
+        let depth = 0;
+        while (container && container !== scopeNode && depth < 8) {
+          const candidates = Array.from(container.querySelectorAll?.(artifactNamedButtonSelector) || [])
+            .filter((candidate) => candidate !== downloadButton && served(candidate))
+            .filter((candidate) => String(candidate.getAttribute?.('aria-label') || '').trim() !== 'Download file');
+          if (candidates.length === 1) return String(candidates[0].getAttribute?.('aria-label') || '').trim();
+          if (candidates.length > 1) return null;
+          container = container.parentElement;
+          depth += 1;
+        }
+        return null;
+      };
+      const scrollParentFor = (node) => {
+        let current = node?.parentElement || null;
+        while (current) {
+          try {
+            const style = window.getComputedStyle?.(current);
+            if (/(auto|scroll)/.test(String(style?.overflowY || '')) && current.scrollHeight > current.clientHeight) {
+              return current;
+            }
+          } catch {}
+          current = current.parentElement;
+        }
+        return document.scrollingElement || document.documentElement;
+      };
+      let quietPasses = 0;
+      while (performance.now() < deadline) {
+        const owners = Array.from(document.querySelectorAll(turnOrdinalSelector)).filter(served);
+        const exactOwner = owners.find((owner) => turnOrdinal(owner) === target.providerTurnIndex) || null;
+        if (exactOwner) {
+          const matchingMessages = messagesIn(exactOwner)
+            .filter((node) => String(node.getAttribute?.('data-message-author-role') || '').trim().toLowerCase() === 'assistant')
+            .filter((node) => messageId(node) === target.providerMessageId);
+          if (matchingMessages.length !== 1) return { status: 'not_found' };
+          const downloads = Array.from(exactOwner.querySelectorAll?.(artifactDownloadSelector) || []).filter(served);
+          const button = downloads[target.occurrenceWithinMessage] || null;
+          if (!button) return { status: 'not_found' };
+          const name = artifactName(exactOwner, button);
+          if (name !== target.name) return { status: 'name_mismatch' };
+          button.scrollIntoView?.({ block: 'center', inline: 'center' });
+          await wait(80);
+          const rectangle = button.getBoundingClientRect?.();
+          if (
+            Number(rectangle?.width || 0) > 0 &&
+            Number(rectangle?.height || 0) > 0
+          ) {
+            return {
+              status: 'found',
+              x: rectangle.left + rectangle.width / 2,
+              y: rectangle.top + rectangle.height / 2
+            };
+          }
+        }
+        const ordinals = owners.map(turnOrdinal).filter(Number.isSafeInteger).sort((left, right) => left - right);
+        const scroller = scrollParentFor(exactOwner || owners[0] || document.body);
+        if (!scroller) return { status: 'capture_unavailable' };
+        const before = Number(scroller.scrollTop || 0);
+        const maximum = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
+        const step = Math.max(240, Math.floor(Number(scroller.clientHeight || 0) * 0.8));
+        const shouldMoveUp = ordinals.length === 0 || target.providerTurnIndex < ordinals[0];
+        const next = shouldMoveUp
+          ? Math.max(0, before - step)
+          : Math.min(maximum, before + step);
+        scroller.scrollTop = next;
+        await wait(140);
+        const after = Number(scroller.scrollTop || 0);
+        quietPasses = Math.abs(after - before) < 0.5 ? quietPasses + 1 : 0;
+        if (quietPasses >= 4) return { status: 'not_found' };
+      }
+      return { status: 'capture_unavailable' };
+    })()`);
+  }
+
+  async downloadConversationArtifacts({
+    artifactKeys = [],
+    maxFiles = 6,
+    maxBytesPerFile = 100 * 1024 * 1024,
+    timeoutMs = 20_000,
+    outDir = path.join(this.stateDir, 'downloads')
+  } = {}) {
+    const keys = Array.from(artifactKeys, String).slice(0, Math.max(0, Number(maxFiles) || 0));
+    if (!keys.length) return [];
+    let target;
+    try {
+      target = parseChatGptEntryTarget(await this.getUrl());
+      if (target?.kind !== 'canonical-conversation') throw new Error('not_canonical');
+    } catch {
+      return keys.map((artifactKey) => ({ status: 'conversation_changed', artifactKey }));
+    }
+    const providerConversationId = providerConversationIdFromOwnedLocation(
+      locationFromConversationUrl(target.chatUrl)
+    );
+    const bundle = await this.#captureConversationBundle({
+      maxCaptureBytes: 16 * 1024 * 1024,
+      providerConversationId
+    });
+    if (bundle.artifactInventory.status !== 'complete') {
+      return keys.map((artifactKey) => ({
+        status: 'download_failed',
+        artifactKey,
+        reason: 'capture_unavailable'
+      }));
+    }
+    const descriptorByKey = new Map(
+      bundle.artifactInventory.items.map((descriptor) => [descriptor.artifactKey, descriptor])
+    );
+    const outcomes = [];
+    for (const artifactKey of keys) {
+      const descriptor = descriptorByKey.get(artifactKey);
+      if (!descriptor) {
+        outcomes.push({ status: 'not_found', artifactKey });
+        continue;
+      }
+      const firstTarget = await this.#locateConversationArtifactTarget(descriptor, { timeoutMs });
+      if (firstTarget?.status !== 'found') {
+        outcomes.push({
+          status: firstTarget?.status === 'name_mismatch' ? 'download_failed' : 'not_found',
+          artifactKey,
+          ...(firstTarget?.status === 'name_mismatch' ? { reason: 'name_mismatch' } : {})
+        });
+        continue;
+      }
+      if (typeof this.page?.beginDownloadCapture !== 'function') {
+        outcomes.push({ status: 'download_failed', artifactKey, reason: 'download_unavailable' });
+        continue;
+      }
+      const capture = this.page.beginDownloadCapture({
+        timeoutMs,
+        outDir,
+        maxBytes: maxBytesPerFile
+      });
+      const captureReady = await capture.ready;
+      if (!captureReady) {
+        await capture.outcome;
+        outcomes.push({ status: 'download_failed', artifactKey, reason: 'download_unavailable' });
+        continue;
+      }
+      const stableTarget = await this.#locateConversationArtifactTarget(descriptor, {
+        timeoutMs: Math.min(timeoutMs, 5_000)
+      });
+      let currentConversationId = null;
+      try {
+        const currentTarget = parseChatGptEntryTarget(await this.getUrl());
+        if (currentTarget?.kind === 'canonical-conversation') {
+          currentConversationId = providerConversationIdFromOwnedLocation(
+            locationFromConversationUrl(currentTarget.chatUrl)
+          );
+        }
+      } catch {}
+      if (currentConversationId !== providerConversationId) {
+        capture.cancel?.();
+        await capture.outcome;
+        outcomes.push({ status: 'conversation_changed', artifactKey });
+        continue;
+      }
+      if (stableTarget?.status !== 'found') {
+        capture.cancel?.();
+        await capture.outcome;
+        outcomes.push({
+          status: stableTarget?.status === 'name_mismatch' ? 'download_failed' : 'not_found',
+          artifactKey,
+          ...(stableTarget?.status === 'name_mismatch' ? { reason: 'name_mismatch' } : {})
+        });
+        continue;
+      }
+      await this.#clickAt(stableTarget.x, stableTarget.y);
+      const downloaded = await capture.outcome;
+      if (downloaded?.status === 'size_limit_exceeded') {
+        outcomes.push({
+          status: 'size_limit_exceeded',
+          artifactKey,
+          maxBytes: downloaded.maxBytes
+        });
+        continue;
+      }
+      if (downloaded?.status !== 'completed') {
+        outcomes.push({
+          status: 'download_failed',
+          artifactKey,
+          reason: downloaded?.status === 'timeout'
+            ? 'timeout'
+            : downloaded?.status === 'unavailable'
+              ? 'download_unavailable'
+              : 'interrupted'
+        });
+        continue;
+      }
+      const suggestedName = String(downloaded.suggestedName || downloaded.name || '').trim();
+      if (suggestedName !== descriptor.name) {
+        await fs.rm(downloaded.path, { force: true }).catch(() => {});
+        outcomes.push({ status: 'download_failed', artifactKey, reason: 'name_mismatch' });
+        continue;
+      }
+      outcomes.push({
+        status: 'downloaded',
+        artifactKey,
+        filePath: downloaded.path,
+        originalName: descriptor.name,
+        mime: downloaded.mime || null,
+        provenance: {
+          schemaVersion: descriptor.schemaVersion,
+          artifactKey,
+          conversationUrl: target.chatUrl,
+          providerConversationId: descriptor.providerConversationId,
+          providerMessageId: descriptor.providerMessageId,
+          providerTurnIndex: descriptor.providerTurnIndex,
+          occurrenceWithinMessage: descriptor.occurrenceWithinMessage,
+          name: descriptor.name,
+          kind: descriptor.kind
+        }
+      });
+    }
+    return outcomes;
   }
 
   async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {

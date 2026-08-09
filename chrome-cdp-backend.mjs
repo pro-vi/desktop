@@ -699,6 +699,9 @@ class ChromeCdpPageAdapter {
       if (discard) await removePartial();
       resolveOutcome(value || { status: 'unavailable' });
     };
+    const cancelCapture = () => {
+      void finish({ status: 'cancelled' }, { cancelDownload: true, discard: true });
+    };
     const findDownloadedFile = async () => {
       if (suggestedFilename) {
         const exactPath = path.join(targetDir, suggestedFilename);
@@ -784,6 +787,7 @@ class ChromeCdpPageAdapter {
               status: 'completed',
               path: filePath,
               name: path.basename(filePath),
+              suggestedName: suggestedFilename || path.basename(filePath),
               mime: null,
               source: sourceUrl
             });
@@ -798,7 +802,7 @@ class ChromeCdpPageAdapter {
       resolveReady(true);
     })();
 
-    return { ready, outcome };
+    return { ready, outcome, cancel: cancelCapture };
   }
 
   async setFileInputFiles(files) {

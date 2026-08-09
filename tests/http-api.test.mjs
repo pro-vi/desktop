@@ -15,6 +15,7 @@ import {
   createChatGptTranscriptCapture,
   createTranscriptSyncService
 } from '../transcript-sync.mjs';
+import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 
 async function req({ port, token, method, pth, body, headers = {} }) {
   const res = await fetch(`http://127.0.0.1:${port}${pth}`, {
@@ -4974,6 +4975,100 @@ test('http-api: read-conversation enters a supplied chatUrl without sending anyt
     ['prepareChatEntry', 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6'],
     ['readConversationText']
   ]);
+});
+
+test('http-api: conversation artifact download registers successes and preserves per-item failures', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-conversation-artifacts-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const savedDescriptor = createConversationArtifactDescriptor({
+    providerConversationId: 'conversation-files',
+    providerMessageId: 'message-files',
+    providerTurnIndex: 4,
+    occurrenceWithinMessage: 0,
+    name: 'report.md'
+  });
+  const missingDescriptor = createConversationArtifactDescriptor({
+    providerConversationId: 'conversation-files',
+    providerMessageId: 'message-missing',
+    providerTurnIndex: 6,
+    occurrenceWithinMessage: 0,
+    name: 'missing.md'
+  });
+  const calls = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async ({ chatUrl }) => calls.push(['prepareChatEntry', chatUrl]),
+    downloadConversationArtifacts: async ({ artifactKeys, outDir }) => {
+      calls.push(['downloadConversationArtifacts', artifactKeys]);
+      const filePath = path.join(outDir, 'report.md');
+      await fs.writeFile(filePath, '# report\n', 'utf8');
+      return [
+        {
+          status: 'downloaded',
+          artifactKey: savedDescriptor.artifactKey,
+          filePath,
+          originalName: savedDescriptor.name,
+          mime: 'text/markdown',
+          provenance: {
+            schemaVersion: savedDescriptor.schemaVersion,
+            artifactKey: savedDescriptor.artifactKey,
+            conversationUrl: 'https://chatgpt.com/c/conversation-files',
+            providerConversationId: savedDescriptor.providerConversationId,
+            providerMessageId: savedDescriptor.providerMessageId,
+            providerTurnIndex: savedDescriptor.providerTurnIndex,
+            occurrenceWithinMessage: savedDescriptor.occurrenceWithinMessage,
+            name: savedDescriptor.name,
+            kind: savedDescriptor.kind
+          }
+        },
+        { status: 'not_found', artifactKey: missingDescriptor.artifactKey }
+      ];
+    }
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/conversation-artifacts/download',
+    body: {
+      chatUrl: 'https://chatgpt.com/c/conversation-files',
+      artifactKeys: [savedDescriptor.artifactKey, missingDescriptor.artifactKey],
+      maxFiles: 2,
+      maxBytesPerFile: 1_024,
+      timeoutMs: 2_000
+    }
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(data.requestedCount, 2);
+  assert.equal(data.savedCount, 1);
+  assert.deepEqual(data.outcomes.map((outcome) => outcome.status), ['saved', 'not_found']);
+  assert.deepEqual(calls, [
+    ['prepareChatEntry', 'https://chatgpt.com/c/conversation-files'],
+    ['downloadConversationArtifacts', [savedDescriptor.artifactKey, missingDescriptor.artifactKey]]
+  ]);
+  const index = await fs.readFile(path.join(stateDir, 'artifacts', 'index.jsonl'), 'utf8');
+  assert.equal(index.includes('signed'), false);
+  assert.equal(index.includes('conversation-files'), true);
 });
 
 test('http-api: read-conversation rejects an unusable chatUrl before touching a tab', async (t) => {

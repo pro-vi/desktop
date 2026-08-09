@@ -387,7 +387,7 @@ class ElectronPageAdapter {
     if (!session || !targetDir) {
       resolveReady(false);
       resolveOutcome({ status: 'unavailable' });
-      return { ready, outcome };
+      return { ready, outcome, cancel: () => {} };
     }
 
     const waitStartedAt = Date.now();
@@ -415,6 +415,7 @@ class ElectronPageAdapter {
       if (discard) removePartial();
       resolveOutcome(value || { status: 'unavailable' });
     };
+    const cancelCapture = () => finish({ status: 'cancelled' }, { cancel: true, discard: true });
 
     const onDownload = (_event, item, sourceWebContents) => {
       if (!item || settled) return;
@@ -485,6 +486,7 @@ class ElectronPageAdapter {
           status: 'completed',
           path: finalPath,
           name: path.basename(finalPath),
+          suggestedName: rawName,
           mime: typeof item.getMimeType === 'function' ? item.getMimeType() || null : null,
           source: typeof item.getURL === 'function' ? item.getURL() || null : null
         });
@@ -506,12 +508,12 @@ class ElectronPageAdapter {
     } catch {
       resolveReady(false);
       finish({ status: 'unavailable' });
-      return { ready, outcome };
+      return { ready, outcome, cancel: cancelCapture };
     }
     timer = setTimeout(() => {
       finish({ status: 'timeout' }, { cancel: true, discard: true });
     }, Math.max(1, Number(timeoutMs) || 0));
-    return { ready, outcome };
+    return { ready, outcome, cancel: cancelCapture };
   }
 }
 
