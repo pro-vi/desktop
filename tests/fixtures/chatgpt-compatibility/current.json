@@ -187,7 +187,10 @@
     "controller-dom-044",
     "controller-dom-045",
     "controller-dom-046",
-    "controller-dom-047"
+    "controller-dom-047",
+    "controller-dom-048",
+    "controller-dom-049",
+    "controller-dom-050"
   ],
   "resolverFixture": {
     "anchorId": "prompt-textarea",

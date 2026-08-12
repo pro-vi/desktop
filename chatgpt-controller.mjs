@@ -4073,6 +4073,7 @@ export class ChatGPTController {
     const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
     const targetIntentSource = JSON.stringify(normalizedIntent);
     const targetPatternSource = JSON.stringify(meta.pattern);
+    const targetPowerIndexSource = JSON.stringify(meta.powerIndex);
     const anyModePatternSource = JSON.stringify(CHATGPT_ANY_MODE_PATTERN);
     const start = Date.now();
     let last = null;
@@ -4086,6 +4087,7 @@ export class ChatGPTController {
       const snap = await this.#eval(`(() => {
         const targetIntent = ${targetIntentSource};
         const targetRe = new RegExp(${targetPatternSource}, 'i');
+        const targetPowerIndex = ${targetPowerIndexSource};
         const anyModeRe = new RegExp(${anyModePatternSource}, 'i');
         const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
         const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
@@ -4305,6 +4307,57 @@ export class ChatGPTController {
             label: confirmedTargetTrigger.label || null
           };
         }
+
+        const powerControl = menuRoots
+          .flatMap((root) => Array.from(root.querySelectorAll('[role="menuitem"][aria-label="Power"]')))
+          .find(visible) || null;
+        const powerThumb = powerControl?.querySelector('[data-model-reasoning-effort-slider] [role="slider"][aria-valuenow]') || null;
+        const powerTrack = powerControl?.querySelector('[data-model-reasoning-effort-slider] > [data-orientation="horizontal"]') || null;
+        const powerMin = Number(powerThumb?.getAttribute?.('aria-valuemin'));
+        const powerMax = Number(powerThumb?.getAttribute?.('aria-valuemax'));
+        const powerIndex = Number(powerThumb?.getAttribute?.('aria-valuenow'));
+        const powerLabels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
+        const powerIntents = ['instant', 'thinking', null, null, 'extended-pro'];
+        if (
+          powerControl &&
+          powerTrack &&
+          visible(powerTrack) &&
+          modePickerPrimitives.modePowerScaleLooksSupported({ min: powerMin, max: powerMax, current: powerIndex }) &&
+          Number.isInteger(targetPowerIndex) &&
+          targetPowerIndex >= 0 &&
+          targetPowerIndex < powerLabels.length
+        ) {
+          const currentPowerTrigger = triggerCandidates.find((item) => item.intent === powerIntents[powerIndex]) || null;
+          if (powerIndex === targetPowerIndex && currentPowerTrigger?.intent === targetIntent) {
+            return {
+              active: true,
+              action: 'none',
+              reason: 'mode_power_active',
+              targetIntent,
+              activeIntent: powerIntents[powerIndex],
+              label: currentPowerTrigger.label || powerLabels[powerIndex],
+              menuOpen: true,
+              powerIndex
+            };
+          }
+
+          const trackRect = rectOf(powerTrack);
+          const trackInset = Math.min(14, Math.max(0, trackRect.w / 4));
+          const targetX = trackRect.x + trackInset + (targetPowerIndex / 4) * Math.max(0, trackRect.w - 2 * trackInset);
+          const targetY = trackRect.y + trackRect.h / 2;
+          return {
+            active: false,
+            action: 'pointer_power',
+            reason: 'clicked_mode_power',
+            targetIntent,
+            activeIntent: powerIntents[powerIndex],
+            label: powerLabels[powerIndex],
+            rect: { x: targetX - 6, y: targetY - 6, w: 12, h: 12 },
+            menuOpen: true,
+            powerIndex,
+            targetPowerIndex
+          };
+        }
         if (clickedRecently && !menuRoots.length) {
           const targetTrigger = triggerCandidates.find((item) => item.intent === targetIntent) || null;
           if (targetTrigger) {
@@ -4413,7 +4466,7 @@ export class ChatGPTController {
         await sleep(250);
         continue;
       }
-      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option' || snap?.action === 'pointer_power') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
         attempts.push(modeIntentClickAttempt(snap));
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
         const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));

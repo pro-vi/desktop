@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "contractVersion": "2026-07-30",
-  "capturedAt": "2026-07-30T00:00:00.000Z",
+  "contractVersion": "2026-08-12",
+  "capturedAt": "2026-08-12T09:21:25.000Z",
   "vendorId": "chatgpt",
   "capabilities": [
     {
@@ -1852,6 +1852,30 @@
     "dependency": "conversation-artifact-named-button",
     "reason": "provider-visible conversation file cards expose the filename on the named button paired with the download action",
     "selector": "button[aria-label]"
+  },
+  {
+    "id": "controller-dom-048",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "mode-power-control",
+    "reason": "the provider-visible transient compact picker exposes its power adjustment as a menu item only after the anchored mode menu opens",
+    "selector": "[role=\"menuitem\"][aria-label=\"Power\"]"
+  },
+  {
+    "id": "controller-dom-049",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "mode-power-value",
+    "reason": "the provider-visible transient compact picker exposes its current bounded power position only after the anchored mode menu opens",
+    "selector": "[data-model-reasoning-effort-slider] [role=\"slider\"][aria-valuenow]"
+  },
+  {
+    "id": "controller-dom-050",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "mode-power-track",
+    "reason": "the provider-visible transient compact picker exposes the clickable power track only after the anchored mode menu opens",
+    "selector": "[data-model-reasoning-effort-slider] > [data-orientation=\"horizontal\"]"
   }
 ]
 }

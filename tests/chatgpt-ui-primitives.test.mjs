@@ -13,6 +13,7 @@ import {
   modeTriggerConfirmsActive,
   modeIntentForLabel,
   modeIntentLabelLooksUsable,
+  modePowerScaleLooksSupported,
   modelIntentForLabel,
   modelIntentLabelLooksUsable,
   modelOptionLabelLooksSelected,
@@ -406,6 +407,14 @@ test('chatgpt-ui-primitives: maps usable mode labels and rejects attachment chro
   assert.equal(modeIntentLabelLooksUsable('Pro Standard', 'extended-pro'), false);
 });
 
+test('chatgpt-ui-primitives: accepts only the observed five-step power scale', () => {
+  assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 0 }), true);
+  assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 4 }), true);
+  assert.equal(modePowerScaleLooksSupported({ min: 0, max: 5, current: 4 }), false);
+  assert.equal(modePowerScaleLooksSupported({ min: 1, max: 5, current: 1 }), false);
+  assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 5 }), false);
+});
+
 test('chatgpt-ui-primitives: classifies high-confidence mode controls', () => {
   assert.equal(
     isHighConfidenceModeControlDescriptor({
@@ -631,5 +640,6 @@ test('chatgpt-ui-primitives: exposes mode browser evaluator source and pending t
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modePickerPrimitives/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /scoreModeTriggerCandidate/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modeTriggerConfirmsActive/);
+  assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modePowerScaleLooksSupported/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /isHighConfidenceModeControlDescriptor/);
 });

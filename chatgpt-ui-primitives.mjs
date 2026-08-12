@@ -3,15 +3,18 @@ import { normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 export const CHATGPT_MODE_INTENT_META = Object.freeze({
   'extended-pro': Object.freeze({
     label: 'Pro Extended',
-    pattern: '\\bextended\\s*pro\\b|\\bpro\\s*extended\\b|^pro\\b(?!\\s+standard\\b)'
+    pattern: '\\bextended\\s*pro\\b|\\bpro\\s*extended\\b|^pro\\b(?!\\s+standard\\b)',
+    powerIndex: 4
   }),
   thinking: Object.freeze({
     label: 'Medium',
-    pattern: '\\bthinking\\b|\\breasoning\\b|\\bmedium\\b'
+    pattern: '\\bthinking\\b|\\breasoning\\b|\\bmedium\\b',
+    powerIndex: 1
   }),
   instant: Object.freeze({
     label: 'Instant',
-    pattern: '\\binstant\\b|\\bfast\\b'
+    pattern: '\\binstant\\b|\\bfast\\b',
+    powerIndex: 0
   })
 });
 
@@ -80,6 +83,18 @@ export function modeIntentLabelLooksUsable(label, targetIntent) {
   if (target === 'thinking') return /\bthinking\b|\breasoning\b|\bmedium\b/.test(text);
   if (target === 'instant') return /\binstant\b|\bfast\b/.test(text);
   return false;
+}
+
+export function modePowerScaleLooksSupported({ min, max, current } = {}) {
+  return (
+    Number.isInteger(min) &&
+    min === 0 &&
+    Number.isInteger(max) &&
+    max === 4 &&
+    Number.isInteger(current) &&
+    current >= min &&
+    current <= max
+  );
 }
 
 export function modelIntentPatternMatchesLabel(label, intent) {
@@ -412,6 +427,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${normalizeModeIntentToken.toString()}
     ${modeIntentForLabel.toString()}
     ${modeIntentLabelLooksUsable.toString()}
+    ${modePowerScaleLooksSupported.toString()}
     ${modelPickerControlText.toString()}
     ${descriptorText.toString()}
     ${isHighConfidenceModeControlDescriptor.toString()}
@@ -420,6 +436,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${modeTriggerConfirmsActive.toString()}
     return {
       modeIntentForLabel,
+      modePowerScaleLooksSupported,
       modePickerControlText: modelPickerControlText,
       isHighConfidenceModeControlDescriptor,
       scoreModeTriggerCandidate,
