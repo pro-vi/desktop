@@ -373,7 +373,8 @@ export class ChatGPTController {
     uiContract = null,
     onCompatibilityObservation = null,
     compatibilityBackend = 'electron',
-    captureHostTimeoutMs = 330_000
+    captureHostTimeoutMs = 330_000,
+    navigationTimeoutMs = 30_000
   }) {
     this.page = page;
     this.selectors = selectors;
@@ -388,6 +389,11 @@ export class ChatGPTController {
       parsedCaptureHostTimeoutMs >= 1 && parsedCaptureHostTimeoutMs <= 10 * 60_000
       ? parsedCaptureHostTimeoutMs
       : 330_000;
+    const parsedNavigationTimeoutMs = Math.floor(Number(navigationTimeoutMs));
+    this.navigationTimeoutMs = Number.isSafeInteger(parsedNavigationTimeoutMs) &&
+      parsedNavigationTimeoutMs >= 1 && parsedNavigationTimeoutMs <= 5 * 60_000
+      ? parsedNavigationTimeoutMs
+      : 30_000;
     this.onBlocked = onBlocked;
     this.onUnblocked = onUnblocked;
     this.stateDir = stateDir;
@@ -584,7 +590,21 @@ export class ChatGPTController {
   }
 
   async navigate(url) {
-    await this.page.navigate(url);
+    const navigation = Promise.resolve().then(async () => await this.page.navigate(url));
+    let timer = null;
+    const timeoutError = new Error('timeout_waiting_for_navigation');
+    timeoutError.data = { timeoutMs: this.navigationTimeoutMs };
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(timeoutError), this.navigationTimeoutMs);
+    });
+    try {
+      await Promise.race([navigation, deadline]);
+    } catch (error) {
+      if (error === timeoutError) this.quarantineExclusiveUntil(navigation);
+      throw error;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   }
 
   async prepareChatEntry({ chatUrl, timeoutMs = 30_000, forceNavigation = false } = {}) {

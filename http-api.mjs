@@ -148,6 +148,7 @@ function mapErrorToHttp(error) {
   if (msg === 'max_tabs_reached') return { code: 409, body: { error: 'max_tabs_reached' } };
   if (msg === 'rate_limited') return { code: 429, body: { error: 'rate_limited', ...(error?.data || {}) } };
   if (msg === 'query_aborted') return { code: 409, body: { error: 'query_aborted', data: error?.data || null } };
+  if (msg === 'timeout_waiting_for_navigation') return { code: 408, body: { error: 'timeout_waiting_for_navigation', data: error?.data || null } };
   if (msg === 'timeout_waiting_for_prompt') return { code: 408, body: { error: 'timeout_waiting_for_prompt', data: error?.data || null } };
   if (msg === 'timeout_waiting_for_response') return { code: 408, body: { error: 'timeout_waiting_for_response', data: error?.data || null } };
   if (msg === 'artifacts_folder_open_failed') return { code: 500, body: { error: 'artifacts_folder_open_failed', data: error?.data || null } };
@@ -1365,6 +1366,14 @@ export function startHttpApi({
         status: 'stopped',
         label: 'Stopped',
         detail: 'Queued run was stopped before a provider slot opened.'
+      };
+    }
+    if (message === 'timeout_waiting_for_navigation') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Navigation timed out',
+        detail: 'The provider tab did not finish navigation before its deadline.'
       };
     }
     if (message === 'timeout_waiting_for_prompt') {

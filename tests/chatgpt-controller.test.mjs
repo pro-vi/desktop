@@ -61,6 +61,30 @@ test('chatgpt-controller: timed-out exclusive work quarantines already queued op
   assert.equal(await controller.runExclusive(async () => 'released'), 'released');
 });
 
+test('chatgpt-controller: timed-out navigation quarantines its tab until navigation settles', async () => {
+  let settleNavigation;
+  const navigation = new Promise((resolve) => { settleNavigation = resolve; });
+  const controller = new ChatGPTController({
+    page: { navigate: async () => await navigation },
+    selectors: {},
+    navigationTimeoutMs: 5
+  });
+
+  await assert.rejects(
+    controller.runExclusive(async () => await controller.navigate('https://chatgpt.com/g/g-p-test/project')),
+    (error) => error?.message === 'timeout_waiting_for_navigation' && error?.data?.timeoutMs === 5
+  );
+  await assert.rejects(
+    controller.runExclusive(async () => 'unsafe-overlap'),
+    (error) => error?.code === 'tab_busy'
+  );
+
+  settleNavigation();
+  await navigation;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await controller.runExclusive(async () => 'released'), 'released');
+});
+
 function virtualizedConversationPage(messages, {
   initialStart = 0,
   initialEnd = messages.length,

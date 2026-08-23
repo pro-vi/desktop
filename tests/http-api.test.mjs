@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 
 import { startHttpApi } from '../http-api.mjs';
+import { ChatGPTController } from '../chatgpt-controller.mjs';
 import { writeProjects } from '../state.mjs';
 import { identityFromOwnedLocation } from '../conversation-identity.mjs';
 import { locationFromConversationUrl } from '../chatgpt-location.mjs';
@@ -3515,6 +3516,87 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
   assert.equal(retriedRun.data.run.kind, 'research');
   assert.equal(retriedRun.data.run.retryOf, originalRunId);
   assert.equal(retriedRun.data.run.materializedReplay.kind, 'research');
+});
+
+test('http-api: timed-out research navigation releases its provider slot for another tab', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-navigation-timeout-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  let settleNavigation;
+  const navigation = new Promise((resolve) => { settleNavigation = resolve; });
+  t.after(() => settleNavigation());
+  const researchController = new ChatGPTController({
+    page: {
+      getUrl: async () => 'https://chatgpt.com/',
+      navigate: async () => await navigation
+    },
+    selectors: {},
+    navigationTimeoutMs: 5
+  });
+  let queryCalls = 0;
+  const queryController = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => {
+      queryCalls += 1;
+      return { text: 'slot recovered', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/recovered'
+  };
+  const listedTabs = [
+    { id: 'research-tab', key: 'stuck-research', vendorId: 'chatgpt', vendorName: 'ChatGPT' },
+    { id: 'query-tab', key: 'next-query', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+  ];
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key }) => key === 'stuck-research' ? 'research-tab' : 'query-tab',
+    createTab: async () => 'query-tab',
+    closeTab: async () => true,
+    updateTabMeta: () => {},
+    getControllerById: (tabId) => tabId === 'research-tab' ? researchController : queryController
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 'query-tab',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 1, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, tabs: listedTabs })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/research',
+    body: {
+      key: 'stuck-research',
+      projectUrl: 'https://chatgpt.com/g/g-p-test/project',
+      prompt: 'This must not strand the provider slot.'
+    }
+  });
+  assert.equal(started.res.status, 202);
+
+  const failed = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.finishedAt ? run.data.run : null;
+  });
+  assert.equal(failed.status, 'error');
+  assert.equal(failed.label, 'Navigation timed out');
+  assert.equal(failed.providerSlot.status, 'released');
+
+  const recovered = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'next-query', prompt: 'use the released slot' }
+  });
+  assert.equal(recovered.res.status, 200);
+  assert.equal(queryCalls, 1);
 });
 
 test('http-api: research merges saved bundle promptPrefix into packed prompt and replay', async (t) => {
