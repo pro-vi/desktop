@@ -139,8 +139,10 @@ function assistantCaptureSignatures(capture) {
 
 function captureExtendsAssistantBaseline(capture, baseline) {
   const current = assistantCaptureSignatures(capture);
-  if (!current || !Array.isArray(baseline) || current.length <= baseline.length) return false;
-  return baseline.every((signature, index) => current[index] === signature);
+  if (!current || !baseline || typeof baseline !== 'object') return false;
+  if (baseline.kind === 'empty') return current.length > 0;
+  if (baseline.kind !== 'provider-tail' || typeof baseline.signature !== 'string') return false;
+  return current.length >= 2 && current[current.length - 2] === baseline.signature;
 }
 
 function looksLikeResearchShellText(value) {
@@ -5904,7 +5906,11 @@ export class ChatGPTController {
         { anchorId: 'assistant-message', postcondition: (result) => typeof result?.text === 'string' && result.text.length > 0 }
       );
     if (!options?.durableObservation) return await operation();
-    const timeoutMs = Math.max(1, Math.floor(Number(options.timeoutMs) || 1));
+    const timeoutMs = Math.max(
+      1,
+      Math.floor(Number(options.timeoutMs) || 0),
+      Math.floor(Number(options.minimumTimeoutMs) || 0)
+    );
     const reconcileGraceMs = Number.isFinite(Number(options.reconcileGraceMs)) && Number(options.reconcileGraceMs) > 0
       ? Math.floor(Number(options.reconcileGraceMs))
       : Math.max(5 * 60_000, Math.min(timeoutMs, 10 * 60_000));
@@ -5914,7 +5920,7 @@ export class ChatGPTController {
     try {
       return await this.#runResponseObservationWithDeadline(
         operation,
-        timeoutMs + reconcileGraceMs + recoveryTimeoutMs
+        timeoutMs + reconcileGraceMs + recoveryTimeoutMs + 5_000
       );
     } catch (error) {
       if (error?.code !== 'response_observation_deadline') throw error;
@@ -5934,17 +5940,17 @@ export class ChatGPTController {
     }
   }
 
-  async #captureAssistantBaseline({ preSendCount = 0, preSendText = '' } = {}) {
+  async #captureAssistantBaseline({ preSendCount = 0, preSendText = '', providerMessageId = null } = {}) {
     const currentUrl = await this.getUrl().catch(() => null);
     let target = null;
     try {
       target = parseChatGptEntryTarget(currentUrl);
     } catch {}
     if (target?.kind !== 'canonical-conversation') {
-      return preSendCount === 0 && !String(preSendText || '').trim() ? [] : null;
+      return preSendCount === 0 && !String(preSendText || '').trim() ? { kind: 'empty' } : null;
     }
-    const capture = await this.captureConversation({ maxCaptureBytes: 16 * 1024 * 1024 });
-    return assistantCaptureSignatures(capture);
+    const id = String(providerMessageId || '').trim();
+    return id ? { kind: 'provider-tail', signature: `provider:${id}` } : null;
   }
 
   async #waitForAssistantStableImpl({
@@ -5961,6 +5967,7 @@ export class ChatGPTController {
     imageGeneration = false,
     durableObservation = false,
     reconcileGraceMs = null,
+    recoveryTimeoutMs = null,
     structuredAssistantBaseline = null
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
@@ -6226,7 +6233,13 @@ export class ChatGPTController {
       try {
         const target = parseChatGptEntryTarget(conversationUrl);
         if (target?.kind === 'canonical-conversation') {
-          const capture = await this.captureConversation({ maxCaptureBytes: 16 * 1024 * 1024 });
+          const effectiveRecoveryTimeoutMs = Number.isFinite(Number(recoveryTimeoutMs)) && Number(recoveryTimeoutMs) > 0
+            ? Math.floor(Number(recoveryTimeoutMs))
+            : Math.min(this.captureHostTimeoutMs, 30_000);
+          const capture = await this.#runResponseObservationWithDeadline(
+            async () => await this.captureConversation({ maxCaptureBytes: 16 * 1024 * 1024 }),
+            effectiveRecoveryTimeoutMs
+          );
           const assistants = capture?.status === 'complete'
             ? capture.rawTurns.filter((turn) => String(turn?.role || '').trim().toLowerCase() === 'assistant')
             : [];
@@ -6318,16 +6331,27 @@ export class ChatGPTController {
       // typing: on some ChatGPT pages fallback text includes the composer, so prompt
       // staging/clearing can otherwise masquerade as assistant progress.
       const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+      const assistantOwnerSel = JSON.stringify(this.#transcriptDependencySelector(
+        'transcript-message-id',
+        '[data-message-id]'
+      ) || '');
       const prePrompt = await this.#eval(`(() => {
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
         const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
-        return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
+        const ownerSelector = ${assistantOwnerSel};
+        const owner = lastNode && ownerSelector ? lastNode.closest(ownerSelector) : null;
+        const rawProviderMessageId = lastNode?.getAttribute?.('data-message-id') || owner?.getAttribute?.('data-message-id') || '';
+        const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
+          ? rawProviderMessageId
+          : null;
+        return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText, providerMessageId };
       })()`);
       const structuredAssistantBaseline = durableObservation
         ? await this.#captureAssistantBaseline({
             preSendCount: prePrompt?.count || 0,
-            preSendText: prePrompt?.lastText || ''
+            preSendText: prePrompt?.lastText || '',
+            providerMessageId: prePrompt?.providerMessageId || null
           })
         : null;
       await this.#typePrompt(prompt);
