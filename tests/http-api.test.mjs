@@ -1920,7 +1920,20 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
   let stopCalls = 0;
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => {
+    query: async ({ onProgress }) => {
+      await onProgress?.({
+        phase: 'reconciling_response',
+        responseDebug: {
+          version: 1,
+          softDeadlineMs: 1_000,
+          reconcileGraceMs: 500,
+          hardDeadlineMs: 1_500,
+          elapsedMs: 1_200,
+          count: 0,
+          stop: true,
+          textPreview: 'PRIVATE RESPONSE TEXT'
+        }
+      });
       await new Promise((_, reject) => {
         releaseQuery = () => {
           const err = new Error('query_aborted');
@@ -1971,6 +1984,7 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
   assert.equal(st1.data.activeQuery?.kind, 'query');
   assert.match(st1.data.activeQuery?.promptPreview || '', /hello from control center/);
   assert.equal(st1.data.runtime?.activeQueries?.length, 1);
+  const runId = st1.data.activeQuery?.id;
 
   const stop = await req({ port, token: 'secret', method: 'POST', pth: '/query/stop', body: {} });
   assert.equal(stop.res.status, 200);
@@ -1982,6 +1996,18 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
   assert.equal(qRes.res.status, 409);
   assert.equal(qRes.data.error, 'query_aborted');
   assert.equal(stopCalls, 1);
+
+  const persisted = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId }
+  });
+  assert.equal(persisted.data.run.status, 'stopped');
+  assert.equal(persisted.data.run.responseDebug.count, 0);
+  assert.equal('textPreview' in persisted.data.run.responseDebug, false);
+  assert.equal(JSON.stringify(persisted.data.run).includes('PRIVATE RESPONSE TEXT'), false);
 
   const st2 = await req({ port, token: 'secret', method: 'GET', pth: '/status' });
   assert.equal(st2.res.status, 200);

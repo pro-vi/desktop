@@ -1817,8 +1817,8 @@ export function startHttpApi({
       degradedFrom: outcome.degradedFrom || null,
       outputManifest: outcome.outputManifest || null,
       completionReceipt: outcome.completionReceipt || null,
-      responseDebug: outcome.responseDebug || null,
-      recovery: outcome.recovery || null,
+      ...(outcome.responseDebug ? { responseDebug: outcome.responseDebug } : {}),
+      ...(outcome.recovery ? { recovery: outcome.recovery } : {}),
       ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
     });
   };

@@ -5969,6 +5969,34 @@ export class ChatGPTController {
     return id ? { kind: 'provider-tail', signature: `provider:${id}` } : null;
   }
 
+  async #readPreSendAssistantState({ durableObservation = false } = {}) {
+    const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+    const assistantOwnerSel = JSON.stringify(this.#transcriptDependencySelector(
+      'transcript-message-id',
+      '[data-message-id]'
+    ) || '');
+    const snapshot = await this.#eval(`(() => {
+      const nodes = Array.from(document.querySelectorAll(${assistantSel}));
+      const lastNode = nodes[nodes.length - 1];
+      const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
+      const ownerSelector = ${assistantOwnerSel};
+      const owner = lastNode && ownerSelector ? lastNode.closest(ownerSelector) : null;
+      const rawProviderMessageId = lastNode?.getAttribute?.('data-message-id') || owner?.getAttribute?.('data-message-id') || '';
+      const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
+        ? rawProviderMessageId
+        : null;
+      return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText, providerMessageId };
+    })()`);
+    const structuredAssistantBaseline = durableObservation
+      ? await this.#captureAssistantBaseline({
+          preSendCount: snapshot?.count || 0,
+          preSendText: snapshot?.lastText || '',
+          providerMessageId: snapshot?.providerMessageId || null
+        })
+      : null;
+    return { snapshot, structuredAssistantBaseline };
+  }
+
   async #waitForAssistantStableImpl({
     timeoutMs = 5 * 60_000,
     stableMs = 1500,
@@ -6346,34 +6374,9 @@ export class ChatGPTController {
         });
       }
       await this.#attachFiles(attachments);
-      // Snapshot existing assistant messages before sending, so #waitForAssistantStable
-      // can distinguish pre-existing responses from the new one. Capture this before
-      // typing: on some ChatGPT pages fallback text includes the composer, so prompt
-      // staging/clearing can otherwise masquerade as assistant progress.
-      const assistantSel = JSON.stringify(this.selectors.assistantMessage);
-      const assistantOwnerSel = JSON.stringify(this.#transcriptDependencySelector(
-        'transcript-message-id',
-        '[data-message-id]'
-      ) || '');
-      const prePrompt = await this.#eval(`(() => {
-        const nodes = Array.from(document.querySelectorAll(${assistantSel}));
-        const lastNode = nodes[nodes.length - 1];
-        const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
-        const ownerSelector = ${assistantOwnerSel};
-        const owner = lastNode && ownerSelector ? lastNode.closest(ownerSelector) : null;
-        const rawProviderMessageId = lastNode?.getAttribute?.('data-message-id') || owner?.getAttribute?.('data-message-id') || '';
-        const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
-          ? rawProviderMessageId
-          : null;
-        return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText, providerMessageId };
-      })()`);
-      const structuredAssistantBaseline = durableObservation
-        ? await this.#captureAssistantBaseline({
-            preSendCount: prePrompt?.count || 0,
-            preSendText: prePrompt?.lastText || '',
-            providerMessageId: prePrompt?.providerMessageId || null
-          })
-        : null;
+      // Read before typing because fallback page text can include staged composer text.
+      const { snapshot: prePrompt, structuredAssistantBaseline } =
+        await this.#readPreSendAssistantState({ durableObservation });
       await this.#typePrompt(prompt);
       const sendDebug = await this.#clickSend();
       const result = await this.#waitForAssistantStable({
@@ -6933,14 +6936,9 @@ export class ChatGPTController {
         });
         await this.#emitProgress({ phase: 'activating_research_mode', researchMeta });
         await this.#attachFiles(attachments);
+        const { snapshot: preSend, structuredAssistantBaseline } =
+          await this.#readPreSendAssistantState({ durableObservation: true });
         await this.#typePrompt(prompt);
-        const assistantSel = JSON.stringify(this.selectors.assistantMessage);
-        const preSend = await this.#eval(`(() => {
-          const nodes = Array.from(document.querySelectorAll(${assistantSel}));
-          const lastNode = nodes[nodes.length - 1];
-          const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
-          return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
-        })()`);
         const sendDebug = await this.#clickSend();
         const result = await this.#waitForAssistantStable({
           timeoutMs: effectiveTimeoutMs,
@@ -6951,6 +6949,7 @@ export class ChatGPTController {
           minimumTimeoutMs: 60 * 60_000,
           minimumStableMs: 60_000,
           durableObservation: true,
+          structuredAssistantBaseline,
           extraThinkingPattern: '\\bresearching\\b|\\bsearching(?: the web)?\\b|\\breading sources?\\b|\\bclarifying\\b|\\bgathering\\b'
         });
         const exported = await this.#exportResearchMarkdown({

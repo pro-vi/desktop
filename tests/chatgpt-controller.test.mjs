@@ -3883,6 +3883,8 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
   let sendChecks = 0;
   let waitChecks = 0;
   let exportChecks = 0;
+  let typed = false;
+  let preSendSnapshotBeforeTyping = false;
 
   const page = {
     async navigate() {},
@@ -3903,7 +3905,13 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
       }
       if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
       if (js.includes('return { count: nodes.length')) {
-        return { count: 0, lastText: '', pageText: '' };
+        preSendSnapshotBeforeTyping = !typed;
+        return {
+          count: 1,
+          lastText: 'prior research answer',
+          pageText: 'prior research answer',
+          providerMessageId: 'prior-research-answer'
+        };
       }
       if (js.includes("already_generating")) {
         return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
@@ -3977,7 +3985,7 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
       return 'https://chatgpt.com/c/research-export';
     },
     async sendKey() {},
-    async insertText() {},
+    async insertText() { typed = true; },
     async moveMouse() {},
     async mouseDown() {},
     async mouseUp() {},
@@ -4031,6 +4039,7 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
 
     assert.equal(mutexCalls, 1);
     assert.equal(path.basename(result.research.exportedMarkdownPath), 'report.md');
+    assert.equal(preSendSnapshotBeforeTyping, true);
   } finally {
     controller.mutex = realMutex;
     Date.now = realNow;
