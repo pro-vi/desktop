@@ -1533,14 +1533,14 @@ registerTool(
       });
     } catch (error) {
       if (error?.message !== 'run_wait_timeout') throw error;
-      data = error?.data?.run
-        ? error.data
-        : await requestJson({
+      const fallbackData = error?.data?.run ? error.data : null;
+      data = await requestJson({
             ...conn,
             method: 'POST',
             path: '/runs/get',
             body: { runId, view: 'summary', includeOutputText: false }
-          });
+          }).catch(() => fallbackData);
+      if (!data?.run) throw error;
       return {
         content: [{ type: 'text', text: `waitTimedOut=true\n${runStatusText(data.run || null, data)}` }],
         structuredContent: { ...data, waitTimedOut: true },

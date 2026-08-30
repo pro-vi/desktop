@@ -97,6 +97,13 @@ export function modePowerScaleLooksSupported({ min, max, current } = {}) {
   );
 }
 
+export function parseModePowerInteger(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!/^-?\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 export function modePowerIntentForSupportedScale({ min, max, current, intents } = {}) {
   if (!modePowerScaleLooksSupported({ min, max, current }) || !Array.isArray(intents)) return null;
   const intent = String(intents[current] || '').trim();
@@ -433,6 +440,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${normalizeModeIntentToken.toString()}
     ${modeIntentForLabel.toString()}
     ${modeIntentLabelLooksUsable.toString()}
+    ${parseModePowerInteger.toString()}
     ${modePowerScaleLooksSupported.toString()}
     ${modePowerIntentForSupportedScale.toString()}
     ${modelPickerControlText.toString()}
@@ -443,6 +451,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${modeTriggerConfirmsActive.toString()}
     return {
       modeIntentForLabel,
+      parseModePowerInteger,
       modePowerScaleLooksSupported,
       modePowerIntentForSupportedScale,
       modePickerControlText: modelPickerControlText,

@@ -47,11 +47,10 @@ function normalizeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? safeClone(value) : null;
 }
 
-function normalizeResponseDebug(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.version) !== 1) return null;
+export function parseResponseDebug(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1) return null;
   const numberOrNull = (input) => {
-    const number = Number(input);
-    return Number.isFinite(number) && number >= 0 ? number : null;
+    return typeof input === 'number' && Number.isFinite(input) && input >= 0 ? input : null;
   };
   const booleanOrNull = (input) => typeof input === 'boolean' ? input : null;
   return {
@@ -122,7 +121,7 @@ function normalizeRun(input = {}) {
     packedContextSummary: normalizeObject(input.packedContextSummary),
     packedContextBudget: normalizeObject(input.packedContextBudget),
     providerSlot: normalizeObject(input.providerSlot),
-    responseDebug: normalizeResponseDebug(input.responseDebug),
+    responseDebug: parseResponseDebug(input.responseDebug),
     modeIntentProvenance: normalizeObject(input.modeIntentProvenance),
     modelIntentProvenance: normalizeObject(input.modelIntentProvenance),
     outputManifest: normalizeObject(input.outputManifest),

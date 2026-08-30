@@ -1054,6 +1054,78 @@ test('chatgpt-controller: durable reconciliation reaches a hard terminal with fi
   assert.equal(progress.some((patch) => patch.phase === 'reconciling_response'), true);
 });
 
+test('chatgpt-controller: hard reconciliation deadline bounds a hung response evaluation', async () => {
+  let sent = false;
+  let terminationCalls = 0;
+  let settleHungEvaluation = null;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('publishedCaptureWindow')) {
+        return {
+          captureWindow: {
+            status: 'partial',
+            reason: 'conversation_capture_timeout',
+            rawTurns: [],
+            evidence: {
+              topBoundary: false,
+              bottomBoundary: false,
+              orderedWindowStitching: true,
+              scrollPasses: 0,
+              windowCount: 1,
+              messageCount: 0,
+              providerIdCount: 0,
+              byteCount: 0
+            }
+          },
+          artifactInventory: { status: 'partial', reason: 'conversation_capture_timeout', items: [] }
+        };
+      }
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        return await new Promise((resolve) => { settleHungEvaluation = resolve; });
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async terminateEvaluation() {
+      terminationCalls += 1;
+      settleHungEvaluation?.(null);
+      return true;
+    },
+    async getUrl() { return sent ? 'https://chatgpt.com/c/hung-response' : 'https://chatgpt.com/'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown(x) { if (x > 300) sent = true; },
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    controller.query({
+      prompt: 'agentify',
+      timeoutMs: 30,
+      durableObservation: true,
+      reconcileGraceMs: 30,
+      recoveryTimeoutMs: 50
+    }),
+    (error) => error?.message === 'response_reconcile_timeout'
+  );
+  assert.equal(Date.now() - startedAt < 1_000, true);
+  assert.equal(terminationCalls, 1);
+});
+
 test('chatgpt-controller: final structured reconciliation recovers a selector-missed assistant turn', async () => {
   const realNow = Date.now;
   let fakeNow = 3_000_000;
@@ -1068,6 +1140,7 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
   ];
   const byteCount = rawTurns.reduce((total, turn) =>
     total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0);
+  let sent = false;
   const page = {
     async navigate() {},
     async evaluate(js) {
@@ -1114,11 +1187,11 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
       }
       throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
     },
-    async getUrl() { return 'https://chatgpt.com/c/reconcile-recovered'; },
+    async getUrl() { return sent ? 'https://chatgpt.com/c/reconcile-recovered' : 'https://chatgpt.com/'; },
     async sendKey() {},
     async insertText() {},
     async moveMouse() {},
-    async mouseDown() {},
+    async mouseDown(x) { if (x > 300) sent = true; },
     async mouseUp() {},
     async setFileInputFiles() {}
   };
@@ -1142,6 +1215,99 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
     assert.equal(result.text, recoveredText);
     assert.equal(result.meta.recoveredBy, 'structured_conversation_capture');
     assert.equal(result.meta.count, 1);
+    assert.equal(result.meta.modeUsed, null);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: final reconciliation rejects a baseline-only virtualized conversation', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_500_000;
+  Date.now = () => {
+    fakeNow += 100;
+    return fakeNow;
+  };
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'old-prompt', role: 'user', text: 'old question' },
+    { ordinal: 1, providerMessageId: 'old-answer', role: 'assistant', text: 'old answer' }
+  ];
+  const byteCount = rawTurns.reduce((total, turn) =>
+    total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0);
+  const completeCapture = {
+    captureWindow: {
+      status: 'complete',
+      rawTurns,
+      evidence: {
+        topBoundary: true,
+        bottomBoundary: true,
+        orderedWindowStitching: true,
+        scrollPasses: 2,
+        windowCount: 2,
+        messageCount: 2,
+        providerIdCount: 2,
+        byteCount
+      }
+    },
+    artifactInventory: { status: 'complete', items: [] }
+  };
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('publishedCaptureWindow')) return completeCapture;
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: true,
+          stopCount: 1,
+          sendEnabled: false,
+          sendFound: false,
+          txt: '',
+          count: 0,
+          usedFallback: true,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: '',
+          currentUrl: 'https://chatgpt.com/c/baseline-only'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/baseline-only'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    await assert.rejects(
+      controller.query({
+        prompt: 'new question',
+        timeoutMs: 1_000,
+        durableObservation: true,
+        reconcileGraceMs: 1_000
+      }),
+      (error) => {
+        assert.equal(error?.message, 'response_reconcile_timeout');
+        assert.equal(error?.data?.recovery?.advanced, false);
+        return true;
+      }
+    );
   } finally {
     Date.now = realNow;
   }

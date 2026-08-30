@@ -8,6 +8,47 @@ export const RUN_EXIT_CODE_BY_STATUS = Object.freeze({
   interrupted: 4
 });
 
+function runWaitTimeout(lastData) {
+  const error = new Error('run_wait_timeout');
+  error.data = lastData;
+  return error;
+}
+
+async function requestWithinDeadline({ request, requestOptions, remaining, signal, lastData }) {
+  const controller = new AbortController();
+  let timeoutId = null;
+  let deadlineWon = false;
+  const onAbort = () => controller.abort(signal?.reason || new Error('wait_aborted'));
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  const running = Promise.resolve().then(async () => await request({
+    ...requestOptions,
+    signal: controller.signal
+  }));
+  const deadline = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      deadlineWon = true;
+      const error = runWaitTimeout(lastData);
+      controller.abort(error);
+      reject(error);
+    }, Math.max(1, remaining));
+  });
+  try {
+    return await Promise.race([running, deadline]);
+  } catch (error) {
+    if (deadlineWon) {
+      running.catch(() => {});
+      throw runWaitTimeout(lastData);
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    signal?.removeEventListener?.('abort', onAbort);
+  }
+}
+
 export async function waitForRun({
   conn,
   runId,
@@ -25,12 +66,8 @@ export async function waitForRun({
   while (true) {
     if (signal?.aborted) throw signal.reason || new Error('wait_aborted');
     const remaining = timeoutMs > 0 ? timeoutMs - (Date.now() - startedAt) : Number.POSITIVE_INFINITY;
-    if (remaining <= 0) {
-      const error = new Error('run_wait_timeout');
-      error.data = lastData;
-      throw error;
-    }
-    const data = await request({
+    if (remaining <= 0) throw runWaitTimeout(lastData);
+    const requestOptions = {
       ...conn,
       method: 'POST',
       path: '/runs/wait',
@@ -41,9 +78,11 @@ export async function waitForRun({
         waitTimeoutMs: Math.min(30_000, Number.isFinite(remaining) ? Math.max(1, remaining) : 25_000),
         includeOutputText,
         maxOutputChars
-      },
-      signal
-    });
+      }
+    };
+    const data = Number.isFinite(remaining)
+      ? await requestWithinDeadline({ request, requestOptions, remaining, signal, lastData })
+      : await request({ ...requestOptions, signal });
     lastData = data;
     const run = data?.run;
     if (!run) throw new Error('invalid_run_wait_response');

@@ -15,6 +15,7 @@ import {
   modeIntentLabelLooksUsable,
   modePowerIntentForSupportedScale,
   modePowerScaleLooksSupported,
+  parseModePowerInteger,
   modelIntentForLabel,
   modelIntentLabelLooksUsable,
   modelOptionLabelLooksSelected,
@@ -414,6 +415,14 @@ test('chatgpt-ui-primitives: accepts only the observed five-step power scale', (
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 5, current: 4 }), false);
   assert.equal(modePowerScaleLooksSupported({ min: 1, max: 5, current: 1 }), false);
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 5 }), false);
+});
+
+test('chatgpt-ui-primitives: rejects missing and malformed power attributes before numeric conversion', () => {
+  assert.equal(parseModePowerInteger('0'), 0);
+  assert.equal(parseModePowerInteger(' 4 '), 4);
+  for (const value of [null, undefined, '', ' ', '4.0', '1e0', 'NaN', false, 0]) {
+    assert.equal(parseModePowerInteger(value), null, String(value));
+  }
 });
 
 test('chatgpt-ui-primitives: maps only supported positions on the exact power scale', () => {

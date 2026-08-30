@@ -397,6 +397,13 @@ test('mcp wait timeout returns the latest diagnostic snapshot without mutating t
       count: 0
     }
   };
+  const completedRun = {
+    ...run,
+    status: 'success',
+    phase: 'completed',
+    revision: 5
+  };
+  let getCalls = 0;
   const api = http.createServer(async (req, res) => {
     if (req.url === '/health') return sendJson(res, { ok: true, serverId });
     if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
@@ -404,6 +411,11 @@ test('mcp wait timeout returns the latest diagnostic snapshot without mutating t
       waitCalls += 1;
       await readJsonBody(req);
       return sendJson(res, { ok: true, run });
+    }
+    if (req.url === '/runs/get') {
+      getCalls += 1;
+      await readJsonBody(req);
+      return sendJson(res, { ok: true, run: completedRun });
     }
     return sendJsonStatus(res, 404, { error: 'not_found' });
   });
@@ -434,12 +446,13 @@ test('mcp wait timeout returns the latest diagnostic snapshot without mutating t
   }
 
   assert.equal(waitCalls > 0, true);
+  assert.equal(getCalls, 1);
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.waitTimedOut, true);
-  assert.equal(result.structuredContent.run.status, 'running');
+  assert.equal(result.structuredContent.run.status, 'success');
   assert.equal(result.structuredContent.run.responseDebug.count, 0);
   assert.match(result.content[0].text, /^waitTimedOut=true/m);
-  assert.match(result.content[0].text, /phase=reconciling_response/);
+  assert.match(result.content[0].text, /phase=completed/);
 });
 
 test('mcp query forwards an optional live continuation binding through real stdio and preserves generic queries', async (t) => {

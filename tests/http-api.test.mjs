@@ -2459,6 +2459,68 @@ test('http-api: reconciliation timeout persists diagnostics and releases its pro
   assert.equal(queryCalls, 2);
 });
 
+test('http-api: synchronous reconciliation timeout is typed and content-free', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-sync-reconcile-timeout-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => {
+      const error = new Error('response_reconcile_timeout');
+      error.data = {
+        conversationUrl: 'https://chatgpt.com/c/sync-timeout',
+        responseDebug: {
+          version: 1,
+          softDeadlineMs: 1_000,
+          reconcileGraceMs: 500,
+          hardDeadlineMs: 1_500,
+          elapsedMs: 1_500,
+          count: 0,
+          stop: true,
+          textPreview: 'PRIVATE RESPONSE TEXT',
+          currentUrl: 'https://chatgpt.com/c/private-debug-url'
+        },
+        recovery: { status: 'partial', reason: 'conversation_generation_active', assistantCount: 0, advanced: false }
+      };
+      throw error;
+    },
+    getUrl: async () => 'https://chatgpt.com/c/sync-timeout'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 1, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'stall synchronously' }
+  });
+  assert.equal(res.status, 408);
+  assert.equal(data.error, 'response_reconcile_timeout');
+  assert.equal(data.data.responseDebug.count, 0);
+  assert.equal('textPreview' in data.data.responseDebug, false);
+  assert.equal('currentUrl' in data.data.responseDebug, false);
+  assert.equal(JSON.stringify(data).includes('PRIVATE RESPONSE TEXT'), false);
+  assert.equal(JSON.stringify(data).includes('private-debug-url'), false);
+});
+
 test('http-api: query forwards explicit model intent without persisting it as key meta', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-model-project-'));
   let controllerCalled = false;

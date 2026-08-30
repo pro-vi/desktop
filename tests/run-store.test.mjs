@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { createRunStore } from '../run-store.mjs';
+import { createRunStore, parseResponseDebug } from '../run-store.mjs';
 
 function completionReceipt(kind = 'assistant-response') {
   return {
@@ -117,6 +117,23 @@ test('run-store: response diagnostics persist as an exact content-free summary',
   assert.equal('textPreview' in summary.responseDebug, false);
   assert.equal('currentUrl' in summary.responseDebug, false);
   assert.equal(JSON.stringify(summary).includes('PRIVATE RESPONSE TEXT'), false);
+});
+
+test('run-store: response diagnostics never coerce malformed boundary values', () => {
+  assert.equal(parseResponseDebug({ version: '1', elapsedMs: 10 }), null);
+  const parsed = parseResponseDebug({
+    version: 1,
+    elapsedMs: '10',
+    count: null,
+    stopCount: false,
+    hardDeadlineMs: 20,
+    stop: true
+  });
+  assert.equal(parsed.elapsedMs, null);
+  assert.equal(parsed.count, null);
+  assert.equal(parsed.stopCount, null);
+  assert.equal(parsed.hardDeadlineMs, 20);
+  assert.equal(parsed.stop, true);
 });
 
 test('run-store: finalize is exact-once for terminal state', async () => {

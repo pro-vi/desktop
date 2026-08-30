@@ -50,7 +50,7 @@ import {
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
-import { createRunStore } from './run-store.mjs';
+import { createRunStore, parseResponseDebug } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 import { providerTabOperationEvidence } from './provider-tab-operation-leases.mjs';
 import { isTerminalRunStatus } from './run-lifecycle.mjs';
@@ -151,6 +151,27 @@ function mapErrorToHttp(error) {
   if (msg === 'timeout_waiting_for_navigation') return { code: 408, body: { error: 'timeout_waiting_for_navigation', data: error?.data || null } };
   if (msg === 'timeout_waiting_for_prompt') return { code: 408, body: { error: 'timeout_waiting_for_prompt', data: error?.data || null } };
   if (msg === 'timeout_waiting_for_response') return { code: 408, body: { error: 'timeout_waiting_for_response', data: error?.data || null } };
+  if (msg === 'response_reconcile_timeout') {
+    const recovery = error?.data?.recovery && typeof error.data.recovery === 'object'
+      ? {
+          status: String(error.data.recovery.status || '').trim() || null,
+          reason: String(error.data.recovery.reason || '').trim() || null,
+          assistantCount: typeof error.data.recovery.assistantCount === 'number' ? error.data.recovery.assistantCount : null,
+          advanced: typeof error.data.recovery.advanced === 'boolean' ? error.data.recovery.advanced : null
+        }
+      : null;
+    return {
+      code: 408,
+      body: {
+        error: 'response_reconcile_timeout',
+        data: {
+          conversationUrl: String(error?.data?.conversationUrl || '').trim() || null,
+          responseDebug: parseResponseDebug(error?.data?.responseDebug),
+          recovery
+        }
+      }
+    };
+  }
   if (msg === 'artifacts_folder_open_failed') return { code: 500, body: { error: 'artifacts_folder_open_failed', data: error?.data || null } };
   if (msg === 'artifact_save_failed') return { code: 500, body: { error: 'artifact_save_failed', data: error?.data || null } };
   if (msg === 'research_requires_chatgpt') return { code: 409, body: { error: 'research_requires_chatgpt', data: error?.data || null } };
@@ -1407,7 +1428,7 @@ export function startHttpApi({
         label: 'Response reconciliation timed out',
         detail: 'No complete new assistant turn was available before the service hard deadline.',
         conversationUrl: detail?.conversationUrl || null,
-        responseDebug: detail?.responseDebug || null
+        responseDebug: parseResponseDebug(detail?.responseDebug)
       };
     }
     if (message === 'attachment_upload_failed') {

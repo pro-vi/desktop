@@ -126,6 +126,23 @@ function extractChatGptTranscriptMessageText(node) {
     .trim();
 }
 
+function assistantCaptureSignatures(capture) {
+  if (capture?.status !== 'complete' || !Array.isArray(capture.rawTurns)) return null;
+  return capture.rawTurns
+    .filter((turn) => String(turn?.role || '').trim().toLowerCase() === 'assistant')
+    .map((turn) => {
+      const providerMessageId = String(turn?.providerMessageId || '').trim();
+      if (providerMessageId) return `provider:${providerMessageId}`;
+      return `content:${crypto.createHash('sha256').update(String(turn?.text || '')).digest('hex')}`;
+    });
+}
+
+function captureExtendsAssistantBaseline(capture, baseline) {
+  const current = assistantCaptureSignatures(capture);
+  if (!current || !Array.isArray(baseline) || current.length <= baseline.length) return false;
+  return baseline.every((signature, index) => current[index] === signature);
+}
+
 function looksLikeResearchShellText(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!text) return false;
@@ -712,6 +729,42 @@ export class ChatGPTController {
       await termination.catch(() => {});
       const timeout = new Error('conversation_capture_timeout');
       timeout.code = 'conversation_capture_timeout';
+      throw timeout;
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
+  }
+
+  async #runResponseObservationWithDeadline(operation, timeoutMs) {
+    let timeoutId = null;
+    let expired = false;
+    let termination = Promise.resolve();
+    const running = Promise.resolve().then(operation);
+    const deadlineMs = Math.max(1, Math.floor(Number(timeoutMs) || 1));
+    const deadline = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        expired = true;
+        this.quarantineExclusiveUntil(running);
+        termination = this.#settleCaptureTermination();
+        const error = new Error('response_observation_deadline');
+        error.code = 'response_observation_deadline';
+        reject(error);
+      }, deadlineMs);
+    });
+    try {
+      const value = await Promise.race([running, deadline]);
+      if (expired) {
+        const error = new Error('response_observation_deadline');
+        error.code = 'response_observation_deadline';
+        throw error;
+      }
+      return value;
+    } catch (error) {
+      if (!expired) throw error;
+      running.catch(() => {});
+      await termination.catch(() => {});
+      const timeout = new Error('response_observation_deadline');
+      timeout.code = 'response_observation_deadline';
       throw timeout;
     } finally {
       if (timeoutId !== null) clearTimeout(timeoutId);
@@ -4340,9 +4393,9 @@ export class ChatGPTController {
           .find(visible) || null;
         const powerThumb = powerControl?.querySelector('[data-model-reasoning-effort-slider] [role="slider"][aria-valuenow]') || null;
         const powerTrack = powerControl?.querySelector('[data-model-reasoning-effort-slider] > [data-orientation="horizontal"]') || null;
-        const powerMin = Number(powerThumb?.getAttribute?.('aria-valuemin'));
-        const powerMax = Number(powerThumb?.getAttribute?.('aria-valuemax'));
-        const powerIndex = Number(powerThumb?.getAttribute?.('aria-valuenow'));
+        const powerMin = modePickerPrimitives.parseModePowerInteger(powerThumb?.getAttribute?.('aria-valuemin'));
+        const powerMax = modePickerPrimitives.parseModePowerInteger(powerThumb?.getAttribute?.('aria-valuemax'));
+        const powerIndex = modePickerPrimitives.parseModePowerInteger(powerThumb?.getAttribute?.('aria-valuenow'));
         const powerLabels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
         const powerIntents = ['instant', 'thinking', null, null, 'extended-pro'];
         if (
@@ -5845,11 +5898,53 @@ export class ChatGPTController {
   }
 
   async #waitForAssistantStable(options = {}) {
-    return await this.runCompatibilityCapability(
-      'response',
-      async () => await this.#waitForAssistantStableImpl(options),
-      { anchorId: 'assistant-message', postcondition: (result) => typeof result?.text === 'string' && result.text.length > 0 }
-    );
+    const operation = async () => await this.runCompatibilityCapability(
+        'response',
+        async () => await this.#waitForAssistantStableImpl(options),
+        { anchorId: 'assistant-message', postcondition: (result) => typeof result?.text === 'string' && result.text.length > 0 }
+      );
+    if (!options?.durableObservation) return await operation();
+    const timeoutMs = Math.max(1, Math.floor(Number(options.timeoutMs) || 1));
+    const reconcileGraceMs = Number.isFinite(Number(options.reconcileGraceMs)) && Number(options.reconcileGraceMs) > 0
+      ? Math.floor(Number(options.reconcileGraceMs))
+      : Math.max(5 * 60_000, Math.min(timeoutMs, 10 * 60_000));
+    const recoveryTimeoutMs = Number.isFinite(Number(options.recoveryTimeoutMs)) && Number(options.recoveryTimeoutMs) > 0
+      ? Math.floor(Number(options.recoveryTimeoutMs))
+      : Math.min(this.captureHostTimeoutMs, 30_000);
+    try {
+      return await this.#runResponseObservationWithDeadline(
+        operation,
+        timeoutMs + reconcileGraceMs + recoveryTimeoutMs
+      );
+    } catch (error) {
+      if (error?.code !== 'response_observation_deadline') throw error;
+      const timeout = new Error('response_reconcile_timeout');
+      timeout.data = {
+        conversationUrl: null,
+        responseDebug: {
+          version: 1,
+          softDeadlineMs: timeoutMs,
+          reconcileGraceMs,
+          hardDeadlineMs: timeoutMs + reconcileGraceMs,
+          elapsedMs: timeoutMs + reconcileGraceMs + recoveryTimeoutMs
+        },
+        recovery: { status: 'unavailable', reason: 'response_capability_deadline' }
+      };
+      throw timeout;
+    }
+  }
+
+  async #captureAssistantBaseline({ preSendCount = 0, preSendText = '' } = {}) {
+    const currentUrl = await this.getUrl().catch(() => null);
+    let target = null;
+    try {
+      target = parseChatGptEntryTarget(currentUrl);
+    } catch {}
+    if (target?.kind !== 'canonical-conversation') {
+      return preSendCount === 0 && !String(preSendText || '').trim() ? [] : null;
+    }
+    const capture = await this.captureConversation({ maxCaptureBytes: 16 * 1024 * 1024 });
+    return assistantCaptureSignatures(capture);
   }
 
   async #waitForAssistantStableImpl({
@@ -5865,7 +5960,8 @@ export class ChatGPTController {
     extraThinkingPattern = '',
     imageGeneration = false,
     durableObservation = false,
-    reconcileGraceMs = null
+    reconcileGraceMs = null,
+    structuredAssistantBaseline = null
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
@@ -5916,7 +6012,9 @@ export class ChatGPTController {
           }
         });
       }
-      const snap = await this.#eval(`(() => {
+      let snap;
+      try {
+        const evaluateResponse = async () => await this.#eval(`(() => {
         const extraThinkingRe = ${extraThinkingSource} ? new RegExp(${extraThinkingSource}, 'i') : null;
         const visible = (n) => {
           if (!n) return false;
@@ -5981,7 +6079,17 @@ export class ChatGPTController {
           pageText: fallbackMainText,
           currentUrl
         };
-      })()`);
+        })()`);
+        if (durableObservation) {
+          const remainingObservationMs = Math.max(1, hardDeadlineMs - (Date.now() - start));
+          snap = await this.#runResponseObservationWithDeadline(evaluateResponse, remainingObservationMs);
+        } else {
+          snap = await evaluateResponse();
+        }
+      } catch (error) {
+        if (error?.code !== 'response_observation_deadline') throw error;
+        break;
+      }
 
       const txt = String(snap?.txt || '');
       const pageText = String(snap?.pageText || '');
@@ -6109,7 +6217,10 @@ export class ChatGPTController {
       await sleep(pollMs);
     }
 
-    const conversationUrl = await this.getUrl().catch(() => null);
+    const conversationUrl = await this.#runResponseObservationWithDeadline(
+      async () => await this.getUrl(),
+      Math.min(this.captureHostTimeoutMs, 5_000)
+    ).catch(() => null);
     if (durableObservation) {
       let recovery = { status: 'unavailable', reason: 'capture_not_attempted' };
       try {
@@ -6120,9 +6231,7 @@ export class ChatGPTController {
             ? capture.rawTurns.filter((turn) => String(turn?.role || '').trim().toLowerCase() === 'assistant')
             : [];
           const finalAssistant = assistants[assistants.length - 1] || null;
-          const advanced = assistants.length > preSendCount || (
-            assistants.length > 0 && String(finalAssistant?.text || '') !== String(preSendText || '')
-          );
+          const advanced = captureExtendsAssistantBaseline(capture, structuredAssistantBaseline);
           recovery = {
             status: capture?.status || 'partial',
             reason: capture?.reason || null,
@@ -6131,7 +6240,6 @@ export class ChatGPTController {
           };
           if (capture?.status === 'complete' && advanced && String(finalAssistant?.text || '').trim()) {
             const recoveredText = String(finalAssistant.text).trim();
-            const actualMode = inferActualModeIntent({ text: recoveredText, pageText: recoveredText });
             return {
               text: recoveredText,
               codeBlocks: [],
@@ -6139,10 +6247,10 @@ export class ChatGPTController {
                 count: assistants.length,
                 hasError: false,
                 recoveredBy: 'structured_conversation_capture',
-                modeUsed: actualMode?.intent || null,
-                actualModeIntent: actualMode?.intent || null,
-                actualModeLabel: actualMode?.label || null,
-                actualModeSource: actualMode?.source || null
+                modeUsed: null,
+                actualModeIntent: null,
+                actualModeLabel: null,
+                actualModeSource: null
               }
             };
           }
@@ -6152,7 +6260,7 @@ export class ChatGPTController {
       } catch (error) {
         recovery = {
           status: 'error',
-          reason: clipText(error?.code || error?.message || 'capture_failed', 160)
+          reason: clipText(error?.code || 'capture_failed', 160)
         };
       }
       const err = new Error('response_reconcile_timeout');
@@ -6177,7 +6285,8 @@ export class ChatGPTController {
     modeIntent = null,
     modelIntent = null,
     durableObservation = false,
-    reconcileGraceMs = null
+    reconcileGraceMs = null,
+    recoveryTimeoutMs = null
   } = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
@@ -6215,6 +6324,12 @@ export class ChatGPTController {
         const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText };
       })()`);
+      const structuredAssistantBaseline = durableObservation
+        ? await this.#captureAssistantBaseline({
+            preSendCount: prePrompt?.count || 0,
+            preSendText: prePrompt?.lastText || ''
+          })
+        : null;
       await this.#typePrompt(prompt);
       const sendDebug = await this.#clickSend();
       const result = await this.#waitForAssistantStable({
@@ -6225,7 +6340,9 @@ export class ChatGPTController {
         preSendStopCount: sendDebug?.initialStopCount || 0,
         imageGeneration,
         durableObservation,
-        reconcileGraceMs
+        reconcileGraceMs,
+        recoveryTimeoutMs,
+        structuredAssistantBaseline
       });
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
       const modeUsed = normalizeChatGptModeIntent(result?.meta?.modeUsed || result?.meta?.actualModeIntent, { fallback: null });

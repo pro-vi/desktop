@@ -42,21 +42,25 @@ test('run waiter timeout carries the latest non-mutating run snapshot', async ()
   await assert.rejects(() => waitForRun({
     conn: {},
     runId: 'still-running',
-    timeoutMs: 5,
-    request: async () => {
+    timeoutMs: 20,
+    request: async ({ signal }) => {
       requests += 1;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      return {
-        ok: true,
-        run: {
-          id: 'still-running',
-          kind: 'query',
-          status: 'running',
-          phase: 'reconciling_response',
-          revision: 3,
-          responseDebug: { version: 1, count: 0 }
-        }
-      };
+      if (requests === 1) {
+        return {
+          ok: true,
+          run: {
+            id: 'still-running',
+            kind: 'query',
+            status: 'running',
+            phase: 'reconciling_response',
+            revision: 3,
+            responseDebug: { version: 1, count: 0 }
+          }
+        };
+      }
+      return await new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
     }
   }), (error) => {
     assert.equal(error?.message, 'run_wait_timeout');
@@ -64,7 +68,34 @@ test('run waiter timeout carries the latest non-mutating run snapshot', async ()
     assert.equal(error?.data?.run?.responseDebug?.count, 0);
     return true;
   });
-  assert.equal(requests, 1);
+  assert.equal(requests, 2);
+});
+
+test('run waiter deadline wins over a terminal response that arrives too late', async () => {
+  await assert.rejects(() => waitForRun({
+    conn: {},
+    runId: 'late-terminal',
+    timeoutMs: 5,
+    request: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        ok: true,
+        run: {
+          id: 'late-terminal',
+          kind: 'query',
+          status: 'success',
+          revision: 2,
+          completionReceipt: {
+            version: 1,
+            kind: 'assistant-response',
+            responsePath: '/tmp/response.md',
+            responseSha256: 'a'.repeat(64),
+            capturedAt: 1
+          }
+        }
+      };
+    }
+  }), /run_wait_timeout/);
 });
 
 test('run waiter exit codes distinguish every terminal outcome', () => {
