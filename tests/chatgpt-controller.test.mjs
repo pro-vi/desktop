@@ -1124,6 +1124,7 @@ test('chatgpt-controller: hard reconciliation deadline bounds a hung response ev
   );
   assert.equal(Date.now() - startedAt < 1_000, true);
   assert.equal(terminationCalls, 1);
+  assert.equal(await controller.runExclusive(async () => 'settled'), 'settled');
 });
 
 test('chatgpt-controller: recovery timeout preserves the inner terminal diagnostics', async () => {

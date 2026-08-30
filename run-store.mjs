@@ -74,6 +74,22 @@ export function parseResponseDebug(value) {
   };
 }
 
+export function parseResponseRecovery(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const status = String(value.status || '').trim();
+  const reason = String(value.reason || '').trim();
+  if (!['complete', 'partial', 'unavailable', 'error'].includes(status)) return null;
+  if (reason && !/^[a-z0-9_:-]{1,160}$/.test(reason)) return null;
+  return {
+    status,
+    reason: reason || null,
+    assistantCount: typeof value.assistantCount === 'number' && Number.isSafeInteger(value.assistantCount) && value.assistantCount >= 0
+      ? value.assistantCount
+      : null,
+    advanced: typeof value.advanced === 'boolean' ? value.advanced : null
+  };
+}
+
 function normalizeRun(input = {}) {
   const now = Date.now();
   const startedAt = normalizeTime(input.startedAt) || now;
@@ -122,6 +138,7 @@ function normalizeRun(input = {}) {
     packedContextBudget: normalizeObject(input.packedContextBudget),
     providerSlot: normalizeObject(input.providerSlot),
     responseDebug: parseResponseDebug(input.responseDebug),
+    recovery: parseResponseRecovery(input.recovery),
     modeIntentProvenance: normalizeObject(input.modeIntentProvenance),
     modelIntentProvenance: normalizeObject(input.modelIntentProvenance),
     outputManifest: normalizeObject(input.outputManifest),

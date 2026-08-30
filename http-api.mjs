@@ -50,7 +50,7 @@ import {
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
-import { createRunStore, parseResponseDebug } from './run-store.mjs';
+import { createRunStore, parseResponseDebug, parseResponseRecovery } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 import { providerTabOperationEvidence } from './provider-tab-operation-leases.mjs';
 import { isTerminalRunStatus } from './run-lifecycle.mjs';
@@ -152,14 +152,7 @@ function mapErrorToHttp(error) {
   if (msg === 'timeout_waiting_for_prompt') return { code: 408, body: { error: 'timeout_waiting_for_prompt', data: error?.data || null } };
   if (msg === 'timeout_waiting_for_response') return { code: 408, body: { error: 'timeout_waiting_for_response', data: error?.data || null } };
   if (msg === 'response_reconcile_timeout') {
-    const recovery = error?.data?.recovery && typeof error.data.recovery === 'object'
-      ? {
-          status: String(error.data.recovery.status || '').trim() || null,
-          reason: String(error.data.recovery.reason || '').trim() || null,
-          assistantCount: typeof error.data.recovery.assistantCount === 'number' ? error.data.recovery.assistantCount : null,
-          advanced: typeof error.data.recovery.advanced === 'boolean' ? error.data.recovery.advanced : null
-        }
-      : null;
+    const recovery = parseResponseRecovery(error?.data?.recovery);
     return {
       code: 408,
       body: {
@@ -1428,7 +1421,8 @@ export function startHttpApi({
         label: 'Response reconciliation timed out',
         detail: 'No complete new assistant turn was available before the service hard deadline.',
         conversationUrl: detail?.conversationUrl || null,
-        responseDebug: parseResponseDebug(detail?.responseDebug)
+        responseDebug: parseResponseDebug(detail?.responseDebug),
+        recovery: parseResponseRecovery(detail?.recovery)
       };
     }
     if (message === 'attachment_upload_failed') {
@@ -1824,6 +1818,7 @@ export function startHttpApi({
       outputManifest: outcome.outputManifest || null,
       completionReceipt: outcome.completionReceipt || null,
       responseDebug: outcome.responseDebug || null,
+      recovery: outcome.recovery || null,
       ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
     });
   };

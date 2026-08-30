@@ -765,6 +765,7 @@ export class ChatGPTController {
       if (!expired) throw error;
       running.catch(() => {});
       await termination.catch(() => {});
+      await running.catch(() => {});
       const timeout = new Error('response_observation_deadline');
       timeout.code = 'response_observation_deadline';
       throw timeout;
@@ -5920,7 +5921,7 @@ export class ChatGPTController {
     try {
       return await this.#runResponseObservationWithDeadline(
         operation,
-        timeoutMs + reconcileGraceMs + recoveryTimeoutMs + 5_000
+        timeoutMs + reconcileGraceMs + recoveryTimeoutMs + 15_000
       );
     } catch (error) {
       if (error?.code !== 'response_observation_deadline') throw error;
@@ -6230,9 +6231,12 @@ export class ChatGPTController {
     ).catch(() => null);
     if (durableObservation) {
       let recovery = { status: 'unavailable', reason: 'capture_not_attempted' };
+      let target = null;
       try {
-        const target = parseChatGptEntryTarget(conversationUrl);
-        if (target?.kind === 'canonical-conversation') {
+        target = parseChatGptEntryTarget(conversationUrl);
+      } catch {}
+      if (target?.kind === 'canonical-conversation') {
+        try {
           const effectiveRecoveryTimeoutMs = Number.isFinite(Number(recoveryTimeoutMs)) && Number(recoveryTimeoutMs) > 0
             ? Math.floor(Number(recoveryTimeoutMs))
             : Math.min(this.captureHostTimeoutMs, 30_000);
@@ -6267,14 +6271,14 @@ export class ChatGPTController {
               }
             };
           }
-        } else {
-          recovery = { status: 'unavailable', reason: 'canonical_conversation_unavailable' };
+        } catch (error) {
+          recovery = {
+            status: 'error',
+            reason: clipText(error?.code || 'capture_failed', 160)
+          };
         }
-      } catch (error) {
-        recovery = {
-          status: 'error',
-          reason: clipText(error?.code || 'capture_failed', 160)
-        };
+      } else {
+        recovery = { status: 'unavailable', reason: 'canonical_conversation_unavailable' };
       }
       const err = new Error('response_reconcile_timeout');
       err.data = {

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { createRunStore, parseResponseDebug } from '../run-store.mjs';
+import { createRunStore, parseResponseDebug, parseResponseRecovery } from '../run-store.mjs';
 
 function completionReceipt(kind = 'assistant-response') {
   return {
@@ -134,6 +134,23 @@ test('run-store: response diagnostics never coerce malformed boundary values', (
   assert.equal(parsed.stopCount, null);
   assert.equal(parsed.hardDeadlineMs, 20);
   assert.equal(parsed.stop, true);
+});
+
+test('run-store: response recovery accepts only content-free closed evidence', () => {
+  assert.deepEqual(parseResponseRecovery({
+    status: 'partial',
+    reason: 'conversation_generation_active',
+    assistantCount: 2,
+    advanced: false,
+    text: 'PRIVATE RESPONSE TEXT'
+  }), {
+    status: 'partial',
+    reason: 'conversation_generation_active',
+    assistantCount: 2,
+    advanced: false
+  });
+  assert.equal(parseResponseRecovery({ status: 'future', reason: 'unknown' }), null);
+  assert.equal(parseResponseRecovery({ status: 'error', reason: 'private response text' }), null);
 });
 
 test('run-store: finalize is exact-once for terminal state', async () => {

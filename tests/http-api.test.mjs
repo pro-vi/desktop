@@ -2397,7 +2397,8 @@ test('http-api: reconciliation timeout persists diagnostics and releases its pro
             hasError: false,
             pageTextChanged: false,
             textPreview: 'PRIVATE RESPONSE TEXT'
-          }
+          },
+          recovery: { status: 'partial', reason: 'conversation_generation_active' }
         };
         throw error;
       }
@@ -2444,6 +2445,12 @@ test('http-api: reconciliation timeout persists diagnostics and releases its pro
   assert.equal(terminal.label, 'Response reconciliation timed out');
   assert.equal(terminal.providerSlot.status, 'released');
   assert.equal(terminal.responseDebug.count, 0);
+  assert.deepEqual(terminal.recovery, {
+    status: 'partial',
+    reason: 'conversation_generation_active',
+    assistantCount: null,
+    advanced: null
+  });
   assert.equal('textPreview' in terminal.responseDebug, false);
   assert.equal(JSON.stringify(terminal).includes('PRIVATE RESPONSE TEXT'), false);
 

@@ -114,6 +114,7 @@ function runStatusText(run = {}, data = {}) {
   if (run.label) lines.push(`label=${run.label}`);
   if (run.detail) lines.push(`detail=${run.detail}`);
   if (run.responseDebug) lines.push(`responseDebug=${JSON.stringify(run.responseDebug)}`);
+  if (run.recovery) lines.push(`recovery=${JSON.stringify(run.recovery)}`);
   const outputPath = runOutputPath(run, data);
   if (outputPath) lines.push(`outputPath=${outputPath}`);
   if (data.outputError) lines.push(`outputError=${data.outputError}`);
