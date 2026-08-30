@@ -2859,6 +2859,83 @@ test('http-api: runs list/get/archive expose durable query history', async (t) =
   assert.equal(listedArchived.data.runs.some((item) => item.id === runId), true);
 });
 
+test('http-api: legacy unverified run history stays visible and non-successful across every run endpoint', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-legacy-unverified-'));
+  await fs.mkdir(path.join(stateDir, 'runs'), { recursive: true });
+  await fs.writeFile(path.join(stateDir, 'runs', 'legacy-run.json'), JSON.stringify({
+    id: 'legacy-run',
+    kind: 'query',
+    status: 'success',
+    phase: 'completed',
+    startedAt: 1,
+    updatedAt: 2,
+    finishedAt: 2
+  }));
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => ({})
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-legacy-unverified',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100 }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const listed = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: {} });
+  const listedRun = listed.data.runs.find((run) => run.id === 'legacy-run');
+  assert.equal(listedRun.status, 'unverified');
+  assert.equal(listedRun.completionVerification.reason, 'missing_completion_receipt');
+
+  const fetched = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/get',
+    body: { runId: 'legacy-run', view: 'summary' }
+  });
+  assert.equal(fetched.data.run.status, 'unverified');
+
+  const waited = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/wait',
+    body: { runId: 'legacy-run', view: 'summary', waitTimeoutMs: 20 }
+  });
+  assert.equal(waited.res.status, 200);
+  assert.equal(waited.data.run.status, 'unverified');
+
+  const archived = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/archive',
+    body: { runId: 'legacy-run' }
+  });
+  assert.equal(archived.res.status, 200);
+  const defaultAfterArchive = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: {} });
+  assert.equal(defaultAfterArchive.data.runs.some((run) => run.id === 'legacy-run'), false);
+  const archivedList = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/list',
+    body: { includeArchived: true }
+  });
+  assert.equal(archivedList.data.runs.find((run) => run.id === 'legacy-run').status, 'unverified');
+});
+
 test('http-api: compact runs/get payload is materially smaller than full replay payload', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-payload-size-'));
   const longPrompt = 'token-heavy prompt line\n'.repeat(4_000);
@@ -3559,14 +3636,24 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-success-'));
   const researchCalls = [];
   let currentUrl = 'https://chatgpt.com/';
+  let exclusiveActive = false;
   const listedTabs = [{ id: 't0', key: 'research-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
   const controller = {
-    runExclusive: async (fn) => await fn(),
+    runExclusive: async (fn) => {
+      assert.equal(exclusiveActive, false, 'HTTP composition must not re-enter the controller mutex');
+      exclusiveActive = true;
+      try {
+        return await fn();
+      } finally {
+        exclusiveActive = false;
+      }
+    },
     navigate: async (to) => {
       currentUrl = to;
     },
     ensureReady: async () => ({ ok: true }),
     research: async ({ prompt, attachments, timeoutMs, outDir, onProgress }) => {
+      assert.equal(exclusiveActive, false, 'controller.research owns its own exclusive section');
       researchCalls.push({ prompt, attachments, timeoutMs, outDir });
       currentUrl = `https://chatgpt.com/c/research-${researchCalls.length}`;
       const exportPath = path.join(outDir, `deep-research-${researchCalls.length}.md`);

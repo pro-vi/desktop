@@ -878,6 +878,112 @@ test('chatgpt-controller: query does not accept unchanged fallback page text fro
   }
 });
 
+test('chatgpt-controller: durable query does not accept fallback progress chrome as the final answer', async () => {
+  let responseChecks = 0;
+  const realNow = Date.now;
+  let fakeNow = 1_250_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes("already_generating")) {
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        }
+        if (js.includes('return { count: nodes.length')) {
+          return { count: 0, lastText: '', pageText: 'Project workspace', providerMessageId: null };
+        }
+        if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+        if (js.includes('publishedCaptureWindow')) {
+          return {
+            captureWindow: {
+              status: 'partial',
+              reason: 'conversation_capture_invalid',
+              rawTurns: [{ ordinal: 0, providerMessageId: 'prompt-1', role: 'user', text: 'agentify' }],
+              evidence: {
+                topBoundary: true,
+                bottomBoundary: true,
+                orderedWindowStitching: true,
+                scrollPasses: 1,
+                windowCount: 1,
+                messageCount: 1,
+                providerIdCount: 1,
+                byteCount: 24
+              }
+            },
+            artifactInventory: { status: 'complete', items: [] }
+          };
+        }
+        if (js.includes('fallbackMainText')) {
+          assert.match(js, /composerRoot && composerRoot\.contains\(el\)/);
+          assert.match(js, /\[data-composer-body\]/);
+          responseChecks += 1;
+          const thinking = responseChecks === 1;
+          const progressText = thinking
+            ? 'I’m tracing the lifecycle changes.'
+            : 'I’m tracing the lifecycle changes.\nReviewed Agentify lifecycle and run-store calls.';
+          return {
+            stop: thinking,
+            stopCount: thinking ? 1 : 0,
+            sendEnabled: !thinking,
+            sendFound: true,
+            txt: progressText,
+            count: 0,
+            usedFallback: true,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: thinking,
+            imageCandidateCount: 0,
+            pageText: `Project workspace\n${progressText}`,
+            currentUrl: 'https://chatgpt.com/c/fallback-progress'
+          };
+        }
+        if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() { return 'https://chatgpt.com/c/fallback-progress'; },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+    const controller = new ChatGPTController({ page, selectors: {
+      promptTextarea: '#prompt-textarea',
+      composerRoot: 'form, main, [data-composer-body], [data-composer-grid]',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    } });
+
+    await assert.rejects(
+      controller.query({
+        prompt: 'agentify',
+        timeoutMs: 20_000,
+        durableObservation: true,
+        reconcileGraceMs: 1_000,
+        recoveryTimeoutMs: 1_000
+      }),
+      (error) => {
+        assert.equal(error?.message, 'response_reconcile_timeout');
+        assert.notEqual(error?.data?.recovery?.advanced, true);
+        return true;
+      }
+    );
+    assert.equal(responseChecks > 1, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: query does not accept composer clearing as assistant progress', async () => {
   let waitForAssistantChecks = 0;
   let typed = false;
@@ -3897,7 +4003,7 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
   let fakeNow = 8_100_000;
   let clockMode = 'default';
   Date.now = () => {
-    fakeNow += clockMode === 'wait' ? 31_000 : clockMode === 'export' ? 500 : 100;
+    fakeNow += clockMode === 'wait' ? 10 * 60_000 : clockMode === 'export' ? 500 : 100;
     return fakeNow;
   };
 
@@ -3906,6 +4012,9 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
   let exportChecks = 0;
   let typed = false;
   let preSendSnapshotBeforeTyping = false;
+  let deepResearchReads = 0;
+  const inserted = [];
+  const keys = [];
 
   const page = {
     async navigate() {},
@@ -3921,8 +4030,12 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
           reason: 'latched_after_click',
           menuOpen: false,
           composerHints: ['deep research'],
-          promptHints: []
+          promptHints: [],
+          inlinePromptSelection: true
         };
+      }
+      if (js.includes('research_inline_selection_missing')) {
+        return { ok: true, inlinePromptSelection: true };
       }
       if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
       if (js.includes('return { count: nodes.length')) {
@@ -3965,13 +4078,13 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
           stop: false,
           sendEnabled: true,
           sendFound: true,
-          txt: 'You said: Investigate this. ChatGPT said: Deep research Apps Sites ChatGPT can make mistakes. Check important info.',
-          count: 1,
-          usedFallback: false,
+          txt: 'Deep research Apps Sites ChatGPT can make mistakes. Check important info.',
+          count: 0,
+          usedFallback: true,
           hasError: false,
           hasContinue: false,
           hasRegenerate: false,
-          isThinking: false,
+          isThinking: true,
           pageText: 'placeholder'
         };
       }
@@ -4005,8 +4118,19 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
     async getUrl() {
       return 'https://chatgpt.com/c/research-export';
     },
-    async sendKey() {},
-    async insertText() { typed = true; },
+    async evaluateDeepResearch() {
+      deepResearchReads += 1;
+      return deepResearchReads === 1
+        ? ''
+        : 'Research completed in 1m\nNested report: primary-source comparison with exact citations.';
+    },
+    async sendKey(key) {
+      keys.push(key);
+    },
+    async insertText(text) {
+      inserted.push(text);
+      typed = true;
+    },
     async moveMouse() {},
     async mouseDown() {},
     async mouseUp() {},
@@ -4061,6 +4185,9 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
     assert.equal(mutexCalls, 1);
     assert.equal(path.basename(result.research.exportedMarkdownPath), 'report.md');
     assert.equal(preSendSnapshotBeforeTyping, true);
+    assert.equal(keys.includes('A'), false);
+    assert.equal(keys.includes('Backspace'), false);
+    assert.equal(inserted.join(''), ' Investigate this.');
   } finally {
     controller.mutex = realMutex;
     Date.now = realNow;
@@ -4393,12 +4520,14 @@ test('chatgpt-controller: research export can click nested deep research control
 });
 
 test('chatgpt-controller: readPageText falls back to nested deep research content', async () => {
+  let nestedExpression = '';
   const page = {
     async navigate() {},
     async evaluate() {
       return 'You said:\nUse Deep Research.\nChatGPT said:\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.';
     },
-    async evaluateDeepResearch() {
+    async evaluateDeepResearch(js) {
+      nestedExpression = js;
       return 'Research completed in 4m\nPrimary source on RAG benchmarks: RAGBench and TRACe';
     },
     async getUrl() {
@@ -4424,6 +4553,7 @@ test('chatgpt-controller: readPageText falls back to nested deep research conten
 
   const text = await controller.readPageText({ maxChars: 500 });
   assert.match(text, /RAGBench and TRACe/);
+  assert.match(nestedExpression, /rootFrame\?\.contentDocument \|\| document/);
 });
 
 test('chatgpt-controller: readConversationText returns the complete virtualized transcript', async () => {

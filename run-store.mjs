@@ -6,9 +6,11 @@ import {
   LIVE_RUN_STATUSES,
   assertRunLifecycle,
   isTerminalRunStatus,
+  normalizeRunKind,
   normalizeRunStatus,
   phaseForRunStatus,
-  validateCompletionReceipt
+  validateCompletionReceipt,
+  validateCompletionVerification
 } from './run-lifecycle.mjs';
 
 function safeClone(value) {
@@ -101,7 +103,7 @@ function normalizeRun(input = {}) {
   const phase = normalizePhaseForStatus({ status, phase: input.phase, finishedAt });
   return {
     id: normalizeString(input.id),
-    kind: normalizeString(input.kind) || 'query',
+    kind: normalizeRunKind(input.kind),
     source: normalizeString(input.source) || 'http',
     status,
     phase,
@@ -144,8 +146,42 @@ function normalizeRun(input = {}) {
     outputManifest: normalizeObject(input.outputManifest),
     researchMeta: normalizeObject(input.researchMeta),
     completionReceipt: validateCompletionReceipt(input.completionReceipt),
+    completionVerification: validateCompletionVerification(input.completionVerification),
     revision: Math.max(0, Number(input.revision) || 0)
   };
+}
+
+function normalizeLoadedRun(raw) {
+  const record = normalizeRun(raw);
+  if (
+    record.status !== 'success' ||
+    !['query', 'research'].includes(record.kind)
+  ) {
+    return record;
+  }
+  const receipt = validateCompletionReceipt(raw?.completionReceipt);
+  const expectedKind = record.kind === 'query' ? 'assistant-response' : 'research-report';
+  let reason = null;
+  if (!receipt) {
+    reason = raw?.completionReceipt == null
+      ? 'missing_completion_receipt'
+      : 'invalid_completion_receipt';
+  } else if (receipt.kind !== expectedKind) {
+    reason = 'completion_receipt_kind_mismatch';
+  }
+  if (!reason) return record;
+  return normalizeRun({
+    ...record,
+    status: 'unverified',
+    phase: 'unverified',
+    label: record.label || 'Legacy output unverified',
+    completionReceipt: null,
+    completionVerification: {
+      status: 'legacy-unverified',
+      legacyStatus: 'success',
+      reason
+    }
+  });
 }
 
 function assertRunId(runId) {
@@ -262,8 +298,9 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
       if (!name.endsWith('.json')) continue;
       try {
         const raw = JSON.parse(await fs.readFile(path.join(runsDir(stateDir), name), 'utf8'));
-        const record = normalizeRun(raw);
+        const record = normalizeLoadedRun(raw);
         if (!record.id) continue;
+        assertRunLifecycle(record, { requireCompletionReceipt: true });
         records.set(record.id, record);
       } catch {}
     }
@@ -283,7 +320,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     return await enqueueRunOp(id, async () => {
       const current = records.get(id);
       if (!current) throw new Error('run_not_found');
-      if (current.finishedAt && !('archivedAt' in patchData)) return safeClone(current);
+      if (current.finishedAt) return safeClone(current);
       const next = normalizeRun({
         ...current,
         ...(patchData || {}),
@@ -320,7 +357,18 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
 
   async function archive(runId) {
     const id = assertRunId(runId);
-    return await patch(id, { archivedAt: Date.now() });
+    return await enqueueRunOp(id, async () => {
+      const current = records.get(id);
+      if (!current) throw new Error('run_not_found');
+      if (current.archivedAt) return safeClone(current);
+      return await writeRecord(normalizeRun({
+        ...current,
+        id,
+        startedAt: current.startedAt,
+        archivedAt: Date.now(),
+        updatedAt: Date.now()
+      }));
+    });
   }
 
   function get(runId) {
@@ -345,19 +393,23 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
   }
 
   async function finalizeStaleRunning({ status = 'stopped', detail = 'Interrupted by desktop restart.' } = {}) {
+    const recoveryStatus = normalizeRunStatus(status, { fallback: null });
     const stale = Array.from(records.values()).filter((item) =>
       !item.finishedAt && LIVE_RUN_STATUSES.includes(String(item.status || '').trim().toLowerCase())
     );
     const finalized = [];
     for (const item of stale) {
+      const forceStopEvidence = recoveryStatus === 'stopped';
       finalized.push(await finalize(item.id, {
-        status,
+        status: recoveryStatus,
         detail,
         blocked: false,
         blockedKind: null,
         blockedTitle: null,
-        stopRequested: item.stopRequested || status === 'stopped',
-        stopRequestedAt: item.stopRequestedAt || Date.now()
+        stopRequested: forceStopEvidence ? true : item.stopRequested,
+        stopRequestedAt: forceStopEvidence
+          ? (item.stopRequestedAt || Date.now())
+          : item.stopRequestedAt
       }));
     }
     return finalized;

@@ -600,7 +600,7 @@ If you already had your client open, restart it (or start a new session) so it r
 
 ### MCP tool profiles
 
-Agentify exposes the complete 46-tool surface by default for compatibility. Transcript Library conversations need the core and library profiles:
+Agentify exposes the complete tool surface by default for compatibility. Transcript Library conversations need the core and library profiles:
 
 ```bash
 node mcp-server.mjs --tool-profile core,library
@@ -659,6 +659,7 @@ Use explicit tool calls (`agentify_query`, `agentify_read_page`, `agentify_read_
 - **Tune large-context packing when needed:** `agentify_query` also accepts `maxContextChars`, `maxContextFiles`, `maxContextFileChars`, `maxContextChunkChars`, `maxContextChunksPerFile`, `maxContextInlineFiles`, and `maxContextAttachments`.
 - **Vendor-aware context budgets:** packed context defaults are tuned by the target vendor/tab so large folder stuffing is less aggressive on narrower UIs and more generous where it makes sense.
 - **Long and stuck runs:** a caller's `agentify_wait_run.timeoutMs` only stops that wait. It does not stop the run. Agentify may continue through `reconciling_response`, but the service now has its own hard deadline; terminal reconciliation errors include content-free `responseDebug` and release the provider slot. A caller wait timeout returns the latest run snapshot with `waitTimedOut: true`. For manual break-glass control, `agentify_status` includes `activeQuery` / `runtime.activeQueries`, `agentify_stop_query` requests a stop, and the Control Center shows a `Stop` button on tabs with a running job.
+- **Legacy run proof:** query and research records written before receipt-backed completion load as `unverified`, not `success`, when their receipt is missing, invalid, or belongs to the wrong run kind. List, get, wait, archive, the CLI, MCP, and the Control Center preserve the row while refusing to treat it as verified output. `npm run wait-run` exits 5 for this state.
 - **Reuse project context without rebuilding it every time:** save a named bundle with `agentify_save_bundle`, then pass `bundleName` to `agentify_query`.
 
 ## Real-world prompt example

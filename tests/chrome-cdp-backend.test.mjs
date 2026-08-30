@@ -333,6 +333,97 @@ test('chrome-cdp-backend: terminateEvaluation stops the owned renderer session',
     item.method === 'Runtime.terminateExecution' && item.sessionId === 'session-1'), true);
 });
 
+test('chrome-cdp-backend: mouse input carries the pressed-button bitmask through mouseDown', async () => {
+  const calls = [];
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });
+  backend.started = true;
+  backend.client = {
+    connected: true,
+    ws: {},
+    send: async (method, params = {}, sessionId) => {
+      calls.push({ method, params, sessionId });
+      if (method === 'Target.createTarget') return { targetId: 'target-1' };
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-1' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      return {};
+    }
+  };
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+  calls.length = 0;
+
+  await session.page.moveMouse(10, 20);
+  await session.page.mouseDown(10, 20, { button: 'left', clickCount: 1 });
+  await session.page.mouseUp(10, 20, { button: 'left', clickCount: 1 });
+
+  assert.deepEqual(calls, [
+    {
+      method: 'Input.dispatchMouseEvent',
+      params: { type: 'mouseMoved', x: 10, y: 20, button: 'none', buttons: 0 },
+      sessionId: 'session-1'
+    },
+    {
+      method: 'Input.dispatchMouseEvent',
+      params: { type: 'mousePressed', x: 10, y: 20, button: 'left', buttons: 1, clickCount: 1 },
+      sessionId: 'session-1'
+    },
+    {
+      method: 'Input.dispatchMouseEvent',
+      params: { type: 'mouseReleased', x: 10, y: 20, button: 'left', buttons: 0, clickCount: 1 },
+      sessionId: 'session-1'
+    }
+  ]);
+});
+
+test('chrome-cdp-backend: evaluateDeepResearch attaches to the observed hyphenated child target', async () => {
+  const calls = [];
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });
+  backend.started = true;
+  backend.client = {
+    connected: true,
+    ws: {},
+    send: async (method, params = {}, sessionId) => {
+      calls.push({ method, params, sessionId });
+      if (method === 'Target.createTarget') return { targetId: 'target-root' };
+      if (method === 'Target.attachToTarget' && params.targetId === 'target-root') return { sessionId: 'session-root' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      if (method === 'DOM.getDocument' && sessionId === 'session-root') return { root: { nodeId: 11 } };
+      if (method === 'DOM.querySelectorAll' && sessionId === 'session-root') return { nodeIds: [21] };
+      if (method === 'DOM.describeNode' && sessionId === 'session-root') return { node: { frameId: 'deep-target' } };
+      if (method === 'Target.getTargets') {
+        return {
+          targetInfos: [
+            {
+              targetId: 'deep-other',
+              parentId: null,
+              url: 'https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/?app=chatgpt'
+            },
+            {
+              targetId: 'deep-target',
+              parentId: null,
+              url: 'https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/?app=chatgpt'
+            }
+          ]
+        };
+      }
+      if (method === 'Target.attachToTarget' && params.targetId === 'deep-target') return { sessionId: 'deep-session' };
+      if (method === 'Runtime.evaluate' && sessionId === 'deep-session') {
+        assert.equal(params.expression, '(() => "nested report")()');
+        return { result: { value: 'nested report' } };
+      }
+      return {};
+    }
+  };
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+
+  const result = await session.page.evaluateDeepResearch('(() => "nested report")()');
+
+  assert.equal(result, 'nested report');
+  assert.equal(calls.some((item) =>
+    item.method === 'Target.attachToTarget' && item.params?.targetId === 'deep-target'), true);
+  assert.equal(calls.some((item) =>
+    item.method === 'Target.detachFromTarget' && item.params?.sessionId === 'deep-session'), true);
+});
+
 test('chrome-cdp-backend: failed evaluation termination never closes the shared target', async () => {
   const calls = [];
   const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });

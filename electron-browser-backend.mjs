@@ -3,6 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import electron from 'electron';
 
+import {
+  DEEP_RESEARCH_IFRAME_SELECTOR,
+  selectDeepResearchTargetForPage
+} from './deep-research-target.mjs';
+
 const { BrowserWindow } = electron;
 
 function trackWindow(windows, win) {
@@ -13,6 +18,14 @@ function trackWindow(windows, win) {
       windows.delete(win);
     });
   } catch {}
+}
+
+function pressedMouseModifier(button) {
+  const normalized = String(button || '').trim().toLowerCase();
+  if (normalized === 'left') return 'leftbuttondown';
+  if (normalized === 'middle') return 'middlebuttondown';
+  if (normalized === 'right') return 'rightbuttondown';
+  return null;
 }
 
 async function settleWithin(promise, timeoutMs) {
@@ -74,13 +87,32 @@ class ElectronPageAdapter {
     return await this.#withDebugger(async () => {
       const current = await this.#sendDebuggerCommand('Target.getTargetInfo').catch(() => null);
       const currentTargetId = String(current?.targetInfo?.targetId || '').trim();
+      const frameTargetIds = new Set();
+      const documentNode = await this.#sendDebuggerCommand(
+        'DOM.getDocument',
+        { depth: -1, pierce: true }
+      ).catch(() => null);
+      const iframeNodes = documentNode?.root?.nodeId
+        ? await this.#sendDebuggerCommand('DOM.querySelectorAll', {
+            nodeId: documentNode.root.nodeId,
+            selector: DEEP_RESEARCH_IFRAME_SELECTOR
+          }).catch(() => null)
+        : null;
+      const iframeNodeIds = Array.isArray(iframeNodes?.nodeIds) ? iframeNodes.nodeIds : [];
+      for (const nodeId of iframeNodeIds) {
+        const described = await this.#sendDebuggerCommand(
+          'DOM.describeNode',
+          { nodeId, depth: 1, pierce: true }
+        ).catch(() => null);
+        const frameId = String(described?.node?.frameId || '').trim();
+        if (frameId) frameTargetIds.add(frameId);
+      }
       const targets = await this.#sendDebuggerCommand('Target.getTargets').catch(() => null);
-      const matches = (targets?.targetInfos || []).filter((target) =>
-        /connector_openai_deep_research\.web-sandbox\.oaiusercontent\.com/i.test(String(target?.url || ''))
-      );
-      const info = matches.find((target) => String(target?.parentId || '').trim() === currentTargetId)
-        || (matches.length === 1 ? matches[0] : null);
-      const targetId = String(info?.targetId || '').trim();
+      const deepResearchTarget = selectDeepResearchTargetForPage(targets?.targetInfos, {
+        frameTargetIds,
+        parentTargetId: currentTargetId
+      });
+      const targetId = String(deepResearchTarget?.targetId || '').trim();
       if (!targetId) return null;
 
       const attach = await this.#sendDebuggerCommand('Target.attachToTarget', { targetId, flatten: true }).catch(() => null);
@@ -89,7 +121,7 @@ class ElectronPageAdapter {
       try {
         await this.#sendDebuggerCommand('Page.enable', {}, childSessionId).catch(() => {});
         await this.#sendDebuggerCommand('Runtime.enable', {}, childSessionId).catch(() => {});
-        return await fn(childSessionId, info);
+        return await fn(childSessionId, deepResearchTarget);
       } finally {
         await this.#sendDebuggerCommand('Target.detachFromTarget', { sessionId: childSessionId }).catch(() => {});
       }
@@ -211,7 +243,15 @@ class ElectronPageAdapter {
   }
 
   async mouseDown(x, y, { button = 'left', clickCount = 1 } = {}) {
-    this.win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button, clickCount });
+    const pressedModifier = pressedMouseModifier(button);
+    this.win.webContents.sendInputEvent({
+      type: 'mouseDown',
+      x,
+      y,
+      button,
+      clickCount,
+      ...(pressedModifier ? { modifiers: [pressedModifier] } : {})
+    });
   }
 
   async mouseUp(x, y, { button = 'left', clickCount = 1 } = {}) {

@@ -1,11 +1,17 @@
-import { isTerminalRunStatus, validateCompletionReceipt } from './run-lifecycle.mjs';
+import {
+  isTerminalRunStatus,
+  normalizeRunKind,
+  normalizeRunStatus,
+  validateCompletionReceipt
+} from './run-lifecycle.mjs';
 import { requestJson } from './mcp-lib.mjs';
 
 export const RUN_EXIT_CODE_BY_STATUS = Object.freeze({
   success: 0,
   error: 2,
   stopped: 3,
-  interrupted: 4
+  interrupted: 4,
+  unverified: 5
 });
 
 function runWaitTimeout(lastData) {
@@ -87,9 +93,15 @@ export async function waitForRun({
     const run = data?.run;
     if (!run) throw new Error('invalid_run_wait_response');
     afterRevision = Math.max(afterRevision, Number(run.revision) || 0);
-    if (isTerminalRunStatus(run.status)) {
-      if (run.status === 'success' && ['query', 'research'].includes(run.kind) && !validateCompletionReceipt(run.completionReceipt)) {
-        throw new Error('success_without_completion_receipt');
+    const status = normalizeRunStatus(run.status);
+    const kind = normalizeRunKind(run.kind);
+    if (isTerminalRunStatus(status)) {
+      if (status === 'success' && ['query', 'research'].includes(kind)) {
+        const receipt = validateCompletionReceipt(run.completionReceipt);
+        const expectedReceiptKind = kind === 'query' ? 'assistant-response' : 'research-report';
+        if (!receipt || receipt.kind !== expectedReceiptKind) {
+          throw new Error('success_without_completion_receipt');
+        }
       }
       return data;
     }

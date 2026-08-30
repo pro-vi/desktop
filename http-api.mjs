@@ -2114,7 +2114,7 @@ export function startHttpApi({
     let result;
     let conversationUrl;
     try {
-      const execution = await runExclusive(controller, async () => {
+      await runExclusive(controller, async () => {
         await ensureRunLocation({
           controller,
           tabId,
@@ -2122,20 +2122,22 @@ export function startHttpApi({
           conversationUrl: existingConversationUrl,
           projectUrl
         });
-        const researchResult = await controller.research({
-          prompt,
-          attachments,
-          timeoutMs,
-          outDir,
-          onProgress: (patch) => patchActiveQuery(tabId, patch)
-        });
-        const servedUrl = typeof controller.getUrl === 'function'
-          ? await controller.getUrl().catch(() => existingConversationUrl || null)
-          : existingConversationUrl || null;
-        return { result: researchResult, conversationUrl: servedUrl };
       });
-      result = execution.result;
-      conversationUrl = execution.conversationUrl;
+      // ChatGPTController.research owns its mutex for activation, send, response,
+      // and export. Calling it from inside runExclusive deadlocks the non-reentrant
+      // mutex. The provider-tab operation lease remains held across both sections,
+      // so another public operation cannot change the tab between navigation and
+      // research acquisition.
+      result = await controller.research({
+        prompt,
+        attachments,
+        timeoutMs,
+        outDir,
+        onProgress: (patch) => patchActiveQuery(tabId, patch)
+      });
+      conversationUrl = typeof controller.getUrl === 'function'
+        ? await controller.getUrl().catch(() => existingConversationUrl || null)
+        : existingConversationUrl || null;
     } catch (error) {
       await finalizeCompatibilityTerminal(controller, 'research', { mode: 'receipt-backed', status: 'failed' });
       throw error;

@@ -3,6 +3,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 
+import {
+  DEEP_RESEARCH_IFRAME_SELECTOR,
+  selectDeepResearchTargetForPage
+} from './deep-research-target.mjs';
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -31,6 +36,16 @@ function modifierMask(modifiers = []) {
     else if (key === 'shift') mask |= 8;
   }
   return mask;
+}
+
+function mouseButtonsMask(button) {
+  const normalized = String(button || '').trim().toLowerCase();
+  if (normalized === 'left') return 1;
+  if (normalized === 'right') return 2;
+  if (normalized === 'middle') return 4;
+  if (normalized === 'back') return 8;
+  if (normalized === 'forward') return 16;
+  return 0;
 }
 
 function keyDescriptor(key) {
@@ -332,13 +347,38 @@ class ChromeCdpPageAdapter {
   }
 
   async #withDeepResearchTarget(fn) {
+    const frameTargetIds = new Set();
+    const documentNode = await this.client.send(
+      'DOM.getDocument',
+      { depth: -1, pierce: true },
+      this.sessionId
+    ).catch(() => null);
+    const iframeNodes = documentNode?.root?.nodeId
+      ? await this.client.send(
+          'DOM.querySelectorAll',
+          {
+            nodeId: documentNode.root.nodeId,
+            selector: DEEP_RESEARCH_IFRAME_SELECTOR
+          },
+          this.sessionId
+        ).catch(() => null)
+      : null;
+    const iframeNodeIds = Array.isArray(iframeNodes?.nodeIds) ? iframeNodes.nodeIds : [];
+    for (const nodeId of iframeNodeIds) {
+      const described = await this.client.send(
+        'DOM.describeNode',
+        { nodeId, depth: 1, pierce: true },
+        this.sessionId
+      ).catch(() => null);
+      const frameId = String(described?.node?.frameId || '').trim();
+      if (frameId) frameTargetIds.add(frameId);
+    }
     const targets = await this.client.send('Target.getTargets').catch(() => null);
-    const matches = (targets?.targetInfos || []).filter((target) =>
-      /connector_openai_deep_research\.web-sandbox\.oaiusercontent\.com/i.test(String(target?.url || ''))
-    );
-    const info = matches.find((target) => String(target?.parentId || '').trim() === this.targetId)
-      || (matches.length === 1 ? matches[0] : null);
-    const targetId = String(info?.targetId || '').trim();
+    const deepResearchTarget = selectDeepResearchTargetForPage(targets?.targetInfos, {
+      frameTargetIds,
+      parentTargetId: this.targetId
+    });
+    const targetId = String(deepResearchTarget?.targetId || '').trim();
     if (!targetId) return null;
 
     const attach = await this.client.send('Target.attachToTarget', { targetId, flatten: true }).catch(() => null);
@@ -347,7 +387,7 @@ class ChromeCdpPageAdapter {
     try {
       await this.client.send('Page.enable', {}, childSessionId).catch(() => {});
       await this.client.send('Runtime.enable', {}, childSessionId).catch(() => {});
-      return await fn(childSessionId, info);
+      return await fn(childSessionId, deepResearchTarget);
     } finally {
       await this.client.send('Target.detachFromTarget', { sessionId: childSessionId }).catch(() => {});
     }
@@ -518,15 +558,23 @@ class ChromeCdpPageAdapter {
   }
 
   async moveMouse(x, y) {
-    await this.client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, this.sessionId);
+    await this.client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 }, this.sessionId);
   }
 
   async mouseDown(x, y, { button = 'left', clickCount = 1 } = {}) {
-    await this.client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount }, this.sessionId);
+    await this.client.send(
+      'Input.dispatchMouseEvent',
+      { type: 'mousePressed', x, y, button, buttons: mouseButtonsMask(button), clickCount },
+      this.sessionId
+    );
   }
 
   async mouseUp(x, y, { button = 'left', clickCount = 1 } = {}) {
-    await this.client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount }, this.sessionId);
+    await this.client.send(
+      'Input.dispatchMouseEvent',
+      { type: 'mouseReleased', x, y, button, buttons: 0, clickCount },
+      this.sessionId
+    );
   }
 
   async waitForDownload({ timeoutMs = 15_000, outDir } = {}) {

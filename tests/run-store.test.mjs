@@ -83,6 +83,90 @@ test('run-store: load hydrates index from per-run files', async () => {
   assert.equal(got?.status, 'error');
 });
 
+test('run-store: load preserves proofless legacy success as explicit unverified history', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-legacy-unverified-'));
+  const dir = path.join(stateDir, 'runs');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'legacy-query.json'), JSON.stringify({
+    id: 'legacy-query',
+    kind: 'query',
+    status: 'success',
+    phase: 'completed',
+    startedAt: 1,
+    updatedAt: 2,
+    finishedAt: 2
+  }));
+  await fs.writeFile(path.join(dir, 'wrong-research.json'), JSON.stringify({
+    id: 'wrong-research',
+    kind: 'research',
+    status: 'success',
+    phase: 'completed',
+    startedAt: 1,
+    updatedAt: 2,
+    finishedAt: 2,
+    completionReceipt: completionReceipt('assistant-response')
+  }));
+  await fs.writeFile(path.join(dir, 'verified-query.json'), JSON.stringify({
+    id: 'verified-query',
+    kind: 'query',
+    status: 'success',
+    phase: 'completed',
+    startedAt: 1,
+    updatedAt: 2,
+    finishedAt: 2,
+    completionReceipt: completionReceipt('assistant-response')
+  }));
+  await fs.writeFile(path.join(dir, 'case-research.json'), JSON.stringify({
+    id: 'case-research',
+    kind: 'Research',
+    status: 'SUCCESS',
+    phase: 'completed',
+    startedAt: 1,
+    updatedAt: 2,
+    finishedAt: 2
+  }));
+
+  const store = createRunStore(stateDir);
+  await store.load();
+  const legacyQuery = store.get('legacy-query');
+  const wrongResearch = store.get('wrong-research');
+  assert.equal(legacyQuery.status, 'unverified');
+  assert.equal(legacyQuery.phase, 'unverified');
+  assert.equal(legacyQuery.completionReceipt, null);
+  assert.deepEqual(legacyQuery.completionVerification, {
+    status: 'legacy-unverified',
+    legacyStatus: 'success',
+    reason: 'missing_completion_receipt'
+  });
+  assert.equal(wrongResearch.status, 'unverified');
+  assert.equal(wrongResearch.completionReceipt, null);
+  assert.equal(wrongResearch.completionVerification.reason, 'completion_receipt_kind_mismatch');
+  assert.equal(store.get('verified-query').status, 'success');
+  assert.equal(store.get('verified-query').completionVerification, null);
+  assert.equal(store.get('case-research').kind, 'research');
+  assert.equal(store.get('case-research').status, 'unverified');
+  assert.equal(store.get('case-research').completionVerification.reason, 'missing_completion_receipt');
+  assert.equal(store.list({ includeArchived: true }).length, 4);
+
+  const archived = await store.archive('legacy-query');
+  assert.equal(archived.status, 'unverified');
+  assert.equal(typeof archived.archivedAt, 'number');
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  assert.equal(reloaded.get('legacy-query').status, 'unverified');
+});
+
+test('run-store: case-variant output kinds cannot bypass modern receipt enforcement', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-case-kind-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await assert.rejects(() => store.create({
+    id: 'modern-upper-query',
+    kind: 'QUERY',
+    status: 'success'
+  }), /missing_completion_receipt/);
+});
+
 test('run-store: response diagnostics persist as an exact content-free summary', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-response-debug-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
@@ -174,6 +258,35 @@ test('run-store: finalize is exact-once for terminal state', async () => {
   assert.equal(second.finishedAt, first.finishedAt);
 });
 
+test('run-store: archive metadata cannot reopen or rewrite a terminal run', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-archive-terminal-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({ id: 'run-archive-terminal', kind: 'query', status: 'running' });
+  const terminal = await store.finalize('run-archive-terminal', {
+    status: 'success',
+    detail: 'original',
+    completionReceipt: completionReceipt()
+  });
+  const attemptedRewrite = await store.patch('run-archive-terminal', {
+    archivedAt: Date.now(),
+    status: 'error',
+    detail: 'rewritten',
+    completionReceipt: null
+  });
+
+  assert.equal(attemptedRewrite.status, 'success');
+  assert.equal(attemptedRewrite.detail, 'original');
+  assert.deepEqual(attemptedRewrite.completionReceipt, terminal.completionReceipt);
+  assert.equal(attemptedRewrite.archivedAt, null);
+
+  const archived = await store.archive('run-archive-terminal');
+  assert.equal(archived.status, 'success');
+  assert.equal(archived.detail, 'original');
+  assert.deepEqual(archived.completionReceipt, terminal.completionReceipt);
+  assert.equal(typeof archived.archivedAt, 'number');
+});
+
 test('run-store: terminal success cannot retain an in-flight phase', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-terminal-phase-'));
   const store = createRunStore(stateDir);
@@ -226,6 +339,91 @@ test('run-store: stale in-flight runs can be finalized after restart', async () 
   assert.equal(finalized[0].phase, 'stopped');
   assert.equal(finalized[0].detail, 'Interrupted by restart.');
   assert.equal(typeof finalized[0].finishedAt, 'number');
+  assert.equal(finalized[0].stopRequested, true);
+  assert.equal(typeof finalized[0].stopRequestedAt, 'number');
+});
+
+test('run-store: interrupted restart does not invent a stop request timestamp', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-interrupted-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({
+    id: 'run-interrupted',
+    kind: 'query',
+    source: 'mcp',
+    status: 'running',
+    phase: 'waiting_for_response',
+    startedAt: Date.now()
+  });
+
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  const [interrupted] = await reloaded.finalizeStaleRunning({
+    status: 'interrupted',
+    detail: 'Interrupted by Agentify Desktop restart.'
+  });
+
+  assert.equal(interrupted.status, 'interrupted');
+  assert.equal(interrupted.stopRequested, false);
+  assert.equal(interrupted.stopRequestedAt, null);
+});
+
+test('run-store: interrupted restart preserves prior stop request evidence', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-interrupted-stop-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({
+    id: 'run-interrupted-stop',
+    kind: 'query',
+    source: 'mcp',
+    status: 'running',
+    phase: 'reconciling_response',
+    stopRequested: true,
+    stopRequestedAt: 123,
+    startedAt: 100
+  });
+
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  const [interrupted] = await reloaded.finalizeStaleRunning({
+    status: 'interrupted',
+    detail: 'Interrupted by Agentify Desktop restart.'
+  });
+
+  assert.equal(interrupted.status, 'interrupted');
+  assert.equal(interrupted.stopRequested, true);
+  assert.equal(interrupted.stopRequestedAt, 123);
+});
+
+test('run-store: interrupted restart preserves every partial stop evidence shape verbatim', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-interrupted-stop-shapes-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  const cases = [
+    { id: 'false-null', stopRequested: false, stopRequestedAt: null },
+    { id: 'true-null', stopRequested: true, stopRequestedAt: null },
+    { id: 'false-time', stopRequested: false, stopRequestedAt: 123 },
+    { id: 'true-time', stopRequested: true, stopRequestedAt: 456 }
+  ];
+  for (const item of cases) {
+    await store.create({
+      id: item.id,
+      kind: 'query',
+      status: 'running',
+      stopRequested: item.stopRequested,
+      stopRequestedAt: item.stopRequestedAt,
+      startedAt: 100
+    });
+  }
+
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  const interrupted = await reloaded.finalizeStaleRunning({ status: 'interrupted' });
+  const byId = new Map(interrupted.map((run) => [run.id, run]));
+  for (const item of cases) {
+    assert.equal(byId.get(item.id).stopRequested, item.stopRequested, item.id);
+    assert.equal(byId.get(item.id).stopRequestedAt, item.stopRequestedAt, item.id);
+  }
 });
 
 test('run-store: queued writes keep finalized runs terminal on disk', async () => {

@@ -462,6 +462,18 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "main"
+        },
+        {
+          "id": "composer-root-legacy-02",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-composer-body]"
+        },
+        {
+          "id": "composer-root-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-composer-grid]"
         }
       ]
     },
@@ -580,6 +592,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "[popover]"
+        },
+        {
+          "id": "composer-menu-legacy-10",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": ".popover[aria-busy=\"false\"]"
         }
       ]
     },
@@ -615,6 +633,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "[data-radix-collection-item]"
+        },
+        {
+          "id": "composer-menu-item-legacy-03",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-fill][tabindex=\"0\"]"
         }
       ]
     },
@@ -1179,6 +1203,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "[data-headlessui-state]"
+        },
+        {
+          "id": "research-mode-menu-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": ".popover[aria-busy=\"false\"]"
         }
       ]
     },
@@ -1226,6 +1256,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "[data-testid*=\"deep-research\" i]"
+        },
+        {
+          "id": "research-mode-option-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-composer-plugin-impression-id=\"connector_openai_deep_research\"]"
         }
       ]
     },
@@ -1273,6 +1309,18 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "[data-state=\"on\"][aria-label*=\"deep research\" i]"
+        },
+        {
+          "id": "research-mode-active-legacy-05",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-inline-selection-pill][data-id=\"plugin:connector_openai_deep_research\"]"
+        },
+        {
+          "id": "research-mode-active-legacy-06",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-system-hint-type=\"plugin:connector_openai_deep_research\"]"
         }
       ]
     },

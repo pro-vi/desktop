@@ -62,7 +62,7 @@ function fakeElement(tagName = 'div') {
   return node;
 }
 
-function uiHarness(source, { savedScope = 'scope-a', getState, getCatalog } = {}) {
+function uiHarness(source, { savedScope = 'scope-a', getState, getCatalog, getRuns } = {}) {
   const elements = new Map();
   const intervals = [];
   const libraryChangedListeners = [];
@@ -78,7 +78,7 @@ function uiHarness(source, { savedScope = 'scope-a', getState, getCatalog } = {}
   const bridge = {
     getState: getState || (async () => ({ vendors: [], tabs: [], stateDir: '/private/state', runtime: {} })),
     getSettings: async () => ({}),
-    getRuns: async () => ({ runs: [] }),
+    getRuns: getRuns || (async () => ({ runs: [] })),
     listWatchFolders: async () => ({ folders: [] }),
     getCatalogImports: async () => [],
     getCatalog: getCatalog || (async () => ({ items: [], nextCursor: null })),
@@ -130,6 +130,36 @@ function uiHarness(source, { savedScope = 'scope-a', getState, getCatalog } = {}
     }
   };
 }
+
+test('Control Center labels proofless legacy run history as unverified', async () => {
+  const source = await readUi('control-center.js');
+  const harness = uiHarness(source, {
+    getRuns: async () => ({
+      runs: [{
+        id: 'legacy-run',
+        kind: 'query',
+        status: 'unverified',
+        phase: 'unverified',
+        label: 'Legacy output unverified',
+        detail: 'Recorded before receipt-backed completion.',
+        finishedAt: 2,
+        updatedAt: 2,
+        completionVerification: {
+          status: 'legacy-unverified',
+          legacyStatus: 'success',
+          reason: 'missing_completion_receipt'
+        }
+      }]
+    })
+  });
+  await waitFor(
+    () => harness.elements.get('runsList')?.children?.length === 1,
+    'expected one durable run row'
+  );
+  const text = descendantText(harness.elements.get('runsList'));
+  assert.match(text, /Unverified/);
+  assert.doesNotMatch(text, /Succeeded/);
+});
 
 async function waitFor(predicate, message) {
   for (let attempt = 0; attempt < 100; attempt += 1) {

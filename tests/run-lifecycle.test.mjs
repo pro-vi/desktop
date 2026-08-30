@@ -11,8 +11,10 @@ import {
 
 test('run lifecycle closes statuses and derives terminal phases', () => {
   assert.equal(isTerminalRunStatus('success'), true);
+  assert.equal(isTerminalRunStatus('unverified'), true);
   assert.equal(isTerminalRunStatus('running'), false);
   assert.equal(phaseForRunStatus('interrupted', 'waiting_for_response'), 'interrupted');
+  assert.equal(phaseForRunStatus('unverified', 'completed'), 'unverified');
   assert.throws(() => normalizeRunStatus('timeout'), /invalid_run_status:timeout/);
 });
 
@@ -41,4 +43,47 @@ test('output-bearing success requires a completion receipt', () => {
     phase: 'completed',
     finishedAt: 1
   }, { requireCompletionReceipt: true }), /missing_completion_receipt/);
+});
+
+test('query and research success require the matching receipt kind', () => {
+  const base = {
+    status: 'success',
+    phase: 'completed',
+    finishedAt: 1,
+    completionReceipt: {
+      version: 1,
+      responsePath: '/tmp/response.md',
+      artifactIds: ['response'],
+      responseSha256: 'a'.repeat(64),
+      capturedAt: 1
+    }
+  };
+  assert.throws(() => assertRunLifecycle({
+    ...base,
+    kind: 'query',
+    completionReceipt: { ...base.completionReceipt, kind: 'research-report' }
+  }, { requireCompletionReceipt: true }), /completion_receipt_kind_mismatch/);
+  assert.throws(() => assertRunLifecycle({
+    ...base,
+    kind: 'research',
+    completionReceipt: { ...base.completionReceipt, kind: 'assistant-response' }
+  }, { requireCompletionReceipt: true }), /completion_receipt_kind_mismatch/);
+});
+
+test('legacy unverified terminal state requires closed completion verification evidence', () => {
+  const run = {
+    kind: 'query',
+    status: 'unverified',
+    phase: 'unverified',
+    finishedAt: 2,
+    completionVerification: {
+      status: 'legacy-unverified',
+      legacyStatus: 'success',
+      reason: 'missing_completion_receipt'
+    }
+  };
+  assert.doesNotThrow(() => assertRunLifecycle(run, { requireCompletionReceipt: true }));
+  assert.throws(() => assertRunLifecycle({ ...run, completionVerification: null }, {
+    requireCompletionReceipt: true
+  }), /missing_completion_verification/);
 });

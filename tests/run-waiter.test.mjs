@@ -37,6 +37,60 @@ test('run waiter refuses a legacy output success without completion proof', asyn
   }), /success_without_completion_receipt/);
 });
 
+test('run waiter applies normalized matching-receipt checks before returning success', async () => {
+  const cases = [
+    { kind: 'query', status: 'SUCCESS', completionReceipt: null },
+    { kind: 'QUERY', status: 'success', completionReceipt: null },
+    {
+      kind: 'research',
+      status: 'success',
+      completionReceipt: {
+        version: 1,
+        kind: 'assistant-response',
+        responsePath: '/tmp/response.md',
+        responseSha256: 'a'.repeat(64),
+        capturedAt: 1
+      }
+    }
+  ];
+  for (const [index, run] of cases.entries()) {
+    await assert.rejects(() => waitForRun({
+      conn: {},
+      runId: `invalid-success-${index}`,
+      request: async () => ({
+        ok: true,
+        run: { id: `invalid-success-${index}`, revision: 1, ...run }
+      })
+    }), /success_without_completion_receipt/);
+  }
+});
+
+test('run waiter returns explicit legacy unverified terminal history without claiming success', async () => {
+  const result = await waitForRun({
+    conn: {},
+    runId: 'legacy-unverified',
+    timeoutMs: 20,
+    request: async () => ({
+      ok: true,
+      run: {
+        id: 'legacy-unverified',
+        kind: 'query',
+        status: 'unverified',
+        phase: 'unverified',
+        finishedAt: 2,
+        revision: 1,
+        completionVerification: {
+          status: 'legacy-unverified',
+          legacyStatus: 'success',
+          reason: 'missing_completion_receipt'
+        }
+      }
+    })
+  });
+  assert.equal(result.run.status, 'unverified');
+  assert.equal(exitCodeForRunStatus(result.run.status), 5);
+});
+
 test('run waiter timeout carries the latest non-mutating run snapshot', async () => {
   let requests = 0;
   await assert.rejects(() => waitForRun({
@@ -103,5 +157,6 @@ test('run waiter exit codes distinguish every terminal outcome', () => {
   assert.equal(exitCodeForRunStatus('error'), 2);
   assert.equal(exitCodeForRunStatus('stopped'), 3);
   assert.equal(exitCodeForRunStatus('interrupted'), 4);
+  assert.equal(exitCodeForRunStatus('unverified'), 5);
   assert.equal(exitCodeForRunStatus('running'), 64);
 });

@@ -35,6 +35,7 @@ function sleep(ms) {
 
 const EVALUATION_TERMINATION_TIMEOUT_MS = 5_000;
 const RESPONSE_BACKSTOP_MARGIN_MS = 10_000;
+const DEEP_RESEARCH_OBSERVATION_INTERVAL_MS = 5_000;
 
 async function removeOwnedDownloadFile(outDir, filePath) {
   const root = path.resolve(String(outDir || ''));
@@ -796,9 +797,10 @@ export class ChatGPTController {
       const cap = ${maxChars};
       const clean = (s) => String(s || '').replace(/\\u0000/g, '').replace(/\\s+\\n/g, '\\n').trim();
       const rootFrame = document.querySelector('#root');
-      const d = rootFrame?.contentDocument;
-      if (!d) return '';
-      const root = d.body || d.documentElement;
+      const d = rootFrame?.contentDocument || document;
+      const root = rootFrame?.contentDocument
+        ? (d.body || d.documentElement)
+        : (rootFrame || d.body || d.documentElement);
       let txt = clean(root?.innerText) || clean(d.body?.innerText) || clean(d.documentElement?.innerText);
       if (!txt) txt = clean(root?.textContent) || clean(d.body?.textContent) || clean(d.documentElement?.textContent);
       return txt.slice(0, cap);
@@ -4959,6 +4961,44 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
+  async #typePromptAfterInlineResearchSelection(prompt) {
+    await this.#emitProgress({ phase: 'typing_prompt' });
+    const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
+    const prepared = await this.#eval(`(() => {
+      ${HOST_DOM_COLLECTION_HELPERS_JS}
+      const promptCandidates = uniq([
+        ...queryAll(${promptSel}),
+        ...Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]'))
+      ]).filter(visible);
+      const prompt = promptCandidates.find((node) => {
+        if (node.matches?.('textarea, input')) return !node.disabled && !node.readOnly;
+        return !!node.isContentEditable || node.getAttribute?.('contenteditable') === 'true' || node.getAttribute?.('role') === 'textbox';
+      }) || null;
+      const pill = prompt?.querySelector?.(
+        '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"], [data-system-hint-type="plugin:connector_openai_deep_research"]'
+      ) || null;
+      if (!prompt || !pill || !prompt.contains(pill)) {
+        return { ok: false, error: 'research_inline_selection_missing' };
+      }
+      prompt.focus();
+      const selection = window.getSelection();
+      if (!selection) return { ok: false, error: 'research_inline_selection_unpositioned' };
+      const range = document.createRange();
+      range.setStartAfter(pill);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return { ok: true, inlinePromptSelection: true };
+    })()`);
+    if (!prepared?.ok) {
+      const error = new Error(prepared?.error || 'research_inline_selection_missing');
+      error.data = prepared || null;
+      throw error;
+    }
+    await this.page.insertText(' ');
+    await this.#typeHuman(prompt);
+  }
+
   async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, initialPromptLen = 0, initialStopCount = 0 } = {}) {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
@@ -6014,12 +6054,18 @@ export class ChatGPTController {
     durableObservation = false,
     reconcileGraceMs = null,
     recoveryTimeoutMs = null,
-    structuredAssistantBaseline = null
+    structuredAssistantBaseline = null,
+    deepResearchObservation = false,
+    preSendDeepResearchText = ''
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
+    const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
+    const composerRootSel = JSON.stringify(
+      this.selectors.composerRoot || this.selectors.promptTextarea || 'form'
+    );
     const extraThinkingSource = JSON.stringify(String(extraThinkingPattern || '').trim());
     const imageGenerationSource = imageGeneration ? 'true' : 'false';
     const effectiveTimeoutMs = Math.max(
@@ -6047,6 +6093,12 @@ export class ChatGPTController {
     let lastWaitDebugAt = 0;
     let lastResponseDebug = null;
     let reconciling = false;
+    let deepResearchObservationPoll = 0;
+    let lastDeepResearchText = '';
+    const deepResearchObservationPollInterval = Math.max(
+      1,
+      Math.ceil(DEEP_RESEARCH_OBSERVATION_INTERVAL_MS / Math.max(1, Number(pollMs) || 1))
+    );
     const baselineStopCount = Math.max(0, Number(preSendStopCount) || 0);
 
     while (Date.now() - start < (durableObservation ? hardDeadlineMs : effectiveTimeoutMs)) {
@@ -6084,6 +6136,12 @@ export class ChatGPTController {
         const sendFound = !!send;
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
+        const prompt = Array.from(document.querySelectorAll(${promptSel})).find(visible) ||
+          Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]')).find(visible) ||
+          null;
+        const composerRoot =
+          prompt?.closest(${composerRootSel}) ||
+          null;
         const fallbackMainText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
         const txt = (lastNode?.innerText || fallbackMainText).trim();
         const imageRoot = lastNode || document.querySelector('main') || document.body;
@@ -6109,6 +6167,7 @@ export class ChatGPTController {
           '[class*="think"], [data-testid*="think"], [aria-label*="think"], [class*="research"], [data-testid*="research"], [aria-label*="research"], [class*="search"], [data-testid*="search"], [aria-label*="search"], [class*="source"], [data-testid*="source"], [aria-label*="source"], [class*="clarif"], [data-testid*="clarif"], [aria-label*="clarif"], .sr-only, [role="status"], [aria-live]'
         )).some(el => {
           if (lastNode && lastNode.contains(el)) return false;
+          if (composerRoot && composerRoot.contains(el)) return false;
           const text = (el.textContent || '').trim();
           if (!text) return false;
           if (/\bthinking\b|\bpro thinking\b|\bextended pro\b|\breasoning\b/i.test(text)) return true;
@@ -6144,17 +6203,37 @@ export class ChatGPTController {
         break;
       }
 
-      const txt = String(snap?.txt || '');
+      const mainTxt = String(snap?.txt || '');
       const pageText = String(snap?.pageText || '');
       const stopCount = Number.isFinite(Number(snap?.stopCount))
         ? Math.max(0, Number(snap.stopCount))
         : (snap?.stop ? 1 : 0);
       const activeStop = stopCount > baselineStopCount || (!!snap?.stop && baselineStopCount === 0);
       const hasImageOutput = Number(snap?.imageCandidateCount || 0) > 0;
-      const imagePlaceholder = IMAGE_PLACEHOLDER_RE.test(txt);
-      const hasThinkingLine = IMAGE_THINKING_LINE_RE.test(txt);
+      const imagePlaceholder = IMAGE_PLACEHOLDER_RE.test(mainTxt);
+      const hasThinkingLine = IMAGE_THINKING_LINE_RE.test(mainTxt);
       const thinking = !!snap?.isThinking || imagePlaceholder || (imageGeneration && !hasImageOutput && hasThinkingLine);
       const finalImageOutput = hasImageOutput && !(imageGeneration && thinking);
+      if (activeStop || thinking) generationObserved = true;
+      if (
+        deepResearchObservation &&
+        deepResearchObservationPoll % deepResearchObservationPollInterval === 0
+      ) {
+        lastDeepResearchText = await this.#readDeepResearchText({ maxChars: 200_000 }).catch(() => '');
+      }
+      deepResearchObservationPoll += 1;
+      const deepResearchText = lastDeepResearchText;
+      const deepResearchCompleted = /\bresearch completed in\b/i.test(deepResearchText);
+      const nestedResearchReport = !!(
+        deepResearchObservation &&
+        generationObserved &&
+        !activeStop &&
+        deepResearchText &&
+        deepResearchText !== String(preSendDeepResearchText || '') &&
+        (!thinking || deepResearchCompleted)
+      );
+      const effectiveThinking = thinking && !nestedResearchReport;
+      const txt = nestedResearchReport ? deepResearchText : mainTxt;
       const conversationUrl = extractConversationUrl(snap?.currentUrl || '');
       if (conversationUrl && conversationUrl !== emittedConversationUrl) {
         emittedConversationUrl = conversationUrl;
@@ -6167,14 +6246,15 @@ export class ChatGPTController {
         hardDeadlineMs: durableObservation ? hardDeadlineMs : effectiveTimeoutMs,
         elapsedMs: Date.now() - start,
         count: snap?.count || 0,
-        usedFallback: !!snap?.usedFallback,
+        usedFallback: nestedResearchReport ? false : !!snap?.usedFallback,
+        deepResearchReport: nestedResearchReport,
         stop: activeStop,
         rawStop: !!snap?.stop,
         stopCount,
         baselineStopCount,
         sendFound: !!snap?.sendFound,
         sendEnabled: !!snap?.sendEnabled,
-        thinking,
+        thinking: effectiveThinking,
         hasContinue: !!snap?.hasContinue,
         hasError: !!snap?.hasError,
         currentUrl: snap?.currentUrl || null,
@@ -6185,7 +6265,9 @@ export class ChatGPTController {
         lastWaitDebugAt = Date.now();
         await this.#emitProgress({ responseDebug: { ...lastResponseDebug } });
       }
-      const assistantAdvanced = (snap?.count || 0) > preSendCount || ((snap?.count || 0) > 0 && txt !== preSendText);
+      const assistantAdvanced = nestedResearchReport ||
+        (snap?.count || 0) > preSendCount ||
+        ((snap?.count || 0) > 0 && txt !== preSendText);
       const pageChanged = pageText !== preSendPageText;
       if (txt !== last) {
         last = txt;
@@ -6195,10 +6277,8 @@ export class ChatGPTController {
       // Detect whether we've seen a NEW response (not pre-existing page content).
       // A new response is indicated by: more assistant nodes than before send,
       // or different text than the pre-send last message, or a stop button appearing.
-      if (activeStop || thinking) generationObserved = true;
-
       if (!newResponseSeen) {
-        if (assistantAdvanced || activeStop || thinking || (preSendCount === 0 && pageChanged)) {
+        if (assistantAdvanced || activeStop || effectiveThinking || (preSendCount === 0 && pageChanged)) {
           newResponseSeen = true;
           lastChange = Date.now(); // Reset stability timer for the new response
         }
@@ -6209,7 +6289,7 @@ export class ChatGPTController {
       // A missing send button alone is NOT treated as generating — the selector may
       // simply not match the current UI. Only block completion when there's active
       // evidence of generation (stop button or thinking state).
-      const generating = (activeStop && !snap?.sendEnabled) || thinking || (activeStop && !snap?.sendFound);
+      const generating = (activeStop && !snap?.sendEnabled) || effectiveThinking || (activeStop && !snap?.sendFound);
       if (generating) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
@@ -6234,13 +6314,17 @@ export class ChatGPTController {
       const readyByNodes = (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
-      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !activeStop && !thinking);
-      const fallbackReady = fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
-      const contentReady = readyByNodes || fallbackReady || finalImageOutput || snap?.hasError;
-      const responseReady = snap?.hasError || (imageGeneration ? (finalImageOutput || (txt.length > 0 && !thinking)) : txt.length > 0);
+      const sendReady = snap?.sendEnabled || (!snap?.sendFound && !activeStop && !effectiveThinking);
+      // Page-wide fallback text can contain Pro progress chrome even when ChatGPT has
+      // not mounted an assistant turn. Durable runs may use it to observe progress,
+      // but only an assistant node or the final structured-capture recovery may
+      // establish output-bearing success.
+      const fallbackReady = !durableObservation && fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
+      const contentReady = readyByNodes || nestedResearchReport || fallbackReady || finalImageOutput || snap?.hasError;
+      const responseReady = snap?.hasError || (imageGeneration ? (finalImageOutput || (txt.length > 0 && !effectiveThinking)) : txt.length > 0);
       const done = newResponseSeen && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
-        (!generating && !thinking && fallbackStableLongEnough && contentReady));
+        (!generating && !effectiveThinking && fallbackStableLongEnough && contentReady));
       if (done) {
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
@@ -6473,7 +6557,17 @@ export class ChatGPTController {
           ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
         const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
         if (explicitActiveNodes.length) {
-          return { active: true, action: 'none', reason: 'active_selector_visible', label: labelOf(explicitActiveNodes[0]) || null };
+          const node = explicitActiveNodes[0];
+          const inlinePromptSelection = !!node.matches?.(
+            '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"], [data-system-hint-type="plugin:connector_openai_deep_research"]'
+          );
+          return {
+            active: true,
+            action: 'none',
+            reason: inlinePromptSelection ? 'inline_research_selection_visible' : 'active_selector_visible',
+            label: labelOf(node) || null,
+            inlinePromptSelection
+          };
         }
         const activeNodes = uniq(Array.from(document.querySelectorAll('[aria-pressed="true"], [aria-checked="true"], [data-state="active"], [data-state="on"], [aria-selected="true"]')))
           .filter((n) => visible(n) && /deep research|research/i.test(labelOf(n)));
@@ -6949,16 +7043,21 @@ export class ChatGPTController {
       let researchMeta = buildResearchMeta();
       try {
         await this.ensureReady({ timeoutMs: effectiveTimeoutMs });
-        await this.#activateResearchMode({ timeoutMs: 30_000 });
+        const researchActivation = await this.#activateResearchMode({ timeoutMs: 30_000 });
         researchMeta = buildResearchMeta({
           activated: true,
           conversationUrl: await this.getUrl().catch(() => null)
         });
         await this.#emitProgress({ phase: 'activating_research_mode', researchMeta });
         await this.#attachFiles(attachments);
+        const preSendDeepResearchText = await this.#readDeepResearchText({ maxChars: 200_000 }).catch(() => '');
         const { snapshot: preSend, structuredAssistantBaseline } =
           await this.#readPreSendAssistantState({ durableObservation: true });
-        await this.#typePrompt(prompt);
+        if (researchActivation?.inlinePromptSelection === true) {
+          await this.#typePromptAfterInlineResearchSelection(prompt);
+        } else {
+          await this.#typePrompt(prompt);
+        }
         const sendDebug = await this.#clickSend();
         const result = await this.#waitForAssistantStable({
           timeoutMs: effectiveTimeoutMs,
@@ -6970,6 +7069,8 @@ export class ChatGPTController {
           minimumStableMs: 60_000,
           durableObservation: true,
           structuredAssistantBaseline,
+          deepResearchObservation: true,
+          preSendDeepResearchText,
           extraThinkingPattern: '\\bresearching\\b|\\bsearching(?: the web)?\\b|\\breading sources?\\b|\\bclarifying\\b|\\bgathering\\b'
         });
         const exported = await this.#exportResearchMarkdown({

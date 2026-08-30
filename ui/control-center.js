@@ -67,6 +67,7 @@ function fmtRunStatus(status) {
   if (key === 'blocked') return 'Blocked';
   if (key === 'stopped') return 'Stopped';
   if (key === 'interrupted') return 'Interrupted';
+  if (key === 'unverified') return 'Unverified';
   if (key === 'running') return 'Running';
   if (key === 'queued') return 'Queued';
   if (key === 'archived') return 'Archived';

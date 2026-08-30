@@ -30,7 +30,7 @@ async function main() {
     return;
   }
   if (args.help) {
-    process.stdout.write('Wait for an Agentify query or research run to reach proven terminal completion.\n\nUsage:\n  npm run wait-run -- <runId> [--timeout-ms N] [--no-output]\n\nExit codes:\n  0 success, 2 error, 3 stopped, 4 interrupted, 64 usage, 75 caller timeout, 130 signal\n');
+    process.stdout.write('Wait for an Agentify query or research run to reach proven terminal completion.\n\nUsage:\n  npm run wait-run -- <runId> [--timeout-ms N] [--no-output]\n\nExit codes:\n  0 success, 2 error, 3 stopped, 4 interrupted, 5 legacy unverified, 64 usage, 75 caller timeout, 130 signal\n');
     return;
   }
   const abortController = new AbortController();

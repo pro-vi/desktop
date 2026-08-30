@@ -214,6 +214,32 @@ test('electron-browser-backend: createSession keeps managed tabs responsive whil
   assert.equal(createdWindow?.backgroundThrottling, false);
 });
 
+test('electron-browser-backend: mouse input carries the pressed-button modifier through mouseDown', async () => {
+  const events = [];
+  class InputBrowserWindow extends MockBrowserWindow {
+    constructor(...args) {
+      super(...args);
+      this.webContents.sendInputEvent = (event) => events.push(event);
+    }
+
+    async loadURL() {
+      return true;
+    }
+  }
+
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: InputBrowserWindow });
+  const session = await backend.createSession({ url: 'https://chatgpt.com/' });
+  await session.page.moveMouse(10, 20);
+  await session.page.mouseDown(10, 20, { button: 'left', clickCount: 1 });
+  await session.page.mouseUp(10, 20, { button: 'left', clickCount: 1 });
+
+  assert.deepEqual(events, [
+    { type: 'mouseMove', x: 10, y: 20, movementX: 0, movementY: 0 },
+    { type: 'mouseDown', x: 10, y: 20, button: 'left', clickCount: 1, modifiers: ['leftbuttondown'] },
+    { type: 'mouseUp', x: 10, y: 20, button: 'left', clickCount: 1 }
+  ]);
+});
+
 test('electron-browser-backend: terminateEvaluation stops renderer execution through the owned debugger', async () => {
   let createdWindow = null;
   const commands = [];
@@ -652,18 +678,21 @@ test('electron-browser-backend: evaluateDeepResearch prefers the child target fo
         sendCommand: async (method, params = {}, sessionId) => {
           calls.push({ method, params, sessionId });
           if (method === 'Target.getTargetInfo') return { targetInfo: { targetId: 'target-root' } };
+          if (method === 'DOM.getDocument') return { root: { nodeId: 11 } };
+          if (method === 'DOM.querySelectorAll') return { nodeIds: [21] };
+          if (method === 'DOM.describeNode') return { node: { frameId: 'deep-here' } };
           if (method === 'Target.getTargets') {
             return {
               targetInfos: [
                 {
                   targetId: 'deep-other',
-                  parentId: 'other-root',
-                  url: 'https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/?app=chatgpt'
+                  parentId: null,
+                  url: 'https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/?app=chatgpt'
                 },
                 {
                   targetId: 'deep-here',
-                  parentId: 'target-root',
-                  url: 'https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/?app=chatgpt'
+                  parentId: null,
+                  url: 'https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/?app=chatgpt'
                 }
               ]
             };
@@ -727,7 +756,7 @@ test('electron-browser-backend: evaluateDeepResearch falls back to the only matc
                 {
                   targetId: 'deep-only',
                   parentId: null,
-                  url: 'https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/?app=chatgpt'
+                  url: 'https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/?app=chatgpt'
                 }
               ]
             };
