@@ -1127,6 +1127,58 @@ test('chatgpt-controller: hard reconciliation deadline bounds a hung response ev
   assert.equal(await controller.runExclusive(async () => 'settled'), 'settled');
 });
 
+test('chatgpt-controller: failed evaluation termination cannot make a durable run immortal', async () => {
+  let terminationCalls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '', providerMessageId: null };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) return await new Promise(() => {});
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async terminateEvaluation() { terminationCalls += 1; return false; },
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    },
+    responseSettlementTimeoutMs: 20
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    controller.query({
+      prompt: 'agentify',
+      timeoutMs: 30,
+      durableObservation: true,
+      reconcileGraceMs: 30,
+      recoveryTimeoutMs: 50
+    }),
+    (error) => error?.message === 'response_reconcile_timeout'
+  );
+  assert.equal(Date.now() - startedAt < 1_000, true);
+  assert.equal(terminationCalls >= 1, true);
+  await assert.rejects(
+    controller.runExclusive(async () => 'unsafe'),
+    (error) => error?.code === 'tab_busy'
+  );
+});
+
 test('chatgpt-controller: recovery timeout preserves the inner terminal diagnostics', async () => {
   let sent = false;
   let settleCapture = null;

@@ -33,6 +33,8 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const EVALUATION_TERMINATION_TIMEOUT_MS = 5_000;
+
 async function removeOwnedDownloadFile(outDir, filePath) {
   const root = path.resolve(String(outDir || ''));
   const candidate = path.resolve(String(filePath || ''));
@@ -398,7 +400,8 @@ export class ChatGPTController {
     onCompatibilityObservation = null,
     compatibilityBackend = 'electron',
     captureHostTimeoutMs = 330_000,
-    navigationTimeoutMs = 30_000
+    navigationTimeoutMs = 30_000,
+    responseSettlementTimeoutMs = 5_000
   }) {
     this.page = page;
     this.selectors = selectors;
@@ -418,6 +421,11 @@ export class ChatGPTController {
       parsedNavigationTimeoutMs >= 1 && parsedNavigationTimeoutMs <= 5 * 60_000
       ? parsedNavigationTimeoutMs
       : 30_000;
+    const parsedResponseSettlementTimeoutMs = Math.floor(Number(responseSettlementTimeoutMs));
+    this.responseSettlementTimeoutMs = Number.isSafeInteger(parsedResponseSettlementTimeoutMs) &&
+      parsedResponseSettlementTimeoutMs >= 1 && parsedResponseSettlementTimeoutMs <= 30_000
+      ? parsedResponseSettlementTimeoutMs
+      : 5_000;
     this.onBlocked = onBlocked;
     this.onUnblocked = onUnblocked;
     this.stateDir = stateDir;
@@ -694,7 +702,7 @@ export class ChatGPTController {
       await Promise.race([
         Promise.resolve().then(async () => await this.page.terminateEvaluation()).catch(() => false),
         new Promise((resolve) => {
-          terminationTimeoutId = setTimeout(resolve, 5_000);
+          terminationTimeoutId = setTimeout(resolve, EVALUATION_TERMINATION_TIMEOUT_MS);
         })
       ]);
     } finally {
@@ -765,7 +773,10 @@ export class ChatGPTController {
       if (!expired) throw error;
       running.catch(() => {});
       await termination.catch(() => {});
-      await running.catch(() => {});
+      await Promise.race([
+        running.catch(() => {}),
+        sleep(this.responseSettlementTimeoutMs)
+      ]);
       const timeout = new Error('response_observation_deadline');
       timeout.code = 'response_observation_deadline';
       throw timeout;
@@ -5918,10 +5929,12 @@ export class ChatGPTController {
     const recoveryTimeoutMs = Number.isFinite(Number(options.recoveryTimeoutMs)) && Number(options.recoveryTimeoutMs) > 0
       ? Math.floor(Number(options.recoveryTimeoutMs))
       : Math.min(this.captureHostTimeoutMs, 30_000);
+    const backstopSlackMs =
+      3 * (EVALUATION_TERMINATION_TIMEOUT_MS + this.responseSettlementTimeoutMs) + 5_000;
     try {
       return await this.#runResponseObservationWithDeadline(
         operation,
-        timeoutMs + reconcileGraceMs + recoveryTimeoutMs + 15_000
+        timeoutMs + reconcileGraceMs + recoveryTimeoutMs + backstopSlackMs
       );
     } catch (error) {
       if (error?.code !== 'response_observation_deadline') throw error;
