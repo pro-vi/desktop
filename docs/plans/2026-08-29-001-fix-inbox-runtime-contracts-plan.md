@@ -2,7 +2,7 @@
 title: Fix inbox runtime contracts
 objective: Make complete conversation reads recoverable in one call, make stalled durable runs terminate with evidence, and preserve exact Pro mode confirmation.
 type: fix
-status: active
+status: completed
 date: 2026-08-29
 origin: .inbox/.read/2026-08-17-read-conversation-large-transcript-spill.md
 ---
