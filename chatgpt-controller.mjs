@@ -5929,8 +5929,10 @@ export class ChatGPTController {
     const recoveryTimeoutMs = Number.isFinite(Number(options.recoveryTimeoutMs)) && Number(options.recoveryTimeoutMs) > 0
       ? Math.floor(Number(options.recoveryTimeoutMs))
       : Math.min(this.captureHostTimeoutMs, 30_000);
-    const backstopSlackMs =
-      3 * (EVALUATION_TERMINATION_TIMEOUT_MS + this.responseSettlementTimeoutMs) + 5_000;
+    const backstopSlackMs = Number.isFinite(Number(options.backstopSlackMs)) && Number(options.backstopSlackMs) > 0
+      ? Math.floor(Number(options.backstopSlackMs))
+      : 3 * (EVALUATION_TERMINATION_TIMEOUT_MS + this.responseSettlementTimeoutMs) + 5_000;
+    const observationStartedAt = Date.now();
     try {
       return await this.#runResponseObservationWithDeadline(
         operation,
@@ -5946,7 +5948,7 @@ export class ChatGPTController {
           softDeadlineMs: timeoutMs,
           reconcileGraceMs,
           hardDeadlineMs: timeoutMs + reconcileGraceMs,
-          elapsedMs: timeoutMs + reconcileGraceMs + recoveryTimeoutMs
+          elapsedMs: Math.max(0, Date.now() - observationStartedAt)
         },
         recovery: { status: 'unavailable', reason: 'response_capability_deadline' }
       };
@@ -6316,7 +6318,8 @@ export class ChatGPTController {
     modelIntent = null,
     durableObservation = false,
     reconcileGraceMs = null,
-    recoveryTimeoutMs = null
+    recoveryTimeoutMs = null,
+    backstopSlackMs = null
   } = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
@@ -6383,6 +6386,7 @@ export class ChatGPTController {
         durableObservation,
         reconcileGraceMs,
         recoveryTimeoutMs,
+        backstopSlackMs,
         structuredAssistantBaseline
       });
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });

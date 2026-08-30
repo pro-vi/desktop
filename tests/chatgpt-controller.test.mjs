@@ -1179,6 +1179,59 @@ test('chatgpt-controller: failed evaluation termination cannot make a durable ru
   );
 });
 
+test('chatgpt-controller: outer backstop records measured elapsed time', async () => {
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '', providerMessageId: null };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      return await new Promise(() => {});
+    },
+    async terminateEvaluation() { return false; },
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    },
+    responseSettlementTimeoutMs: 100
+  });
+
+  const startedAt = Date.now();
+  let reportedElapsedMs = null;
+  await assert.rejects(
+    controller.query({
+      prompt: 'agentify',
+      timeoutMs: 30,
+      durableObservation: true,
+      reconcileGraceMs: 30,
+      recoveryTimeoutMs: 30,
+      backstopSlackMs: 10
+    }),
+    (error) => {
+      assert.equal(error?.message, 'response_reconcile_timeout');
+      assert.equal(error?.data?.recovery?.reason, 'response_capability_deadline');
+      reportedElapsedMs = error?.data?.responseDebug?.elapsedMs;
+      return true;
+    }
+  );
+  assert.equal(Date.now() - startedAt < 1_500, true);
+  assert.equal(reportedElapsedMs > 95 && reportedElapsedMs < 500, true);
+});
+
 test('chatgpt-controller: recovery timeout preserves the inner terminal diagnostics', async () => {
   let sent = false;
   let settleCapture = null;
