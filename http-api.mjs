@@ -2200,6 +2200,7 @@ export function startHttpApi({
       modeUsed: outputManifest?.modeUsed || normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null }),
       modelUsed: outputManifest?.modelUsed || normalizeChatGptModelIntent(meta.modelUsed || meta.actualModelIntent, { fallback: null }),
       degradedFrom: outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
+      recovery: parseResponseRecovery(result?.recovery),
       outputManifest: outputManifest || null,
       completionReceipt
     };

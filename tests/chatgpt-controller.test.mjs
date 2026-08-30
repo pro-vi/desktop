@@ -1320,6 +1320,16 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
     async navigate() {},
     async evaluate(js) {
       if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_power_active',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          label: 'Pro'
+        };
+      }
       if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
       if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
       if (js.includes('return { count: nodes.length')) {
@@ -1345,6 +1355,9 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
           },
           artifactInventory: { status: 'complete', items: [] }
         };
+      }
+      if (js.includes('recovery-page-mode')) {
+        return 'Recovered exact assistant response\nPro\nChatGPT can make mistakes. Check important info.';
       }
       if (js.includes('fallbackMainText')) {
         return {
@@ -1388,12 +1401,20 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
       prompt: 'agentify',
       timeoutMs: 1_000,
       durableObservation: true,
-      reconcileGraceMs: 1_000
+      reconcileGraceMs: 1_000,
+      modeIntent: 'extended-pro'
     });
     assert.equal(result.text, recoveredText);
     assert.equal(result.meta.recoveredBy, 'structured_conversation_capture');
     assert.equal(result.meta.count, 2);
-    assert.equal(result.meta.modeUsed, null);
+    assert.equal(result.meta.modeUsed, 'extended-pro');
+    assert.equal(result.meta.modeVerification, 'observed_after_recovery');
+    assert.deepEqual(result.recovery, {
+      status: 'complete',
+      reason: 'structured_conversation_capture',
+      assistantCount: 2,
+      advanced: true
+    });
     assert.equal(captureCalls, 1);
   } finally {
     Date.now = realNow;

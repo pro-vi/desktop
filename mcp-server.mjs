@@ -904,6 +904,7 @@ registerTool(
       text: data.result?.text || '',
       codeBlocks: data.result?.codeBlocks || [],
       meta: data.result?.meta || null,
+      recovery: data.result?.recovery || null,
       packedContext: data.packedContext || null,
       packedContextSummary: data.packedContextSummary || data.packedContext?.summary || null,
       bundle: data.bundle || null

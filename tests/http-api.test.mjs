@@ -2110,7 +2110,17 @@ test('http-api: query returns runId and persists durable run state', async (t) =
           confirmedAt: '2026-04-26T12:00:00.000Z'
         }
       });
-      return { text: 'durable answer', codeBlocks: [], meta: {} };
+      return {
+        text: 'durable answer',
+        codeBlocks: [],
+        meta: { recoveredBy: 'structured_conversation_capture' },
+        recovery: {
+          status: 'complete',
+          reason: 'structured_conversation_capture',
+          assistantCount: 1,
+          advanced: true
+        }
+      };
     },
     getUrl: async () => 'https://chatgpt.com/c/durable-run'
   };
@@ -2163,6 +2173,12 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(persisted.modeIntentProvenance?.confirmed, true);
   assert.equal(persisted.modeIntentProvenance?.stage, 'before_send');
   assert.equal(persisted.modelIntentProvenance, null);
+  assert.deepEqual(persisted.recovery, {
+    status: 'complete',
+    reason: 'structured_conversation_capture',
+    assistantCount: 1,
+    advanced: true
+  });
   assert.equal(typeof persisted.finishedAt, 'number');
   assert.equal(path.basename(persisted.outputManifest?.responsePath || ''), 'assistant_response.md');
   assert.equal(path.basename(persisted.outputManifest?.metadataPath || ''), 'metadata.json');

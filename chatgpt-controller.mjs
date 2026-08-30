@@ -34,6 +34,7 @@ function sleep(ms) {
 }
 
 const EVALUATION_TERMINATION_TIMEOUT_MS = 5_000;
+const RESPONSE_BACKSTOP_MARGIN_MS = 10_000;
 
 async function removeOwnedDownloadFile(outDir, filePath) {
   const root = path.resolve(String(outDir || ''));
@@ -5931,7 +5932,8 @@ export class ChatGPTController {
       : Math.min(this.captureHostTimeoutMs, 30_000);
     const backstopSlackMs = Number.isFinite(Number(options.backstopSlackMs)) && Number(options.backstopSlackMs) > 0
       ? Math.floor(Number(options.backstopSlackMs))
-      : 3 * (EVALUATION_TERMINATION_TIMEOUT_MS + this.responseSettlementTimeoutMs) + 5_000;
+      : 3 * (EVALUATION_TERMINATION_TIMEOUT_MS + this.responseSettlementTimeoutMs) +
+        5_000 + RESPONSE_BACKSTOP_MARGIN_MS;
     const observationStartedAt = Date.now();
     try {
       return await this.#runResponseObservationWithDeadline(
@@ -6300,17 +6302,35 @@ export class ChatGPTController {
           };
           if (capture?.status === 'complete' && advanced && String(finalAssistant?.text || '').trim()) {
             const recoveredText = String(finalAssistant.text).trim();
+            let actualMode = null;
+            try {
+              const pageText = await this.#runResponseObservationWithDeadline(
+                async () => await this.#eval(`(() => {
+                  // recovery-page-mode
+                  return ((document.querySelector('main') || document.body)?.innerText || '').trim();
+                })()`),
+                Math.min(effectiveRecoveryTimeoutMs, 5_000)
+              );
+              actualMode = inferActualModeIntent({ text: recoveredText, pageText: String(pageText || '') });
+            } catch {}
             return {
               text: recoveredText,
               codeBlocks: [],
+              recovery: {
+                status: 'complete',
+                reason: 'structured_conversation_capture',
+                assistantCount: assistants.length,
+                advanced: true
+              },
               meta: {
                 count: assistants.length,
                 hasError: false,
                 recoveredBy: 'structured_conversation_capture',
-                modeUsed: null,
-                actualModeIntent: null,
-                actualModeLabel: null,
-                actualModeSource: null
+                modeVerification: actualMode ? 'observed_after_recovery' : 'unverified_after_recovery',
+                modeUsed: actualMode?.intent || null,
+                actualModeIntent: actualMode?.intent || null,
+                actualModeLabel: actualMode?.label || null,
+                actualModeSource: actualMode?.source || null
               }
             };
           }

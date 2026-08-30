@@ -471,7 +471,17 @@ test('mcp query forwards an optional live continuation binding through real stdi
         ok: true,
         tabId: 'tab-thread',
         runId: `run-${requests.length}`,
-        result: { text: 'receipt-backed reply', codeBlocks: [], meta: null }
+        result: {
+          text: 'receipt-backed reply',
+          codeBlocks: [],
+          meta: null,
+          recovery: {
+            status: 'complete',
+            reason: 'structured_conversation_capture',
+            assistantCount: 1,
+            advanced: true
+          }
+        }
       });
     }
     return sendJsonStatus(res, 404, { error: 'not_found' });
@@ -526,6 +536,7 @@ test('mcp query forwards an optional live continuation binding through real stdi
 
   assert.equal(continued.isError, undefined);
   assert.equal(continued.content[0].text, 'receipt-backed reply');
+  assert.equal(continued.structuredContent.recovery.reason, 'structured_conversation_capture');
   assert.equal(generic.isError, undefined);
   assert.equal(malformed.every(({ isError }) => isError === true), true);
   for (const result of malformed) assert.match(result.content[0].text, /conversation-not-live-bound/);
