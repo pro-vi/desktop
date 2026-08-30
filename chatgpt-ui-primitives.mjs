@@ -97,6 +97,12 @@ export function modePowerScaleLooksSupported({ min, max, current } = {}) {
   );
 }
 
+export function modePowerIntentForSupportedScale({ min, max, current, intents } = {}) {
+  if (!modePowerScaleLooksSupported({ min, max, current }) || !Array.isArray(intents)) return null;
+  const intent = String(intents[current] || '').trim();
+  return intent || null;
+}
+
 export function modelIntentPatternMatchesLabel(label, intent) {
   const text = normalizeUiText(label);
   const meta = CHATGPT_MODEL_INTENT_META[String(intent || '').trim().toLowerCase()];
@@ -428,6 +434,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${modeIntentForLabel.toString()}
     ${modeIntentLabelLooksUsable.toString()}
     ${modePowerScaleLooksSupported.toString()}
+    ${modePowerIntentForSupportedScale.toString()}
     ${modelPickerControlText.toString()}
     ${descriptorText.toString()}
     ${isHighConfidenceModeControlDescriptor.toString()}
@@ -437,6 +444,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     return {
       modeIntentForLabel,
       modePowerScaleLooksSupported,
+      modePowerIntentForSupportedScale,
       modePickerControlText: modelPickerControlText,
       isHighConfidenceModeControlDescriptor,
       scoreModeTriggerCandidate,

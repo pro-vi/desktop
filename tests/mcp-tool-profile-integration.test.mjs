@@ -307,6 +307,141 @@ test('mcp server tools/list exposes only the selected core profile', async () =>
   assert.equal(artifactDownload.inputSchema?.required?.includes('artifactKeys'), true);
 });
 
+test('mcp conversation read returns artifact metadata without duplicating the complete transcript', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-read-conversation-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const token = 'mcp-read-conversation-token';
+  const serverId = 'mcp-read-conversation-server';
+  const hiddenMiddle = 'MIDDLE_MUST_ONLY_EXIST_IN_THE_TRANSCRIPT_FILE';
+  const fullText = `${'A'.repeat(25_000)}${hiddenMiddle}${'B'.repeat(25_000)}`;
+  const preview = fullText.slice(0, 20_000);
+  let requestBody = null;
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/read-conversation') {
+      requestBody = await readJsonBody(req);
+      return sendJson(res, {
+        ok: true,
+        tabId: 'tab-read',
+        text: fullText,
+        preview,
+        transcriptPath: '/tmp/agentify/conversation-transcript.md',
+        transcriptArtifactId: 'artifact-transcript',
+        totalChars: fullText.length,
+        totalBytes: Buffer.byteLength(fullText),
+        sha256: 'a'.repeat(64),
+        complete: true,
+        truncated: true,
+        previewTruncated: true,
+        captureReason: null,
+        reason: 'max_chars',
+        messageCount: 2,
+        scrollPasses: 3,
+        artifactInventory: { status: 'complete', items: [] }
+      });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-read-conversation-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({ name: 'agentify_read_conversation', arguments: {} });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(requestBody?.maxChars, 20_000);
+  assert.match(result.content[0].text, /^transcriptPath=\/tmp\/agentify\/conversation-transcript\.md/m);
+  assert.match(result.content[0].text, /totalChars=50045/);
+  assert.match(result.content[0].text, /preview:/);
+  assert.equal(result.structuredContent.transcriptPath, '/tmp/agentify/conversation-transcript.md');
+  assert.equal('text' in result.structuredContent, false);
+  assert.equal('preview' in result.structuredContent, false);
+  assert.equal(JSON.stringify(result).includes(hiddenMiddle), false);
+});
+
+test('mcp wait timeout returns the latest diagnostic snapshot without mutating the run', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-wait-timeout-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const token = 'mcp-wait-timeout-token';
+  const serverId = 'mcp-wait-timeout-server';
+  let waitCalls = 0;
+  const run = {
+    id: 'run-wait-timeout',
+    kind: 'query',
+    status: 'running',
+    phase: 'reconciling_response',
+    revision: 4,
+    responseDebug: {
+      version: 1,
+      softDeadlineMs: 1_000,
+      reconcileGraceMs: 500,
+      hardDeadlineMs: 1_500,
+      elapsedMs: 1_200,
+      count: 0
+    }
+  };
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/runs/wait') {
+      waitCalls += 1;
+      await readJsonBody(req);
+      return sendJson(res, { ok: true, run });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-wait-timeout-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({
+      name: 'agentify_wait_run',
+      arguments: { runId: run.id, timeoutMs: 20 }
+    });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(waitCalls > 0, true);
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.waitTimedOut, true);
+  assert.equal(result.structuredContent.run.status, 'running');
+  assert.equal(result.structuredContent.run.responseDebug.count, 0);
+  assert.match(result.content[0].text, /^waitTimedOut=true/m);
+  assert.match(result.content[0].text, /phase=reconciling_response/);
+});
+
 test('mcp query forwards an optional live continuation binding through real stdio and preserves generic queries', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-live-continuation-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));

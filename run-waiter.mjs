@@ -21,10 +21,15 @@ export async function waitForRun({
   if (!id) throw new Error('missing_run_id');
   const startedAt = Date.now();
   let afterRevision = 0;
+  let lastData = null;
   while (true) {
     if (signal?.aborted) throw signal.reason || new Error('wait_aborted');
     const remaining = timeoutMs > 0 ? timeoutMs - (Date.now() - startedAt) : Number.POSITIVE_INFINITY;
-    if (remaining <= 0) throw new Error('run_wait_timeout');
+    if (remaining <= 0) {
+      const error = new Error('run_wait_timeout');
+      error.data = lastData;
+      throw error;
+    }
     const data = await request({
       ...conn,
       method: 'POST',
@@ -39,6 +44,7 @@ export async function waitForRun({
       },
       signal
     });
+    lastData = data;
     const run = data?.run;
     if (!run) throw new Error('invalid_run_wait_response');
     afterRevision = Math.max(afterRevision, Number(run.revision) || 0);

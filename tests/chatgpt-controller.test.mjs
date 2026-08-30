@@ -958,6 +958,195 @@ test('chatgpt-controller: query does not accept composer clearing as assistant p
   }
 });
 
+test('chatgpt-controller: durable reconciliation reaches a hard terminal with final diagnostics', async () => {
+  const realNow = Date.now;
+  let fakeNow = 2_000_000;
+  Date.now = () => {
+    fakeNow += 50;
+    return fakeNow;
+  };
+  const progress = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('publishedCaptureWindow')) {
+        return {
+          captureWindow: {
+            status: 'partial',
+            reason: 'conversation_generation_active',
+            rawTurns: [{ ordinal: 0, providerMessageId: 'prompt-1', role: 'user', text: 'agentify' }],
+            evidence: {
+              topBoundary: true,
+              bottomBoundary: true,
+              orderedWindowStitching: true,
+              scrollPasses: 1,
+              windowCount: 1,
+              messageCount: 1,
+              providerIdCount: 1,
+              byteCount: 20
+            }
+          },
+          artifactInventory: { status: 'partial', reason: 'conversation_generation_active', items: [] }
+        };
+      }
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: true,
+          stopCount: 1,
+          sendEnabled: false,
+          sendFound: false,
+          txt: '',
+          count: 0,
+          usedFallback: true,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: '',
+          currentUrl: 'https://chatgpt.com/c/reconcile-timeout'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/reconcile-timeout'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.query({
+        prompt: 'agentify',
+        timeoutMs: 1_000,
+        durableObservation: true,
+        reconcileGraceMs: 1_000,
+        onProgress: (patch) => progress.push(patch)
+      }),
+      (error) => {
+        assert.equal(error?.message, 'response_reconcile_timeout');
+        assert.equal(error?.data?.responseDebug?.count, 0);
+        assert.equal(error?.data?.responseDebug?.hardDeadlineMs, 2_000);
+        assert.equal(error?.data?.recovery?.status, 'partial');
+        return true;
+      }
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(progress.some((patch) => patch.phase === 'reconciling_response'), true);
+});
+
+test('chatgpt-controller: final structured reconciliation recovers a selector-missed assistant turn', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 250;
+    return fakeNow;
+  };
+  const recoveredText = 'Recovered exact assistant response';
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'prompt-1', role: 'user', text: 'agentify' },
+    { ordinal: 1, providerMessageId: 'answer-1', role: 'assistant', text: recoveredText }
+  ];
+  const byteCount = rawTurns.reduce((total, turn) =>
+    total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0);
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('publishedCaptureWindow')) {
+        return {
+          captureWindow: {
+            status: 'complete',
+            rawTurns,
+            evidence: {
+              topBoundary: true,
+              bottomBoundary: true,
+              orderedWindowStitching: true,
+              scrollPasses: 2,
+              windowCount: 2,
+              messageCount: 2,
+              providerIdCount: 2,
+              byteCount
+            }
+          },
+          artifactInventory: { status: 'complete', items: [] }
+        };
+      }
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: true,
+          stopCount: 1,
+          sendEnabled: false,
+          sendFound: false,
+          txt: '',
+          count: 0,
+          usedFallback: true,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: '',
+          currentUrl: 'https://chatgpt.com/c/reconcile-recovered'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/reconcile-recovered'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 1_000,
+      durableObservation: true,
+      reconcileGraceMs: 1_000
+    });
+    assert.equal(result.text, recoveredText);
+    assert.equal(result.meta.recoveredBy, 'structured_conversation_capture');
+    assert.equal(result.meta.count, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: query emits conversationUrl progress when a new thread URL appears', async () => {
   const progress = [];
   let waitForAssistantChecks = 0;
@@ -1426,6 +1615,99 @@ test('chatgpt-controller: query selects Pro through the compact power picker', a
   } finally {
     Date.now = realNow;
   }
+});
+
+test('chatgpt-controller: already-selected supported Pro slider confirms without a trigger candidate', async () => {
+  const realNow = Date.now;
+  let fakeNow = 5_750_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+  const progress = [];
+  const pointerDown = [];
+  let modeChecks = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        modeChecks += 1;
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_power_active',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          label: 'Pro',
+          evidenceKind: 'supported_power_slider',
+          menuOpen: true,
+          powerMin: 0,
+          powerMax: 4,
+          powerIndex: 4,
+          targetPowerIndex: 4
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Confirmed without a second slider click',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'Confirmed without a second slider click\nPro\nChatGPT can make mistakes. Check important info.'
+        };
+      }
+      if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/already-pro'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown(x, y) { pointerDown.push({ x, y }); },
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 20_000,
+      modeIntent: 'extended-pro',
+      onProgress: (patch) => progress.push(patch)
+    });
+    assert.equal(result.text, 'Confirmed without a second slider click');
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(modeChecks, 1);
+  assert.equal(pointerDown.some((event) => event.y === 74), false);
+  assert.equal(pointerDown.some((event) => event.x > 300), true);
+  const provenance = progress.find((patch) => patch.phase === 'mode_intent_confirmed')?.modeIntentProvenance;
+  assert.equal(provenance?.evidenceKind, 'supported_power_slider');
+  assert.equal(provenance?.powerMin, 0);
+  assert.equal(provenance?.powerMax, 4);
+  assert.equal(provenance?.powerIndex, 4);
+  assert.equal(provenance?.targetPowerIndex, 4);
 });
 
 test('chatgpt-controller: query applies the requested model intent before sending', async () => {
@@ -3818,8 +4100,11 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
   const result = await controller.readConversationText({ maxChars: 500 });
   assert.deepEqual(result, {
     text: 'User\nFirst turn\n\nAssistant\nFirst reply\n\nUser\nFinal turn',
+    totalChars: 55,
     complete: true,
     truncated: false,
+    previewTruncated: false,
+    captureReason: null,
     reason: null,
     messageCount: 3,
     scrollPasses: 4,
@@ -3828,7 +4113,7 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
   assert.equal(evaluations.length, 1);
   assert.match(evaluations[0], /data-message-author-role/);
   assert.match(evaluations[0], /scrollTop/);
-  assert.match(evaluations[0], /const cap = 6096/);
+  assert.match(evaluations[0], /const cap = 16777216/);
 });
 
 test('chatgpt-controller: conversation inventory collects files from earlier virtualized windows', async () => {
@@ -4042,8 +4327,11 @@ test('chatgpt-controller: legacy transcript projection reads DOM windows while l
 
       assert.deepEqual(result, {
         text: 'User\nVisible prompt\n\nAssistant\nVisible reply',
+        totalChars: 44,
         complete: true,
         truncated: false,
+        previewTruncated: false,
+        captureReason: null,
         reason: null,
         messageCount: 2,
         scrollPasses: 0,
@@ -6879,7 +7167,7 @@ test('chatgpt-controller: withheld earlier turns report a proven top and the leg
   assert.equal(projected.complete, false);
 });
 
-test('chatgpt-controller: readConversationText preserves max_chars over the leading-role safety net', async () => {
+test('chatgpt-controller: readConversationText preserves the partial capture reason under a preview limit', async () => {
   const page = virtualizedConversationPage([
     { role: 'assistant', text: 'Reply without its prompt' }
   ]);
@@ -6890,7 +7178,9 @@ test('chatgpt-controller: readConversationText preserves max_chars over the lead
   assert.equal(result.text, 'Assistant\n');
   assert.equal(result.complete, false);
   assert.equal(result.truncated, true);
-  assert.equal(result.reason, 'max_chars');
+  assert.equal(result.previewTruncated, true);
+  assert.equal(result.captureReason, 'leading_turn_missing');
+  assert.equal(result.reason, 'leading_turn_missing');
   assert.equal(result.messageCount, 1);
 });
 

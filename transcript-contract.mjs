@@ -485,9 +485,29 @@ export function renderTranscript(value, { startOrdinal = 0, endOrdinal = null, m
   return text.slice(0, cap);
 }
 
+function legacyTurnsFromCapture(capture) {
+  return capture.rawTurns.map((raw, ordinal) => {
+    const rawRole = raw.role.trim().toLowerCase();
+    return {
+      ordinal,
+      role: TRANSCRIPT_TURN_ROLES.includes(rawRole) ? rawRole : 'unknown',
+      text: normalizeText(raw.text)
+    };
+  });
+}
+
+function renderParsedLegacyConversationText(capture) {
+  return renderTranscript({ turns: legacyTurnsFromCapture(capture) });
+}
+
+export function renderLegacyConversationWindowText(value) {
+  return renderParsedLegacyConversationText(parseConversationCaptureWindow(value));
+}
+
 function projectParsedLegacyConversationText(capture, {
   maxChars = 200_000,
-  legacyDiagnosticReason = null
+  legacyDiagnosticReason = null,
+  includeTranscriptText = false
 } = {}) {
   const cap = assertInteger(Math.floor(Number(maxChars)), 'maxChars', { min: 1, max: 1_000_000 });
   if (legacyDiagnosticReason !== null) {
@@ -500,27 +520,27 @@ function projectParsedLegacyConversationText(capture, {
       throw contractError('invalid_legacy_diagnostic_reason', 'legacyDiagnosticReason');
     }
   }
-  const turns = capture.rawTurns.map((raw, ordinal) => {
-    const rawRole = raw.role.trim().toLowerCase();
-    return { ordinal, role: TRANSCRIPT_TURN_ROLES.includes(rawRole) ? rawRole : 'unknown', text: normalizeText(raw.text) };
-  });
+  const turns = legacyTurnsFromCapture(capture);
   const fullText = renderTranscript({ turns });
   const clipped = fullText.length > cap;
-  let reason = capture.status === 'partial'
+  let captureReason = capture.status === 'partial'
     ? legacyDiagnosticReason || LEGACY_REASON_BY_CAPTURE_REASON[capture.reason] || 'conversation_capture_invalid'
     : null;
-  if (clipped) reason = 'max_chars';
   // Captures recorded before conversation_leading_turn_missing existed folded an
   // assistant-first head into conversation_top_not_reached. Keep projecting those
   // to the same legacy reason so stored transcripts read the same as fresh ones.
-  else if (capture.status === 'partial' && capture.reason === 'conversation_top_not_reached' && turns[0]?.role === 'assistant') {
-    reason = 'leading_turn_missing';
+  if (capture.status === 'partial' && capture.reason === 'conversation_top_not_reached' && turns[0]?.role === 'assistant') {
+    captureReason = 'leading_turn_missing';
   }
   return {
     text: fullText.slice(0, cap),
-    complete: capture.status === 'complete' && !clipped,
+    ...(includeTranscriptText ? { transcriptText: fullText } : {}),
+    totalChars: fullText.length,
+    complete: capture.status === 'complete',
     truncated: capture.status !== 'complete' || clipped,
-    reason,
+    previewTruncated: clipped,
+    captureReason,
+    reason: captureReason || (clipped ? 'max_chars' : null),
     messageCount: turns.length,
     scrollPasses: capture.evidence.scrollPasses
   };

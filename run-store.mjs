@@ -47,6 +47,34 @@ function normalizeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? safeClone(value) : null;
 }
 
+function normalizeResponseDebug(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.version) !== 1) return null;
+  const numberOrNull = (input) => {
+    const number = Number(input);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  };
+  const booleanOrNull = (input) => typeof input === 'boolean' ? input : null;
+  return {
+    version: 1,
+    softDeadlineMs: numberOrNull(value.softDeadlineMs),
+    reconcileGraceMs: numberOrNull(value.reconcileGraceMs),
+    hardDeadlineMs: numberOrNull(value.hardDeadlineMs),
+    elapsedMs: numberOrNull(value.elapsedMs),
+    count: numberOrNull(value.count),
+    usedFallback: booleanOrNull(value.usedFallback),
+    stop: booleanOrNull(value.stop),
+    rawStop: booleanOrNull(value.rawStop),
+    stopCount: numberOrNull(value.stopCount),
+    baselineStopCount: numberOrNull(value.baselineStopCount),
+    sendFound: booleanOrNull(value.sendFound),
+    sendEnabled: booleanOrNull(value.sendEnabled),
+    thinking: booleanOrNull(value.thinking),
+    hasContinue: booleanOrNull(value.hasContinue),
+    hasError: booleanOrNull(value.hasError),
+    pageTextChanged: booleanOrNull(value.pageTextChanged)
+  };
+}
+
 function normalizeRun(input = {}) {
   const now = Date.now();
   const startedAt = normalizeTime(input.startedAt) || now;
@@ -94,6 +122,7 @@ function normalizeRun(input = {}) {
     packedContextSummary: normalizeObject(input.packedContextSummary),
     packedContextBudget: normalizeObject(input.packedContextBudget),
     providerSlot: normalizeObject(input.providerSlot),
+    responseDebug: normalizeResponseDebug(input.responseDebug),
     modeIntentProvenance: normalizeObject(input.modeIntentProvenance),
     modelIntentProvenance: normalizeObject(input.modelIntentProvenance),
     outputManifest: normalizeObject(input.outputManifest),

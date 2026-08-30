@@ -2365,6 +2365,100 @@ test('http-api: runs/wait follows a reconciling background query through durable
   assert.ok(waited.data.run.revision > reconciling.revision);
 });
 
+test('http-api: reconciliation timeout persists diagnostics and releases its provider slot', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-reconcile-timeout-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  let queryCalls = 0;
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async ({ durableObservation }) => {
+      assert.equal(durableObservation, true);
+      queryCalls += 1;
+      if (queryCalls === 1) {
+        const error = new Error('response_reconcile_timeout');
+        error.data = {
+          conversationUrl: 'https://chatgpt.com/c/reconcile-timeout',
+          responseDebug: {
+            version: 1,
+            softDeadlineMs: 1_000,
+            reconcileGraceMs: 500,
+            hardDeadlineMs: 1_500,
+            elapsedMs: 1_500,
+            count: 0,
+            usedFallback: true,
+            stop: true,
+            rawStop: true,
+            stopCount: 1,
+            baselineStopCount: 0,
+            sendFound: false,
+            sendEnabled: false,
+            thinking: false,
+            hasContinue: false,
+            hasError: false,
+            pageTextChanged: false,
+            textPreview: 'PRIVATE RESPONSE TEXT'
+          }
+        };
+        throw error;
+      }
+      return { text: 'slot reused', codeBlocks: [], meta: {} };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/slot-reused'
+  };
+  const tabs = {
+    listTabs: () => [
+      { id: 't0', key: 'first', vendorId: 'chatgpt', vendorName: 'ChatGPT' },
+      { id: 't1', key: 'second', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+    ],
+    ensureTab: async ({ key }) => key === 'second' ? 't1' : 't0',
+    createTab: async ({ key }) => key === 'second' ? 't1' : 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 1, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const first = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'first', prompt: 'stall', fireAndForget: true }
+  });
+  assert.equal(first.res.status, 202);
+  const terminal = await waitFor(async () => {
+    const snapshot = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: first.data.runId } });
+    return snapshot.data.run?.status === 'error' ? snapshot.data.run : null;
+  });
+  assert.equal(terminal.label, 'Response reconciliation timed out');
+  assert.equal(terminal.providerSlot.status, 'released');
+  assert.equal(terminal.responseDebug.count, 0);
+  assert.equal('textPreview' in terminal.responseDebug, false);
+  assert.equal(JSON.stringify(terminal).includes('PRIVATE RESPONSE TEXT'), false);
+
+  const second = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'second', prompt: 'reuse slot' }
+  });
+  assert.equal(second.res.status, 200);
+  assert.equal(second.data.result.text, 'slot reused');
+  assert.equal(queryCalls, 2);
+});
+
 test('http-api: query forwards explicit model intent without persisting it as key meta', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-model-project-'));
   let controllerCalled = false;
@@ -4931,8 +5025,11 @@ test('http-api: operations run through controller.runExclusive when available', 
 });
 
 test('http-api: read-conversation exposes complete transcript capture through the exclusive controller', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-read-conversation-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
   let inExclusive = false;
   let received = null;
+  const transcriptText = `User\n${'A'.repeat(30_000)}\n\nAssistant\n${'B'.repeat(30_000)}`;
   const controller = {
     runExclusive: async (fn) => {
       inExclusive = true;
@@ -4946,10 +5043,14 @@ test('http-api: read-conversation exposes complete transcript capture through th
       assert.equal(inExclusive, true);
       received = args;
       return {
-        text: 'User\nOne\n\nAssistant\nTwo',
+        text: transcriptText.slice(0, 500),
+        transcriptText,
+        totalChars: transcriptText.length,
         complete: true,
-        truncated: false,
-        reason: null,
+        truncated: true,
+        previewTruncated: true,
+        captureReason: null,
+        reason: 'max_chars',
         messageCount: 2,
         scrollPasses: 3,
         artifactInventory: {
@@ -4982,7 +5083,7 @@ test('http-api: read-conversation exposes complete transcript capture through th
     tabs,
     defaultTabId: 't0',
     serverId: 'sid-test',
-    stateDir: '/tmp',
+    stateDir,
     getStatus: async () => ({ ok: true })
   });
   t.after(() => server.close());
@@ -4996,13 +5097,74 @@ test('http-api: read-conversation exposes complete transcript capture through th
   });
 
   assert.equal(res.status, 200);
-  assert.deepEqual(received, { maxChars: 500 });
+  assert.deepEqual(received, { maxChars: 500, includeTranscriptText: true });
   assert.equal(data.ok, true);
   assert.equal(data.tabId, 't0');
   assert.equal(data.complete, true);
-  assert.equal(data.text, 'User\nOne\n\nAssistant\nTwo');
+  assert.equal(data.text, transcriptText.slice(0, 500));
+  assert.equal(data.preview, transcriptText.slice(0, 500));
+  assert.equal(data.previewTruncated, true);
+  assert.equal(data.totalChars, transcriptText.length);
+  assert.equal(data.totalBytes, Buffer.byteLength(transcriptText));
+  assert.match(data.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(path.isAbsolute(data.transcriptPath), true);
+  assert.equal(await fs.readFile(data.transcriptPath, 'utf8'), transcriptText);
+  assert.equal((await fs.stat(data.transcriptPath)).mode & 0o777, 0o600);
+  assert.equal('transcriptText' in data, false);
   assert.equal(data.artifactInventory.status, 'complete');
   assert.deepEqual(data.artifactInventory.items.map((item) => item.name), ['report.md']);
+});
+
+test('http-api: failed transcript registration removes the unpublished file', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-read-conversation-failure-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(stateDir, 'artifacts', 'index.jsonl'), { recursive: true });
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    readConversationText: async () => ({
+      text: 'User\nOne',
+      transcriptText: 'User\nOne',
+      totalChars: 8,
+      complete: true,
+      truncated: false,
+      previewTruncated: false,
+      captureReason: null,
+      reason: null,
+      messageCount: 1,
+      scrollPasses: 1,
+      artifactInventory: { status: 'complete', items: [] }
+    })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { maxChars: 500 }
+  });
+  assert.equal(res.status, 500);
+  const artifactDir = path.join(stateDir, 'artifacts', 'default-t0');
+  const names = await fs.readdir(artifactDir);
+  assert.deepEqual(names.filter((name) => name.startsWith('conversation-transcript-')), []);
 });
 
 test('http-api: read-conversation enters a supplied chatUrl without sending anything', async (t) => {

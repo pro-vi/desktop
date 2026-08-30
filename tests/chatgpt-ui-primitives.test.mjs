@@ -13,6 +13,7 @@ import {
   modeTriggerConfirmsActive,
   modeIntentForLabel,
   modeIntentLabelLooksUsable,
+  modePowerIntentForSupportedScale,
   modePowerScaleLooksSupported,
   modelIntentForLabel,
   modelIntentLabelLooksUsable,
@@ -413,6 +414,16 @@ test('chatgpt-ui-primitives: accepts only the observed five-step power scale', (
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 5, current: 4 }), false);
   assert.equal(modePowerScaleLooksSupported({ min: 1, max: 5, current: 1 }), false);
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 5 }), false);
+});
+
+test('chatgpt-ui-primitives: maps only supported positions on the exact power scale', () => {
+  const intents = ['instant', 'thinking', null, null, 'extended-pro'];
+  assert.equal(modePowerIntentForSupportedScale({ min: 0, max: 4, current: 0, intents }), 'instant');
+  assert.equal(modePowerIntentForSupportedScale({ min: 0, max: 4, current: 1, intents }), 'thinking');
+  assert.equal(modePowerIntentForSupportedScale({ min: 0, max: 4, current: 2, intents }), null);
+  assert.equal(modePowerIntentForSupportedScale({ min: 0, max: 4, current: 3, intents }), null);
+  assert.equal(modePowerIntentForSupportedScale({ min: 0, max: 4, current: 4, intents }), 'extended-pro');
+  assert.equal(modePowerIntentForSupportedScale({ min: 0, max: 5, current: 4, intents }), null);
 });
 
 test('chatgpt-ui-primitives: classifies high-confidence mode controls', () => {

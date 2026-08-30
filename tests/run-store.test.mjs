@@ -83,6 +83,42 @@ test('run-store: load hydrates index from per-run files', async () => {
   assert.equal(got?.status, 'error');
 });
 
+test('run-store: response diagnostics persist as an exact content-free summary', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-response-debug-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({
+    id: 'run-response-debug',
+    kind: 'query',
+    status: 'running',
+    responseDebug: {
+      version: 1,
+      softDeadlineMs: 1_000,
+      reconcileGraceMs: 500,
+      hardDeadlineMs: 1_500,
+      elapsedMs: 1_200,
+      count: 0,
+      stop: true,
+      sendFound: false,
+      pageTextChanged: false,
+      textPreview: 'PRIVATE RESPONSE TEXT',
+      currentUrl: 'https://chatgpt.com/c/private'
+    }
+  });
+  await store.finalize('run-response-debug', { status: 'error', detail: 'hard deadline' });
+
+  const reloaded = createRunStore(stateDir);
+  await reloaded.load();
+  const summary = reloaded.getSummary('run-response-debug');
+  assert.equal(summary.responseDebug.version, 1);
+  assert.equal(summary.responseDebug.hardDeadlineMs, 1_500);
+  assert.equal(summary.responseDebug.stop, true);
+  assert.equal('textPreview' in summary.responseDebug, false);
+  assert.equal('currentUrl' in summary.responseDebug, false);
+  assert.equal(JSON.stringify(summary).includes('PRIVATE RESPONSE TEXT'), false);
+});
+
 test('run-store: finalize is exact-once for terminal state', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-finalize-'));
   const store = createRunStore(stateDir);

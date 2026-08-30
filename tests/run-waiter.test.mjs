@@ -37,6 +37,36 @@ test('run waiter refuses a legacy output success without completion proof', asyn
   }), /success_without_completion_receipt/);
 });
 
+test('run waiter timeout carries the latest non-mutating run snapshot', async () => {
+  let requests = 0;
+  await assert.rejects(() => waitForRun({
+    conn: {},
+    runId: 'still-running',
+    timeoutMs: 5,
+    request: async () => {
+      requests += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return {
+        ok: true,
+        run: {
+          id: 'still-running',
+          kind: 'query',
+          status: 'running',
+          phase: 'reconciling_response',
+          revision: 3,
+          responseDebug: { version: 1, count: 0 }
+        }
+      };
+    }
+  }), (error) => {
+    assert.equal(error?.message, 'run_wait_timeout');
+    assert.equal(error?.data?.run?.phase, 'reconciling_response');
+    assert.equal(error?.data?.run?.responseDebug?.count, 0);
+    return true;
+  });
+  assert.equal(requests, 1);
+});
+
 test('run waiter exit codes distinguish every terminal outcome', () => {
   assert.equal(exitCodeForRunStatus('success'), 0);
   assert.equal(exitCodeForRunStatus('error'), 2);

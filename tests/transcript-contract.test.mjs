@@ -15,6 +15,7 @@ import {
   parseTranscriptTurn,
   projectLegacyConversationText,
   projectLegacyConversationWindowText,
+  renderLegacyConversationWindowText,
   renderTranscript
 } from '../transcript-contract.mjs';
 
@@ -162,12 +163,54 @@ test('transcript contract: text and legacy output are projections of structured 
   assert.equal(renderTranscript(normalized), 'User\nRepeat this.\n\nAssistant\nSame text\n\nAssistant\nSame text');
   assert.deepEqual(projectLegacyConversationText(capture, { maxChars: 12 }), {
     text: 'User\nRepeat ',
-    complete: false,
+    totalChars: 59,
+    complete: true,
     truncated: true,
+    previewTruncated: true,
+    captureReason: null,
     reason: 'max_chars',
     messageCount: 3,
     scrollPasses: 4
   });
+});
+
+test('transcript contract: preview limits do not replace capture completeness or full rendering', () => {
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'long-user', role: 'user', text: 'A'.repeat(80) },
+    { ordinal: 1, providerMessageId: 'long-assistant', role: 'assistant', text: 'B'.repeat(80) }
+  ];
+  const { conversationUrl: _conversationUrl, capturedAt: _capturedAt, ...capture } = completeCapture(rawTurns);
+  const projected = projectLegacyConversationWindowText(capture, { maxChars: 40 });
+  const rendered = renderLegacyConversationWindowText(capture);
+
+  assert.equal(rendered, `User\n${'A'.repeat(80)}\n\nAssistant\n${'B'.repeat(80)}`);
+  assert.equal(projected.text.length, 40);
+  assert.equal(projected.totalChars, rendered.length);
+  assert.equal(projected.complete, true);
+  assert.equal(projected.previewTruncated, true);
+  assert.equal(projected.captureReason, null);
+  assert.equal(projected.reason, 'max_chars');
+});
+
+test('transcript contract: preview limits preserve an underlying partial capture reason', () => {
+  const rawTurns = [{ ordinal: 0, providerMessageId: 'partial-user', role: 'user', text: 'C'.repeat(80) }];
+  const complete = completeCapture(rawTurns);
+  const { conversationUrl: _conversationUrl, capturedAt: _capturedAt, ...captureWindow } = complete;
+  const capture = {
+    ...captureWindow,
+    status: 'partial',
+    reason: 'conversation_top_not_reached',
+    evidence: {
+      ...complete.evidence,
+      topBoundary: false
+    }
+  };
+  const projected = projectLegacyConversationWindowText(capture, { maxChars: 20 });
+
+  assert.equal(projected.complete, false);
+  assert.equal(projected.previewTruncated, true);
+  assert.equal(projected.captureReason, 'conversation_top_not_reached');
+  assert.equal(projected.reason, 'conversation_top_not_reached');
 });
 
 test('transcript contract: an isolated structured turn uses the exact normalization authority', () => {

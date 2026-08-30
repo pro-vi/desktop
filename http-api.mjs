@@ -1400,6 +1400,16 @@ export function startHttpApi({
         conversationUrl: detail?.conversationUrl || null
       };
     }
+    if (message === 'response_reconcile_timeout') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Response reconciliation timed out',
+        detail: 'No complete new assistant turn was available before the service hard deadline.',
+        conversationUrl: detail?.conversationUrl || null,
+        responseDebug: detail?.responseDebug || null
+      };
+    }
     if (message === 'attachment_upload_failed') {
       return {
         ...base,
@@ -1731,6 +1741,9 @@ export function startHttpApi({
         ...(item.providerSlot
           ? { providerSlot: JSON.parse(JSON.stringify(item.providerSlot)) }
           : {}),
+        ...(item.responseDebug
+          ? { responseDebug: JSON.parse(JSON.stringify(item.responseDebug)) }
+          : {}),
         ...(item.conversationUrl
           ? { conversationUrl: item.conversationUrl }
           : {}),
@@ -1789,6 +1802,7 @@ export function startHttpApi({
       degradedFrom: outcome.degradedFrom || null,
       outputManifest: outcome.outputManifest || null,
       completionReceipt: outcome.completionReceipt || null,
+      responseDebug: outcome.responseDebug || null,
       ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
     });
   };
@@ -4502,9 +4516,61 @@ export function startHttpApi({
           }
           const capture = await runExclusive(controller, async () => {
             if (entryTarget) await controller.prepareChatEntry({ chatUrl: entryTarget.chatUrl });
-            return await controller.readConversationText({ maxChars });
+            return await controller.readConversationText({ maxChars, includeTranscriptText: true });
           });
-          return sendJson(res, 200, { ok: true, tabId, ...capture });
+          const { transcriptText: rawTranscriptText, ...projection } = capture || {};
+          const transcriptText = String(rawTranscriptText || '');
+          if (!transcriptText) {
+            return sendJson(res, 200, {
+              ok: true,
+              tabId,
+              ...projection,
+              preview: String(projection?.text || '')
+            });
+          }
+          const tabMeta = getTabMeta(tabs, tabId);
+          const outDir = await ensureArtifactsDir({
+            stateDir,
+            tabId,
+            tabKey: tabMeta?.key || null,
+            vendorId: tabMeta?.vendorId || null
+          });
+          const transcriptPath = path.join(outDir, `conversation-transcript-${crypto.randomUUID()}.md`);
+          try {
+            await atomicWriteFile(transcriptPath, transcriptText, { mode: 0o600 });
+            const ready = await assertArtifactFileReady(transcriptPath);
+            const realOutDir = await fs.realpath(outDir);
+            assertWithin({ filePath: ready.realFilePath || ready.filePath, allowedRoots: [realOutDir] });
+            const savedText = await fs.readFile(ready.realFilePath || ready.filePath, 'utf8');
+            if (savedText !== transcriptText) throw new Error('conversation_transcript_verify_failed');
+            const sha256 = crypto.createHash('sha256').update(savedText).digest('hex');
+            const artifact = await registerArtifact({
+              stateDir,
+              tabId,
+              tabKey: tabMeta?.key || null,
+              vendorId: tabMeta?.vendorId || null,
+              kind: 'transcript',
+              filePath: ready.realFilePath || ready.filePath,
+              originalName: path.basename(transcriptPath),
+              mime: 'text/markdown',
+              source: 'agentify_read_conversation',
+              meta: { role: 'conversation_transcript', sha256 }
+            });
+            return sendJson(res, 200, {
+              ok: true,
+              tabId,
+              ...projection,
+              preview: String(projection?.text || ''),
+              transcriptPath: artifact.path,
+              transcriptArtifactId: artifact.id,
+              totalChars: transcriptText.length,
+              totalBytes: Buffer.byteLength(transcriptText),
+              sha256
+            });
+          } catch (error) {
+            await fs.rm(transcriptPath, { force: true }).catch(() => {});
+            throw error;
+          }
         } finally {
           releaseOperationScopes(heldScopes, op.id);
         }

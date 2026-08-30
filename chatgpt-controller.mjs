@@ -236,6 +236,11 @@ function buildModeIntentProvenance({ activation, modeIntent, stage = 'before_sen
     label: clipText(activation?.label || '', 160) || null,
     clicked: Array.isArray(activation?.attempts) && activation.attempts.length > 0,
     attempts: Array.isArray(activation?.attempts) ? activation.attempts.map((item) => ({ ...item })) : [],
+    evidenceKind: activation?.evidenceKind ? String(activation.evidenceKind) : null,
+    powerMin: Number.isInteger(activation?.powerMin) ? activation.powerMin : null,
+    powerMax: Number.isInteger(activation?.powerMax) ? activation.powerMax : null,
+    powerIndex: Number.isInteger(activation?.powerIndex) ? activation.powerIndex : null,
+    targetPowerIndex: Number.isInteger(activation?.targetPowerIndex) ? activation.targetPowerIndex : null,
     stage,
     confirmedAt: new Date().toISOString()
   };
@@ -2852,9 +2857,9 @@ export class ChatGPTController {
     return { captureWindow: captured.captureWindow, artifactInventory };
   }
 
-  async readConversationText({ maxChars = 200_000 } = {}) {
+  async readConversationText({ maxChars = 200_000, includeTranscriptText = false } = {}) {
     const projectionCap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
-    const maxCaptureBytes = Math.min(16 * 1024 * 1024, (projectionCap * 4) + 4096);
+    const maxCaptureBytes = 16 * 1024 * 1024;
     let captureWindow;
     let artifactInventory = emptyPartialConversationArtifactInventory('artifact_identity_unavailable');
     let legacyDiagnosticReason = null;
@@ -2896,11 +2901,13 @@ export class ChatGPTController {
       };
       artifactInventory = emptyPartialConversationArtifactInventory('conversation_capture_timeout');
     }
-    return {
-      ...projectLegacyConversationWindowText(captureWindow, {
+    const projection = projectLegacyConversationWindowText(captureWindow, {
         maxChars: projectionCap,
-        legacyDiagnosticReason
-      }),
+        legacyDiagnosticReason,
+        includeTranscriptText
+      });
+    return {
+      ...projection,
       artifactInventory
     };
   }
@@ -4347,17 +4354,26 @@ export class ChatGPTController {
           targetPowerIndex >= 0 &&
           targetPowerIndex < powerLabels.length
         ) {
-          const currentPowerTrigger = triggerCandidates.find((item) => item.intent === powerIntents[powerIndex]) || null;
-          if (powerIndex === targetPowerIndex && currentPowerTrigger?.intent === targetIntent) {
+          const currentPowerIntent = modePickerPrimitives.modePowerIntentForSupportedScale({
+            min: powerMin,
+            max: powerMax,
+            current: powerIndex,
+            intents: powerIntents
+          });
+          if (powerIndex === targetPowerIndex && currentPowerIntent === targetIntent) {
             return {
               active: true,
               action: 'none',
               reason: 'mode_power_active',
               targetIntent,
-              activeIntent: powerIntents[powerIndex],
-              label: currentPowerTrigger.label || powerLabels[powerIndex],
+              activeIntent: currentPowerIntent,
+              label: powerLabels[powerIndex],
+              evidenceKind: 'supported_power_slider',
               menuOpen: true,
-              powerIndex
+              powerMin,
+              powerMax,
+              powerIndex,
+              targetPowerIndex
             };
           }
 
@@ -5848,7 +5864,8 @@ export class ChatGPTController {
     minimumStableMs = 0,
     extraThinkingPattern = '',
     imageGeneration = false,
-    durableObservation = false
+    durableObservation = false,
+    reconcileGraceMs = null
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
@@ -5861,6 +5878,15 @@ export class ChatGPTController {
       Number.isFinite(Number(minimumTimeoutMs)) && Number(minimumTimeoutMs) > 0 ? Math.floor(Number(minimumTimeoutMs)) : 0,
       1
     );
+    const effectiveReconcileGraceMs = durableObservation
+      ? Math.max(
+          1,
+          Number.isFinite(Number(reconcileGraceMs)) && Number(reconcileGraceMs) > 0
+            ? Math.floor(Number(reconcileGraceMs))
+            : Math.max(5 * 60_000, Math.min(effectiveTimeoutMs, 10 * 60_000))
+        )
+      : 0;
+    const hardDeadlineMs = effectiveTimeoutMs + effectiveReconcileGraceMs;
     const start = Date.now();
     let last = '';
     let lastChange = Date.now();
@@ -5870,17 +5896,24 @@ export class ChatGPTController {
     let generationObserved = false;
     let emittedConversationUrl = null;
     let lastWaitDebugAt = 0;
+    let lastResponseDebug = null;
     let reconciling = false;
     const baselineStopCount = Math.max(0, Number(preSendStopCount) || 0);
 
-    while (durableObservation || Date.now() - start < effectiveTimeoutMs) {
+    while (Date.now() - start < (durableObservation ? hardDeadlineMs : effectiveTimeoutMs)) {
       this.#throwIfStopRequested();
       if (durableObservation && !reconciling && Date.now() - start >= effectiveTimeoutMs) {
         reconciling = true;
         await this.#emitProgress({
           phase: 'reconciling_response',
           blocked: false,
-          responseDebug: { softDeadlineMs: effectiveTimeoutMs, elapsedMs: Date.now() - start }
+          responseDebug: {
+            version: 1,
+            softDeadlineMs: effectiveTimeoutMs,
+            reconcileGraceMs: effectiveReconcileGraceMs,
+            hardDeadlineMs,
+            elapsedMs: Date.now() - start
+          }
         });
       }
       const snap = await this.#eval(`(() => {
@@ -5966,27 +5999,30 @@ export class ChatGPTController {
         emittedConversationUrl = conversationUrl;
         await this.#emitProgress({ conversationUrl });
       }
+      lastResponseDebug = {
+        version: 1,
+        softDeadlineMs: effectiveTimeoutMs,
+        reconcileGraceMs: effectiveReconcileGraceMs || null,
+        hardDeadlineMs: durableObservation ? hardDeadlineMs : effectiveTimeoutMs,
+        elapsedMs: Date.now() - start,
+        count: snap?.count || 0,
+        usedFallback: !!snap?.usedFallback,
+        stop: activeStop,
+        rawStop: !!snap?.stop,
+        stopCount,
+        baselineStopCount,
+        sendFound: !!snap?.sendFound,
+        sendEnabled: !!snap?.sendEnabled,
+        thinking,
+        hasContinue: !!snap?.hasContinue,
+        hasError: !!snap?.hasError,
+        currentUrl: snap?.currentUrl || null,
+        textPreview: clipText(txt, 180) || null,
+        pageTextChanged: pageText !== preSendPageText
+      };
       if (Date.now() - lastWaitDebugAt >= 10_000) {
         lastWaitDebugAt = Date.now();
-        await this.#emitProgress({
-          responseDebug: {
-            elapsedMs: Date.now() - start,
-            count: snap?.count || 0,
-            usedFallback: !!snap?.usedFallback,
-            stop: activeStop,
-            rawStop: !!snap?.stop,
-            stopCount,
-            baselineStopCount,
-            sendFound: !!snap?.sendFound,
-            sendEnabled: !!snap?.sendEnabled,
-            thinking,
-            hasContinue: !!snap?.hasContinue,
-            hasError: !!snap?.hasError,
-            currentUrl: snap?.currentUrl || null,
-            textPreview: clipText(txt, 180) || null,
-            pageTextChanged: pageText !== preSendPageText
-          }
-        });
+        await this.#emitProgress({ responseDebug: { ...lastResponseDebug } });
       }
       const assistantAdvanced = (snap?.count || 0) > preSendCount || ((snap?.count || 0) > 0 && txt !== preSendText);
       const pageChanged = pageText !== preSendPageText;
@@ -6074,8 +6110,61 @@ export class ChatGPTController {
     }
 
     const conversationUrl = await this.getUrl().catch(() => null);
+    if (durableObservation) {
+      let recovery = { status: 'unavailable', reason: 'capture_not_attempted' };
+      try {
+        const target = parseChatGptEntryTarget(conversationUrl);
+        if (target?.kind === 'canonical-conversation') {
+          const capture = await this.captureConversation({ maxCaptureBytes: 16 * 1024 * 1024 });
+          const assistants = capture?.status === 'complete'
+            ? capture.rawTurns.filter((turn) => String(turn?.role || '').trim().toLowerCase() === 'assistant')
+            : [];
+          const finalAssistant = assistants[assistants.length - 1] || null;
+          const advanced = assistants.length > preSendCount || (
+            assistants.length > 0 && String(finalAssistant?.text || '') !== String(preSendText || '')
+          );
+          recovery = {
+            status: capture?.status || 'partial',
+            reason: capture?.reason || null,
+            assistantCount: assistants.length,
+            advanced
+          };
+          if (capture?.status === 'complete' && advanced && String(finalAssistant?.text || '').trim()) {
+            const recoveredText = String(finalAssistant.text).trim();
+            const actualMode = inferActualModeIntent({ text: recoveredText, pageText: recoveredText });
+            return {
+              text: recoveredText,
+              codeBlocks: [],
+              meta: {
+                count: assistants.length,
+                hasError: false,
+                recoveredBy: 'structured_conversation_capture',
+                modeUsed: actualMode?.intent || null,
+                actualModeIntent: actualMode?.intent || null,
+                actualModeLabel: actualMode?.label || null,
+                actualModeSource: actualMode?.source || null
+              }
+            };
+          }
+        } else {
+          recovery = { status: 'unavailable', reason: 'canonical_conversation_unavailable' };
+        }
+      } catch (error) {
+        recovery = {
+          status: 'error',
+          reason: clipText(error?.code || error?.message || 'capture_failed', 160)
+        };
+      }
+      const err = new Error('response_reconcile_timeout');
+      err.data = {
+        conversationUrl,
+        responseDebug: lastResponseDebug,
+        recovery
+      };
+      throw err;
+    }
     const err = new Error('timeout_waiting_for_response');
-    err.data = { last, conversationUrl };
+    err.data = { last, conversationUrl, responseDebug: lastResponseDebug };
     throw err;
   }
 
@@ -6087,7 +6176,8 @@ export class ChatGPTController {
     imageGeneration = false,
     modeIntent = null,
     modelIntent = null,
-    durableObservation = false
+    durableObservation = false,
+    reconcileGraceMs = null
   } = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
@@ -6134,7 +6224,8 @@ export class ChatGPTController {
         preSendPageText: prePrompt?.pageText || '',
         preSendStopCount: sendDebug?.initialStopCount || 0,
         imageGeneration,
-        durableObservation
+        durableObservation,
+        reconcileGraceMs
       });
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
       const modeUsed = normalizeChatGptModeIntent(result?.meta?.modeUsed || result?.meta?.actualModeIntent, { fallback: null });

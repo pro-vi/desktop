@@ -113,6 +113,7 @@ function runStatusText(run = {}, data = {}) {
   const lines = [bits.join(' ')];
   if (run.label) lines.push(`label=${run.label}`);
   if (run.detail) lines.push(`detail=${run.detail}`);
+  if (run.responseDebug) lines.push(`responseDebug=${JSON.stringify(run.responseDebug)}`);
   const outputPath = runOutputPath(run, data);
   if (outputPath) lines.push(`outputPath=${outputPath}`);
   if (data.outputError) lines.push(`outputError=${data.outputError}`);
@@ -120,6 +121,21 @@ function runStatusText(run = {}, data = {}) {
     const truncation = data.outputTruncated ? `\n\n[output truncated at ${data.maxOutputChars} chars]\n` : '\n';
     lines.push(`${truncation}${data.outputText}`);
   }
+  return lines.join('\n');
+}
+
+function conversationReadText(data = {}) {
+  const lines = [
+    data.transcriptPath ? `transcriptPath=${data.transcriptPath}` : null,
+    Number.isFinite(Number(data.totalChars)) ? `totalChars=${Number(data.totalChars)}` : null,
+    Number.isFinite(Number(data.totalBytes)) ? `totalBytes=${Number(data.totalBytes)}` : null,
+    data.sha256 ? `sha256=${data.sha256}` : null,
+    `complete=${!!data.complete}`,
+    data.captureReason ? `captureReason=${data.captureReason}` : null,
+    data.previewTruncated ? 'previewTruncated=true' : null
+  ].filter(Boolean);
+  const preview = String(data.preview ?? data.text ?? '');
+  if (preview) lines.push(`preview:\n${preview}`);
   return lines.join('\n');
 }
 
@@ -968,13 +984,13 @@ registerTool(
   'agentify_read_conversation',
   {
     description:
-      'Read a complete ChatGPT conversation and inventory attached file cards. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. Agentify scrolls through virtualized turns and reports complete=false with a reason when it cannot return the full transcript. artifactInventory has its own complete/partial status because file-card coverage is independent from transcript text coverage. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
+      'Read a complete ChatGPT conversation into Agentify private storage and return its local transcriptPath, integrity metadata, and a bounded inline preview. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. complete describes browser capture completeness; previewTruncated describes only the inline preview. artifactInventory has its own complete/partial status because file-card coverage is independent from transcript text coverage. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT for complete conversation capture.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
       chatUrl: z.string().optional().describe('ChatGPT conversation or shared-chat URL to read. Navigates the tab before capturing, without sending anything to the conversation.'),
-      maxChars: z.number().optional().describe('Maximum transcript characters to return.')
+      maxChars: z.number().optional().describe('Maximum inline preview characters to return. Defaults to 20000; the complete rendered capture remains available at transcriptPath.')
     }
   },
   async ({ model, tabId, key, chatUrl, maxChars }) => {
@@ -983,12 +999,13 @@ registerTool(
       ...conn,
       method: 'POST',
       path: '/read-conversation',
-      body: { model, tabId, key, chatUrl, maxChars: maxChars || 200_000 }
+      body: { model, tabId, key, chatUrl, maxChars: maxChars || 20_000 }
     });
+    const { text: _text, preview: _preview, ...metadata } = data || {};
     return {
-      content: [{ type: 'text', text: data.text || '' }],
-      structuredContent: data,
-      isError: data.complete === false && data.reason !== 'max_chars'
+      content: [{ type: 'text', text: conversationReadText(data) }],
+      structuredContent: metadata,
+      isError: data.complete === false
     };
   }
 );
@@ -1505,13 +1522,31 @@ registerTool(
   },
   async ({ runId, timeoutMs, includeOutputText, maxOutputChars }) => {
     const conn = await getConn();
-    const data = await waitForRun({
-      conn,
-      runId,
-      timeoutMs: timeoutMs || 0,
-      includeOutputText: includeOutputText !== false,
-      maxOutputChars
-    });
+    let data;
+    try {
+      data = await waitForRun({
+        conn,
+        runId,
+        timeoutMs: timeoutMs || 0,
+        includeOutputText: includeOutputText !== false,
+        maxOutputChars
+      });
+    } catch (error) {
+      if (error?.message !== 'run_wait_timeout') throw error;
+      data = error?.data?.run
+        ? error.data
+        : await requestJson({
+            ...conn,
+            method: 'POST',
+            path: '/runs/get',
+            body: { runId, view: 'summary', includeOutputText: false }
+          });
+      return {
+        content: [{ type: 'text', text: `waitTimedOut=true\n${runStatusText(data.run || null, data)}` }],
+        structuredContent: { ...data, waitTimedOut: true },
+        isError: true
+      };
+    }
     return {
       content: [{ type: 'text', text: runStatusText(data.run || null, data) }],
       structuredContent: data,
