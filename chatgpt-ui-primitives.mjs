@@ -3,7 +3,7 @@ import { normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 export const CHATGPT_MODE_INTENT_META = Object.freeze({
   'extended-pro': Object.freeze({
     label: 'Pro Extended',
-    pattern: '\\bextended\\s*pro\\b|\\bpro\\s*extended\\b|^pro\\b(?!\\s+standard\\b)',
+    pattern: '\\bextended\\s*pro\\b|\\bpro\\s*extended\\b|^\\d{0,3}\\s*pro\\b(?!\\s+standard\\b)',
     powerIndex: 4
   }),
   thinking: Object.freeze({
@@ -71,7 +71,7 @@ export function modeIntentForLabel(label) {
   if (!text || text.length > 180 || isBlockedUiLabel(text)) return null;
   if (/\bthinking\b|\breasoning\b|\bmedium\b/.test(text)) return 'thinking';
   if (/\binstant\b|\bfast\b/.test(text)) return 'instant';
-  if (/\bextended\s*pro\b|\bpro\s*extended\b|^pro\b(?!\s+standard\b)/.test(text)) return 'extended-pro';
+  if (/\bextended\s*pro\b|\bpro\s*extended\b|^\d{0,3}\s*pro\b(?!\s+standard\b)/.test(text)) return 'extended-pro';
   return null;
 }
 
@@ -79,7 +79,7 @@ export function modeIntentLabelLooksUsable(label, targetIntent) {
   const text = normalizeUiText(label);
   const target = normalizeModeIntentToken(targetIntent);
   if (!text || !target || text.length > 180 || isBlockedUiLabel(text)) return false;
-  if (target === 'extended-pro') return /\bextended\s*pro\b|\bpro\s*extended\b|^pro\b(?!\s+standard\b)/.test(text);
+  if (target === 'extended-pro') return /\bextended\s*pro\b|\bpro\s*extended\b|^\d{0,3}\s*pro\b(?!\s+standard\b)/.test(text);
   if (target === 'thinking') return /\bthinking\b|\breasoning\b|\bmedium\b/.test(text);
   if (target === 'instant') return /\binstant\b|\bfast\b/.test(text);
   return false;

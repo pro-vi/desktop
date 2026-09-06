@@ -186,7 +186,9 @@ function inferModeIntentFromFooterText(value) {
   const end = footerIndex >= 0 ? Math.min(text.length, footerIndex + 220) : text.length;
   const scope = text.slice(start, end);
   const candidates = [];
-  const modeLabelPattern = /\b(?:extended\s*pro|pro\s*extended|thinking|reasoning|medium|instant|fast)\b|\bpro\b(?!\s+standard\b)/gi;
+  // "Thinking effort" is the composer's slider control label, not a report of the
+  // mode that answered, and it renders after the footer disclaimer in main's text.
+  const modeLabelPattern = /\b(?:extended\s*pro|pro\s*extended|thinking(?!\s+effort\b)|reasoning|medium|instant|fast)\b|\bpro\b(?!\s+standard\b)/gi;
   for (const match of scope.matchAll(modeLabelPattern)) {
     const label = match[0] || '';
     const intent = modeIntentForLabel(label);

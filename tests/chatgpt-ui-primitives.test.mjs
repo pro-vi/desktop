@@ -409,6 +409,40 @@ test('chatgpt-ui-primitives: maps usable mode labels and rejects attachment chro
   assert.equal(modeIntentLabelLooksUsable('Pro Standard', 'extended-pro'), false);
 });
 
+test('chatgpt-ui-primitives: reads the composer mode pill through its remaining-run count badge', () => {
+  // The composer mode pill renders the remaining Pro runs as a separate span, so
+  // its concatenated text is "6Pro" and the bare-Pro anchor no longer starts the
+  // string. Observed on chatgpt.com project pages, 2026-09-05.
+  assert.equal(modeIntentForLabel('6Pro'), 'extended-pro');
+  assert.equal(modeIntentForLabel('6 Pro'), 'extended-pro');
+  assert.equal(modeIntentLabelLooksUsable('6Pro', 'extended-pro'), true);
+  assert.equal(modeIntentLabelLooksUsable('12 Pro', 'extended-pro'), true);
+  // The count badge must not turn unrelated chrome into a mode label.
+  assert.equal(modeIntentForLabel('provi Pro, open profile menu accounts-profile-button proviPro'), null);
+  assert.equal(modeIntentForLabel('6 Pro Standard'), null);
+  assert.equal(modeIntentForLabel('Upgrade to Pro'), null);
+  assert.equal(modeIntentForLabel('5.5 Pro'), null);
+});
+
+test('chatgpt-ui-primitives: scores the counted composer mode pill as an activated trigger', () => {
+  const pill = {
+    label: '6Pro',
+    targetIntent: 'extended-pro',
+    active: false,
+    highConfidence: false,
+    modeRegion: true,
+    inComposer: true,
+    promptProximityBoost: 120,
+    hasDataTestId: false,
+    area: 82 * 36,
+    width: 82,
+    height: 36,
+    y: 184
+  };
+  assert.ok(scoreModeTriggerCandidate(pill) > 0);
+  assert.equal(modeTriggerConfirmsActive({ ...pill, menuOpen: false }), true);
+});
+
 test('chatgpt-ui-primitives: accepts only the observed five-step power scale', () => {
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 0 }), true);
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 4 }), true);
