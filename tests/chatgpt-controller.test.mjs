@@ -1160,6 +1160,101 @@ test('chatgpt-controller: durable reconciliation reaches a hard terminal with fi
   assert.equal(progress.some((patch) => patch.phase === 'reconciling_response'), true);
 });
 
+test('chatgpt-controller: durable text query does not complete on page-chrome image candidates before an assistant node exists', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  // Phase 1 reproduces the reauth-smoke-mirror capture: stop visible while the
+  // send button is still found-and-enabled, no assistant node matched, page
+  // text is the prompt echo, and a ≥96px image in main chrome (empty-state
+  // art) reports imageCandidateCount: 1. The done condition must not fire on
+  // that snapshot. Phase 2 mounts the real assistant node.
+  let waitForAssistantPolls = 0;
+  const progress = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        if (waitForAssistantPolls <= 4) {
+          return {
+            stop: true,
+            stopCount: 1,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Echo of the prompt with page chrome',
+            count: 0,
+            usedFallback: true,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            imageCandidateCount: 1,
+            pageText: 'Echo of the prompt with page chrome',
+            currentUrl: 'https://chatgpt.com/c/chrome-image-early-done'
+          };
+        }
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Real assistant answer text',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: 'Echo of the prompt with page chrome Real assistant answer text',
+          currentUrl: 'https://chatgpt.com/c/chrome-image-early-done'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/chrome-image-early-done'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 60_000,
+      durableObservation: true,
+      onProgress: (patch) => progress.push(patch)
+    });
+    assert.equal(result.text, 'Real assistant answer text');
+    assert.equal(result.meta.count, 1);
+    // The wait survived the four chrome-image snapshots before the node mounted.
+    assert.equal(waitForAssistantPolls >= 5, true);
+    assert.equal(progress.some((patch) => patch.phase === 'response_received'), true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: hard reconciliation deadline bounds a hung response evaluation', async () => {
   let sent = false;
   let terminationCalls = 0;

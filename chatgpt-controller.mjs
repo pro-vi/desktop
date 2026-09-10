@@ -6322,12 +6322,21 @@ export class ChatGPTController {
       // but only an assistant node or the final structured-capture recovery may
       // establish output-bearing success.
       const fallbackReady = !durableObservation && fallbackWaited && pageChanged && (generationObserved || snap?.hasError);
-      const contentReady = readyByNodes || nestedResearchReport || fallbackReady || finalImageOutput || snap?.hasError;
+      // Image candidates only count as content for image-generation runs. With no
+      // assistant node matched, imageRoot falls back to `main`, where page chrome
+      // (empty-state art, picker visuals) yields ≥96px img/canvas elements that
+      // would otherwise complete a durable text query on fallback page text —
+      // the prompt echo — before the reply mounts.
+      const contentReady = readyByNodes || nestedResearchReport || fallbackReady || (imageGeneration && finalImageOutput) || snap?.hasError;
       const responseReady = snap?.hasError || (imageGeneration ? (finalImageOutput || (txt.length > 0 && !effectiveThinking)) : txt.length > 0);
       const done = newResponseSeen && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
         (!generating && !effectiveThinking && fallbackStableLongEnough && contentReady));
       if (done) {
+        // The 10s-gated wait debug above leaves the run record frozen at the
+        // first poll; emit the completing snapshot so post-mortems see the state
+        // that actually satisfied the done condition.
+        await this.#emitProgress({ phase: 'response_received', responseDebug: { ...lastResponseDebug } });
         const extra = await this.#eval(`(() => {
           const nodes = Array.from(document.querySelectorAll(${assistantSel}));
           const lastNode = nodes[nodes.length - 1];
