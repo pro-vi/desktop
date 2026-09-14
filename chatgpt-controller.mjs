@@ -163,6 +163,46 @@ function looksLikeResearchShellText(value) {
 
 const IMAGE_PLACEHOLDER_RE = /(^|(?:\\n)|\n)\s*(?:(?:creating|generating)\s+images?|(?:creating|generating)\b[^\n]{0,120}\bimages?)\b/i;
 const IMAGE_THINKING_LINE_RE = /(^|(?:\\n)|\n)\s*thinking(?:\s*(?:\\n|\n|$))/i;
+
+// Completion evidence: the controller's decision that a captured provider
+// surface is final output for this run, not transient progress. HTTP accepts
+// query/research output only when this is present (O1/O2). The closed source
+// set names where finality came from; transient, error, and timeout paths
+// never construct one.
+const COMPLETION_EVIDENCE_SOURCES = Object.freeze([
+  'assistant-node',
+  'image-output',
+  'deep-research-report',
+  'structured-recovery'
+]);
+
+function completionEvidenceFor(source) {
+  if (!COMPLETION_EVIDENCE_SOURCES.includes(source)) return null;
+  return { source, observedAt: Date.now() };
+}
+
+function isQualifiedCompletionEvidence(value) {
+  return !!(value && typeof value === 'object' && !Array.isArray(value) &&
+    COMPLETION_EVIDENCE_SOURCES.includes(value.source));
+}
+
+// Progress-only assistant labels: surfaces whose entire text is a known
+// provider progress state. Exact equality after whitespace collapse (with an
+// optional trailing ellipsis) — an answer that merely discusses "thinking" or
+// "reasoning" at length stays final (R3). Mirrors the chrome-banner words the
+// wait loop already treats as thinking outside the assistant node.
+const PROGRESS_ONLY_ASSISTANT_LABELS = new Set(['pro thinking', 'thinking', 'extended pro', 'reasoning']);
+
+function isProgressOnlyAssistantText(value) {
+  const text = String(value || '')
+    .replace(/…/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\.+$/, '')
+    .trim();
+  return text.length > 0 && PROGRESS_ONLY_ASSISTANT_LABELS.has(text);
+}
 function extractConversationUrl(value) {
   const text = String(value || '').trim();
   if (!text) return null;
@@ -5958,7 +5998,12 @@ export class ChatGPTController {
     const operation = async () => await this.runCompatibilityCapability(
         'response',
         async () => await this.#waitForAssistantStableImpl(options),
-        { anchorId: 'assistant-message', postcondition: (result) => typeof result?.text === 'string' && result.text.length > 0 }
+        {
+          anchorId: 'assistant-message',
+          postcondition: (result) => typeof result?.text === 'string' &&
+            result.text.length > 0 &&
+            isQualifiedCompletionEvidence(result?.meta?.completionEvidence)
+        }
       );
     if (!options?.durableObservation) return await operation();
     const timeoutMs = Math.max(
@@ -6226,13 +6271,16 @@ export class ChatGPTController {
       deepResearchObservationPoll += 1;
       const deepResearchText = lastDeepResearchText;
       const deepResearchCompleted = /\bresearch completed in\b/i.test(deepResearchText);
+      // A changed nested frame is progress, never final output: ChatGPT keeps
+      // rewriting the research panel while it plans and searches. Only the
+      // native completion marker qualifies the frame text as the report.
       const nestedResearchReport = !!(
         deepResearchObservation &&
         generationObserved &&
         !activeStop &&
         deepResearchText &&
         deepResearchText !== String(preSendDeepResearchText || '') &&
-        (!thinking || deepResearchCompleted)
+        deepResearchCompleted
       );
       const effectiveThinking = thinking && !nestedResearchReport;
       const txt = nestedResearchReport ? deepResearchText : mainTxt;
@@ -6329,7 +6377,12 @@ export class ChatGPTController {
       // the prompt echo — before the reply mounts.
       const contentReady = readyByNodes || nestedResearchReport || fallbackReady || (imageGeneration && finalImageOutput) || snap?.hasError;
       const responseReady = snap?.hasError || (imageGeneration ? (finalImageOutput || (txt.length > 0 && !effectiveThinking)) : txt.length > 0);
-      const done = newResponseSeen && (
+      // A capture whose entire text is a known progress-only label ("Pro
+      // thinking") is transient even when every other readiness signal says
+      // the surface settled: keep observing until real output or the existing
+      // reconciliation timeout.
+      const progressOnlyCapture = isProgressOnlyAssistantText(txt);
+      const done = newResponseSeen && !progressOnlyCapture && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
         (!generating && !effectiveThinking && fallbackStableLongEnough && contentReady));
       if (done) {
@@ -6348,6 +6401,17 @@ export class ChatGPTController {
           return { codeBlocks: codes };
         })()`);
         const actualMode = inferActualModeIntent({ text: txt, pageText });
+        // Qualify the surface this completion came from. Error surfaces carry
+        // no evidence (they are not final output); fallback page text without
+        // an assistant node is not a qualified surface either — only image
+        // runs may complete on visual output alone.
+        const completionSource = snap?.hasError
+          ? null
+          : nestedResearchReport
+            ? 'deep-research-report'
+            : readyByNodes
+              ? 'assistant-node'
+              : (imageGeneration && finalImageOutput ? 'image-output' : null);
         return {
           text: txt,
           codeBlocks: extra?.codeBlocks || [],
@@ -6357,7 +6421,8 @@ export class ChatGPTController {
             modeUsed: actualMode?.intent || null,
             actualModeIntent: actualMode?.intent || null,
             actualModeLabel: actualMode?.label || null,
-            actualModeSource: actualMode?.source || null
+            actualModeSource: actualMode?.source || null,
+            completionEvidence: completionEvidenceFor(completionSource)
           }
         };
       }
@@ -6397,6 +6462,18 @@ export class ChatGPTController {
           };
           if (capture?.status === 'complete' && advanced && String(finalAssistant?.text || '').trim()) {
             const recoveredText = String(finalAssistant.text).trim();
+            // The recovery tail passes through the same final-output
+            // qualification: a recovered turn whose entire text is a
+            // progress-only label cannot establish output-bearing success, so
+            // the run keeps its existing non-success terminal path.
+            if (isProgressOnlyAssistantText(recoveredText)) {
+              recovery = {
+                status: 'complete',
+                reason: 'final_assistant_progress_only',
+                assistantCount: assistants.length,
+                advanced: true
+              };
+            } else {
             let actualMode = null;
             try {
               const pageText = await this.#runResponseObservationWithDeadline(
@@ -6425,9 +6502,11 @@ export class ChatGPTController {
                 modeUsed: actualMode?.intent || null,
                 actualModeIntent: actualMode?.intent || null,
                 actualModeLabel: actualMode?.label || null,
-                actualModeSource: actualMode?.source || null
+                actualModeSource: actualMode?.source || null,
+                completionEvidence: completionEvidenceFor('structured-recovery')
               }
             };
+            }
           }
         } catch (error) {
           recovery = {

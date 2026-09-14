@@ -1247,12 +1247,152 @@ test('chatgpt-controller: durable text query does not complete on page-chrome im
     });
     assert.equal(result.text, 'Real assistant answer text');
     assert.equal(result.meta.count, 1);
+    assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
     // The wait survived the four chrome-image snapshots before the node mounted.
     assert.equal(waitForAssistantPolls >= 5, true);
     assert.equal(progress.some((patch) => patch.phase === 'response_received'), true);
   } finally {
     Date.now = realNow;
   }
+});
+
+test('chatgpt-controller: a stabilized progress-only assistant label stays transient until the real answer arrives', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  // Reproduces the reported Extended Pro shape: the last assistant node's
+  // entire text is the "Pro thinking" progress label, every settle signal is
+  // quiet (no stop, send found and enabled), and the stability window elapses.
+  // The old done condition fired on that snapshot and saved the label as the
+  // final answer. Qualification must keep the run live until the node carries
+  // real output — here an answer that itself mentions thinking, which stays
+  // final because only exact progress-only labels are transient.
+  let waitForAssistantPolls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 1, lastText: 'prior answer', pageText: 'prior answer', providerMessageId: 'prior-answer' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        const labelPhase = waitForAssistantPolls <= 4;
+        const txt = labelPhase
+          ? 'Pro thinking...'
+          : 'I did some thinking about your question; the answer is 42.';
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt,
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: labelPhase ? 'prior answer' : txt,
+          currentUrl: 'https://chatgpt.com/c/pro-thinking-label'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/pro-thinking-label'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 60_000,
+      durableObservation: true
+    });
+    assert.equal(result.text, 'I did some thinking about your question; the answer is 42.');
+    assert.equal(waitForAssistantPolls >= 5, true);
+    assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: only transient text through the deadline keeps the existing non-success terminal', async () => {
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Pro thinking',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: 'Pro thinking',
+          currentUrl: 'https://chatgpt.com/'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  await assert.rejects(
+    controller.query({
+      prompt: 'agentify',
+      timeoutMs: 400,
+      durableObservation: true,
+      reconcileGraceMs: 400,
+      recoveryTimeoutMs: 100
+    }),
+    (error) => {
+      assert.equal(error?.message, 'response_reconcile_timeout');
+      assert.equal(error?.data?.recovery?.status, 'unavailable');
+      return true;
+    }
+  );
 });
 
 test('chatgpt-controller: hard reconciliation deadline bounds a hung response evaluation', async () => {
@@ -1610,12 +1750,125 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
     assert.equal(result.meta.count, 2);
     assert.equal(result.meta.modeUsed, 'extended-pro');
     assert.equal(result.meta.modeVerification, 'observed_after_recovery');
+    assert.equal(result.meta.completionEvidence?.source, 'structured-recovery');
     assert.deepEqual(result.recovery, {
       status: 'complete',
       reason: 'structured_conversation_capture',
       assistantCount: 2,
       advanced: true
     });
+    assert.equal(captureCalls, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a progress-only recovered tail cannot bypass final-output qualification', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 250;
+    return fakeNow;
+  };
+  // Structured capture advances past the baseline, but the recovered final
+  // assistant turn is itself a progress-only label. Recovery must keep the
+  // run on its non-success terminal path instead of returning the label as
+  // qualified output.
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'old-prompt', role: 'user', text: 'old question' },
+    { ordinal: 1, providerMessageId: 'old-answer', role: 'assistant', text: 'old answer' },
+    { ordinal: 2, providerMessageId: 'prompt-1', role: 'user', text: 'agentify' },
+    { ordinal: 3, providerMessageId: 'answer-1', role: 'assistant', text: 'Pro thinking' }
+  ];
+  const byteCount = rawTurns.reduce((total, turn) =>
+    total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0);
+  let captureCalls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 1, lastText: 'old answer', pageText: 'old question\nold answer', providerMessageId: 'old-answer' };
+      }
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('publishedCaptureWindow')) {
+        captureCalls += 1;
+        return {
+          captureWindow: {
+            status: 'complete',
+            rawTurns,
+            evidence: {
+              topBoundary: true,
+              bottomBoundary: true,
+              orderedWindowStitching: true,
+              scrollPasses: 2,
+              windowCount: 4,
+              messageCount: 4,
+              providerIdCount: 4,
+              byteCount
+            }
+          },
+          artifactInventory: { status: 'complete', items: [] }
+        };
+      }
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: true,
+          stopCount: 1,
+          sendEnabled: false,
+          sendFound: false,
+          txt: '',
+          count: 0,
+          usedFallback: true,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: '',
+          currentUrl: 'https://chatgpt.com/c/reconcile-progress-only'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/reconcile-progress-only'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.query({
+        prompt: 'agentify',
+        timeoutMs: 1_000,
+        durableObservation: true,
+        reconcileGraceMs: 1_000
+      }),
+      (error) => {
+        assert.equal(error?.message, 'response_reconcile_timeout');
+        assert.deepEqual(error?.data?.recovery, {
+          status: 'complete',
+          reason: 'final_assistant_progress_only',
+          assistantCount: 2,
+          advanced: true
+        });
+        return true;
+      }
+    );
     assert.equal(captureCalls, 1);
   } finally {
     Date.now = realNow;
@@ -4362,12 +4615,162 @@ test('chatgpt-controller: research runs under the controller mutex', async (t) =
 
     assert.equal(mutexCalls, 1);
     assert.equal(path.basename(result.research.exportedMarkdownPath), 'report.md');
+    assert.equal(result.meta.completionEvidence?.source, 'deep-research-report');
     assert.equal(preSendSnapshotBeforeTyping, true);
     assert.equal(keys.includes('A'), false);
     assert.equal(keys.includes('Backspace'), false);
     assert.equal(inserted.join(''), ' Investigate this.');
   } finally {
     controller.mutex = realMutex;
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a changed deep research planning panel without the native completion marker never becomes final', async () => {
+  const realNow = Date.now;
+  let fakeNow = 8_100_000;
+  let clockMode = 'default';
+  Date.now = () => {
+    fakeNow += clockMode === 'wait' ? 10 * 60_000 : 100;
+    return fakeNow;
+  };
+
+  // The nested research frame's text changes after generation settles (planning
+  // panel rewriting itself), but ChatGPT never shows its "Research completed
+  // in" marker. The changed frame is progress, so the observation must exhaust
+  // into the existing reconciliation timeout instead of returning the panel.
+  let waitChecks = 0;
+  let deepResearchReads = 0;
+  const progress = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('clicked_deep_research_option')) {
+        return { action: 'click_item', reason: 'clicked_deep_research_option', label: 'deep research' };
+      }
+      if (js.includes('research_activation_pending')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'latched_after_click',
+          menuOpen: false,
+          composerHints: ['deep research'],
+          promptHints: [],
+          inlinePromptSelection: true
+        };
+      }
+      if (js.includes('research_inline_selection_missing')) {
+        return { ok: true, inlinePromptSelection: true };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 1, lastText: 'prior research answer', pageText: 'prior research answer', providerMessageId: 'prior-research-answer' };
+      }
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('publishedCaptureWindow')) {
+        return {
+          captureWindow: {
+            status: 'partial',
+            reason: 'conversation_capture_timeout',
+            rawTurns: [],
+            evidence: {
+              topBoundary: false,
+              bottomBoundary: false,
+              orderedWindowStitching: true,
+              scrollPasses: 0,
+              windowCount: 1,
+              messageCount: 0,
+              providerIdCount: 0,
+              byteCount: 0
+            }
+          },
+          artifactInventory: { status: 'partial', reason: 'conversation_capture_timeout', items: [] }
+        };
+      }
+      if (js.includes('fallbackMainText')) {
+        clockMode = 'wait';
+        waitChecks += 1;
+        if (waitChecks === 1) {
+          return {
+            stop: true,
+            stopCount: 1,
+            sendEnabled: false,
+            sendFound: true,
+            txt: '',
+            count: 0,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: true,
+            pageText: ''
+          };
+        }
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Deep research planning panel',
+          count: 0,
+          usedFallback: true,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'planning',
+          currentUrl: 'https://chatgpt.com/c/research-planning-timeout'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/research-planning-timeout'; },
+    async evaluateDeepResearch() {
+      deepResearchReads += 1;
+      return deepResearchReads === 1
+        ? ''
+        : 'Searching the web\nPlanning: compare primary sources before drafting.';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchModeButton: '[data-testid="research-button"]',
+      researchModeMenu: '[role="menu"]',
+      researchModeOption: '[role="menuitem"]',
+      researchModeActive: '[aria-pressed="true"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.research({
+        prompt: 'Investigate this.',
+        timeoutMs: 10_000,
+        outDir: os.tmpdir(),
+        onProgress: (patch) => progress.push(patch)
+      }),
+      (error) => {
+        assert.equal(error?.message, 'response_reconcile_timeout');
+        // The changed planning frame never satisfied the report path.
+        assert.equal(error?.data?.responseDebug?.deepResearchReport, false);
+        return true;
+      }
+    );
+    assert.equal(deepResearchReads >= 2, true);
+  } finally {
     Date.now = realNow;
   }
 });
