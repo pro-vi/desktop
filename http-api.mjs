@@ -714,7 +714,10 @@ function responseMarkdownContent(text) {
 // surface it understands; a bare nonempty result text qualifies for nothing.
 const COMPLETION_EVIDENCE_ALLOWED = Object.freeze({
   query: new Set(['assistant-node', 'image-output', 'structured-recovery']),
-  research: new Set(['deep-research-report'])
+  // A research run may also finish through the structured-recovery tail: the
+  // controller qualified the recovered final assistant turn, so the recovered
+  // report is final output, not a planning surface.
+  research: new Set(['deep-research-report', 'structured-recovery'])
 });
 
 function completionEvidenceForResult(result, flowKind) {
@@ -1585,6 +1588,16 @@ export function startHttpApi({
             ? `Deep Research finished, but the captured output still looked like placeholder UI text: ${detail.preview}`
             : 'Deep Research finished, but the final report could not be captured cleanly.',
         conversationUrl: detail?.conversationUrl || null
+      };
+    }
+    if (message === 'completion_evidence_missing') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Response not qualified as final',
+        detail: detail?.preview
+          ? `The captured surface was never qualified as final output, so nothing was saved: ${detail.preview}`
+          : 'The captured surface was never qualified as final output, so nothing was saved.'
       };
     }
     return {

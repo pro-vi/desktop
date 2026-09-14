@@ -49,18 +49,22 @@ This matters because the reload step above is exactly what you do before verifyi
 
 3. **`generating` only checks stop button selector**. Pro thinking may use a different stop/cancel control that doesn't match `selectors.stopButton`. With `generating = false` and `sendEnabled = true`, the done condition triggers.
 
-### Patches applied (2 commits)
+### Patches applied
 
-File: `chatgpt-controller.mjs`, method `#waitForAssistantStable`:
+Two stages:
+
+**Stage 1 — wait-loop thinking awareness** (`#waitForAssistantStable` in `chatgpt-controller.mjs`):
 
 - `sendEnabled` default changed from `true` to `false` when send button not found
 - Added `sendFound` boolean to distinguish "found and enabled" from "not found"
-- Added `isThinking` regex detection: `/\bpro thinking\b|\bthinking\.\.\.\b|\bextended pro\b|\breasoning\b/i`
+- Added `isThinking` regex detection over UI chrome outside the assistant node: `/\bpro thinking\b|\bthinking\.\.\.\b|\bextended pro\b|\breasoning\b/i`
 - `generating` true when: (stop visible + send not enabled), thinking detected, or (stop visible + send missing)
 - Missing send button alone does NOT block completion — only when paired with stop button or thinking
 - Added `sendReady` flag: accepts completion when send missing but no stop/thinking evidence
 - Fallback done path guarded with `!snap?.isThinking`
 - Timeout floor raised to 25 min (`Math.max(timeoutMs, 25 * 60_000)`)
+
+**Stage 2 — final-output qualification** (2026-09-14, `8a4f65e` + `7e8654e`; ADR 0007): Stage 1 still let a stabilized `Pro thinking` label inside the assistant node, a changed Deep Research planning panel, or a progress-only recovered tail become receipt-backed success. The controller now emits completion evidence with a closed source set (`assistant-node`, `image-output`, `deep-research-report`, `structured-recovery`); HTTP writes no artifact/receipt/success without it. Exact progress-only labels stay transient (`isProgressOnlyAssistantText`), Deep Research needs its native `research completed in` marker, and `/read-page` returns provenance (`tabId`, `key`, `servedUrl`) and rejects a contradictory `tabId`+`key` pair with 400 `selector_conflict`.
 
 ### Spike test results
 
@@ -68,7 +72,8 @@ File: `chatgpt-controller.mjs`, method `#waitForAssistantStable`:
 - [x] Regression found & fixed: initial patch treated missing send button as generating, blocking all normal queries
 - [x] Test with a real GPT Pro extended thinking query — **PASS** (waited ~7min, "Thought for 6m 52s", returned full response)
 - [x] `sendVisible: false` after Pro completion is expected — `sendReady` fallback handles it correctly
-- [ ] Verify other vendors (Claude.ai, Gemini, etc.) aren't affected
+- [x] Stage 2 deterministic coverage: controller 177/177, http-api 157/157, full repo `npm test` 862/862 (2026-09-14)
+- [ ] Live probe: build-identified disposable-key run recording DOM labels, evidence source, artifact hash, run status (plan `2026-09-14-001`, consent given, not yet run)
 - [ ] If working, open PR upstream at agentify-sh/desktop
 - [ ] Consider adding `isThinking` to the response metadata so callers know thinking is in progress
 - For long queries, submit with `fireAndForget`, then call `agentify_wait_run` or spawn `npm run wait-run -- <runId>`. The waiter succeeds only after receipt-backed output completion; its deadline does not mutate the run.

@@ -4046,24 +4046,35 @@ test('http-api: research without controller completion evidence saves no artifac
     await fs.rm(stateDir, { recursive: true, force: true });
   });
 
+  const researchResult = (meta) => ({
+    text: 'You said:\nInvestigate this.\n\nChatGPT said:\n\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.',
+    codeBlocks: [],
+    meta,
+    research: { files: [], exportedMarkdownPath: null, exportState: { reason: 'export_controls_not_found' } },
+    researchMeta: {
+      activation: {
+        requested: true,
+        activated: true,
+        error: null,
+        tabId: 't0',
+        conversationUrl: 'https://chatgpt.com/c/research-placeholder'
+      }
+    }
+  });
+  let recoverOnce = true;
   const controller = {
     runExclusive: async (fn) => await fn(),
     ensureReady: async () => ({ ok: true }),
-    research: async () => ({
-      text: 'You said:\nInvestigate this.\n\nChatGPT said:\n\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.',
-      codeBlocks: [],
-      meta: {},
-      research: { files: [], exportedMarkdownPath: null, exportState: { reason: 'export_controls_not_found' } },
-      researchMeta: {
-        activation: {
-          requested: true,
-          activated: true,
-          error: null,
-          tabId: 't0',
-          conversationUrl: 'https://chatgpt.com/c/research-placeholder'
-        }
+    research: async () => {
+      // First call: unqualified capture. Second call (retry): the same report
+      // arrives through the qualified structured-recovery tail, which must
+      // still finalize for a research run.
+      if (recoverOnce) {
+        recoverOnce = false;
+        return researchResult({});
       }
-    }),
+      return researchResult({ completionEvidence: { source: 'structured-recovery', observedAt: 1 } });
+    },
     getUrl: async () => 'https://chatgpt.com/c/research-placeholder'
   };
   const tabs = {
@@ -4109,6 +4120,23 @@ test('http-api: research without controller completion evidence saves no artifac
   assert.equal(finished.data.run.completionReceipt, null);
   assert.equal(finished.data.run.outputManifest, null);
   assert.equal(finished.data.run.conversationUrl, 'https://chatgpt.com/c/research-placeholder');
+
+  // Retrying the same research run through the qualified structured-recovery
+  // tail finalizes normally: a recovered completed report is final output.
+  const retried = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/runs/retry',
+    body: { runId: started.data.runId, source: 'mcp' }
+  });
+  assert.equal(retried.res.status, 200);
+  const recovered = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: retried.data.runId } });
+    return run.data.run?.status === 'success' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+  assert.equal(recovered.data.run.kind, 'research');
+  assert.equal(recovered.data.run.completionReceipt.kind, 'research-report');
 });
 
 test('http-api: research canonical response uses exported markdown when captured text is placeholder chrome', async (t) => {

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-12
-- **Amended:** 2026-08-29
+- **Amended:** 2026-08-29; 2026-09-14 (ADR 0007 — receipt creation now gated on controller completion evidence)
 - **Deciders:** Agentify Desktop maintainers and Codex architecture/build session
 
 ## Context
