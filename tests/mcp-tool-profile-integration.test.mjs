@@ -376,6 +376,62 @@ test('mcp conversation read returns artifact metadata without duplicating the co
   assert.equal(JSON.stringify(result).includes(hiddenMiddle), false);
 });
 
+test('mcp page read keeps plain text and exposes resolved tab provenance', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-read-page-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const token = 'mcp-read-page-token';
+  const serverId = 'mcp-read-page-server';
+  let requestBody = null;
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/read-page') {
+      requestBody = await readJsonBody(req);
+      return sendJson(res, {
+        ok: true,
+        tabId: 'tab-provenance',
+        key: 'provenance-key',
+        servedUrl: 'https://chatgpt.com/c/provenance-conversation',
+        text: 'page text from the resolved tab'
+      });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-read-page-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({
+      name: 'agentify_read_page',
+      arguments: { tabId: 'tab-provenance', key: 'provenance-key' }
+    });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(requestBody?.tabId, 'tab-provenance');
+  assert.equal(requestBody?.key, 'provenance-key');
+  assert.equal(result.content[0].text, 'page text from the resolved tab');
+  assert.equal(result.structuredContent.tabId, 'tab-provenance');
+  assert.equal(result.structuredContent.key, 'provenance-key');
+  assert.equal(result.structuredContent.servedUrl, 'https://chatgpt.com/c/provenance-conversation');
+  assert.equal(result.isError || false, false);
+});
+
 test('mcp wait timeout returns the latest diagnostic snapshot without mutating the run', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-wait-timeout-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));

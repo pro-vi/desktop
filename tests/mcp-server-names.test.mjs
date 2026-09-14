@@ -17,6 +17,8 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_query'"), 'expected agentify_query tool');
   assert.ok(src.includes("'agentify_research'"), 'expected agentify_research tool');
   assert.ok(src.includes("'agentify_read_conversation'"), 'expected agentify_read_conversation tool');
+  assert.ok(src.includes("'agentify_read_page'"), 'expected agentify_read_page tool');
+  assert.ok(src.includes("path: '/read-page'"), 'expected read-page forwarding');
   assert.ok(src.includes("'agentify_download_conversation_artifacts'"), 'expected conversation artifact download tool');
   assert.ok(src.includes("'agentify_track_transcript'"), 'expected agentify_track_transcript tool');
   assert.ok(src.includes("'agentify_sync_transcript'"), 'expected agentify_sync_transcript tool');

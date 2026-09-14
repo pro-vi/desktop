@@ -143,6 +143,7 @@ function mapErrorToHttp(error) {
   if (msg === 'tab_busy') return { code: 409, body: { error: 'tab_busy', data: error?.data || null } };
   if (msg === 'key_vendor_mismatch') return { code: 409, body: { error: 'key_vendor_mismatch' } };
   if (msg === 'tab_not_found') return { code: 404, body: { error: 'tab_not_found' } };
+  if (msg === 'selector_conflict') return { code: 400, body: { error: 'selector_conflict', data: error?.data || null } };
   if (msg === 'tab_closed') return { code: 409, body: { error: 'tab_closed' } };
   if (msg === 'default_tab_protected') return { code: 409, body: { error: 'default_tab_protected' } };
   if (msg === 'max_tabs_reached') return { code: 409, body: { error: 'max_tabs_reached' } };
@@ -708,14 +709,19 @@ function responseMarkdownContent(text) {
   return body.endsWith('\n') ? body : `${body}\n`;
 }
 
-function looksLikeResearchPlaceholder(text) {
-  const raw = String(text || '');
-  const compact = raw.replace(/\u0000/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!compact) return true;
-  const hasChromeTabs = /\bdeep research\b/.test(compact) && /\bapps\b/.test(compact) && /\bsites\b/.test(compact);
-  const hasFooter = /chatgpt can make mistakes\.?\s*check important info\.?/.test(compact);
-  const hasTranscript = /\byou said:\b/.test(compact) && /\bchatgpt said:\b/.test(compact);
-  return (hasChromeTabs || hasTranscript) && hasFooter && compact.length <= 700;
+// The controller's completion evidence decides which captures may become
+// artifacts and receipts. Each flow accepts only the sources that name a final
+// surface it understands; a bare nonempty result text qualifies for nothing.
+const COMPLETION_EVIDENCE_ALLOWED = Object.freeze({
+  query: new Set(['assistant-node', 'image-output', 'structured-recovery']),
+  research: new Set(['deep-research-report'])
+});
+
+function completionEvidenceForResult(result, flowKind) {
+  const allowed = COMPLETION_EVIDENCE_ALLOWED[flowKind];
+  const evidence = result?.meta?.completionEvidence;
+  if (!allowed || !evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return null;
+  return allowed.has(evidence.source) ? evidence : null;
 }
 
 async function writeResearchResponseFile({ outDir, text }) {
@@ -1573,9 +1579,11 @@ export function startHttpApi({
         ...base,
         status: 'error',
         label: 'Research output incomplete',
-        detail: detail?.preview
-          ? `Deep Research finished, but the captured output still looked like placeholder UI text: ${detail.preview}`
-          : 'Deep Research finished, but the final report could not be captured cleanly.',
+        detail: detail?.reason === 'completion_evidence_missing'
+          ? 'Deep Research never showed its native completion marker, so the captured surface stayed progress and was not saved as the report.'
+          : detail?.preview
+            ? `Deep Research finished, but the captured output still looked like placeholder UI text: ${detail.preview}`
+            : 'Deep Research finished, but the final report could not be captured cleanly.',
         conversationUrl: detail?.conversationUrl || null
       };
     }
@@ -1918,10 +1926,15 @@ export function startHttpApi({
     result,
     researchOutput
   } = {}) => {
-    const hasDownloadedOutput = Array.isArray(researchOutput?.files) && researchOutput.files.length > 0;
-    if (!hasDownloadedOutput && looksLikeResearchPlaceholder(result?.text)) {
+    // Only a controller-qualified research completion may produce an artifact
+    // or receipt. The controller observed ChatGPT's native completion marker
+    // before claiming the nested frame; HTTP does not re-guess provider
+    // semantics from the text shape.
+    const completionEvidence = completionEvidenceForResult(result, 'research');
+    if (!completionEvidence) {
       const err = new Error('research_output_incomplete');
       err.data = {
+        reason: 'completion_evidence_missing',
         preview: trimPreview(result?.text, 180),
         exportState: researchOutput?.exportState || null
       };
@@ -1933,7 +1946,10 @@ export function startHttpApi({
       const mime = String(item?.mime || '').trim();
       return /\.md$/i.test(name) || /markdown/i.test(mime);
     }) || null;
-    if (exportedMarkdownFile?.path && looksLikeResearchPlaceholder(responseText)) {
+    // Under qualified completion the downloaded Markdown is the native export
+    // of the finished report, so it is canonical whenever it exists — the
+    // written response.md and the receipt-hashed bytes then agree.
+    if (exportedMarkdownFile?.path) {
       try {
         responseText = await fs.readFile(exportedMarkdownFile.path, 'utf8');
       } catch {}
@@ -1995,6 +2011,19 @@ export function startHttpApi({
     modelIntent = null,
     activeQuery = null
   } = {}) => {
+    // Bare nonempty text proves nothing about finality: the controller must
+    // have qualified the capture (final assistant answer, image output, or a
+    // complete structured recovery) before any artifact or receipt exists.
+    const completionEvidence = completionEvidenceForResult(result, 'query');
+    if (!completionEvidence) {
+      const err = new Error('completion_evidence_missing');
+      err.data = {
+        reason: 'completion_evidence_missing',
+        preview: trimPreview(result?.text, 180),
+        recoveredBy: result?.meta?.recoveredBy || null
+      };
+      throw err;
+    }
     const outDir = await ensureRunArtifactsDir({
       stateDir,
       runId,
@@ -2019,6 +2048,7 @@ export function startHttpApi({
         modeUsed: usage.modeUsed || null,
         modelUsed: usage.modelUsed || null,
         degradedFrom: usage.degradedFrom || null,
+        completionEvidence: { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
         responsePath,
         capturedAt: new Date().toISOString()
       }, null, 2)}\n`,
@@ -4480,11 +4510,33 @@ export function startHttpApi({
         const heldScopes = new Set();
         reserveOperationScopes({ heldScopes, scopes: initialScopes, operation: op });
         try {
+          // An explicit tabId and an explicit key are two claims about one
+          // target. Read-page resolves them jointly: when the listed tab's key
+          // differs from the supplied key, the request is contradictory and is
+          // rejected before any controller lookup, navigation, or read — the
+          // key must not silently re-route the resolved tab to another
+          // conversation. Query and send intentionally keep logical-key
+          // aliasing, so this check lives here, not in resolveTab.
+          const explicitTabId = body?.tabId ? String(body.tabId).trim() : '';
+          const explicitKey = body?.key ? String(body.key).trim() : '';
+          if (explicitTabId && explicitKey) {
+            const listedTab = getTabMeta(tabs, explicitTabId);
+            if (listedTab && String(listedTab?.key || '') !== explicitKey) {
+              const err = new Error('selector_conflict');
+              err.data = {
+                tabId: explicitTabId,
+                key: explicitKey,
+                tabKey: listedTab?.key || null
+              };
+              throw err;
+            }
+          }
           const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
           reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
           const controller = tabs.getControllerById(tabId);
           const tabKey = (body.key ? String(body.key).trim() : '') || getTabMeta(tabs, tabId)?.key || null;
+          let servedUrl = null;
           const text = await runExclusive(controller, async () => {
             // If tab is on base URL after restart, navigate to saved conversation
             if (tabKey && typeof controller.getUrl === 'function') {
@@ -4496,9 +4548,22 @@ export function startHttpApi({
                 await controller.ensureReady({ timeoutMs: 30_000 });
               }
             }
-            return controller.readPageText({ maxChars });
+            const pageText = await controller.readPageText({ maxChars });
+            // Served-page provenance comes from the controller under the same
+            // exclusive lease, after any restoration — never from cached tab
+            // metadata, which can lag a navigation or a restart.
+            servedUrl = typeof controller.getUrl === 'function'
+              ? await controller.getUrl().catch(() => null)
+              : null;
+            return pageText;
           });
-          return sendJson(res, 200, { ok: true, tabId, text });
+          return sendJson(res, 200, {
+            ok: true,
+            tabId,
+            key: getTabMeta(tabs, tabId)?.key || null,
+            servedUrl,
+            text
+          });
         } finally {
           releaseOperationScopes(heldScopes, op.id);
         }

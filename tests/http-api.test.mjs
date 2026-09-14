@@ -1122,7 +1122,7 @@ async function startContinuationHttp(t, {
           currentObservedUrl = queuedNavigationUrl;
         }).catch(() => {});
       }
-      return { text: 'receipt-backed continuation', codeBlocks: [], meta: {} };
+      return { text: 'receipt-backed continuation', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     navigate: async (targetUrl) => {
       events.push(['navigate', targetUrl]);
@@ -1815,7 +1815,7 @@ test('http-api: post-query sync re-enters shared tab ownership and publishes a r
   const controller = {
     runExclusive: async (operation) => await operation(),
     prepareChatEntry: async ({ chatUrl }) => { currentUrl = chatUrl; },
-    query: async () => ({ text: 'receipt-backed continuation', codeBlocks: [], meta: {} }),
+    query: async () => ({ text: 'receipt-backed continuation', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } }),
     getUrl: async () => currentUrl,
     captureConversation: async () => {
       captureCalls += 1;
@@ -2026,7 +2026,7 @@ test('http-api: status surfaces source, phase, blocked state, and last outcome f
         releaseQuery = resolve;
       });
       await onProgress?.({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
-      return { text: 'final answer', codeBlocks: [], meta: {} };
+      return { text: 'final answer', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -2113,7 +2113,7 @@ test('http-api: query returns runId and persists durable run state', async (t) =
       return {
         text: 'durable answer',
         codeBlocks: [],
-        meta: { recoveredBy: 'structured_conversation_capture' },
+        meta: { recoveredBy: 'structured_conversation_capture', completionEvidence: { source: 'structured-recovery', observedAt: 1 } },
         recovery: {
           status: 'complete',
           reason: 'structured_conversation_capture',
@@ -2190,6 +2190,68 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(fetched.data.run.outputManifest.responsePath, persisted.outputManifest.responsePath);
 });
 
+test('http-api: a query result without controller completion evidence creates no artifact, receipt, or success', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-evidence-missing-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const compatibilityTerminals = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    finalizeCompatibilityTerminal: async (capabilityId, terminal) => {
+      compatibilityTerminals.push({ capabilityId, ...terminal });
+      return { accepted: true };
+    },
+    // Bare nonempty text with no completion evidence: exactly what a
+    // transient capture would look like if it slipped past the controller.
+    query: async () => ({ text: 'Pro thinking', codeBlocks: [], meta: {} }),
+    getUrl: async () => 'https://chatgpt.com/c/evidence-missing'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const started = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'make this durable', source: 'mcp', fireAndForget: true }
+  });
+  assert.equal(started.res.status, 202);
+
+  const finished = await waitFor(async () => {
+    const run = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: started.data.runId } });
+    return run.data.run?.status === 'error' ? run : null;
+  }, { timeoutMs: 3_000, intervalMs: 20 });
+
+  const run = finished.data.run;
+  assert.equal(run.kind, 'query');
+  assert.equal(run.outputManifest, null);
+  assert.equal(run.completionReceipt, null);
+  // The receipt-backed compatibility terminal was never satisfied.
+  assert.equal(compatibilityTerminals.some((item) => item.capabilityId === 'response' && item.status === 'satisfied'), false);
+  assert.equal(compatibilityTerminals.some((item) => item.capabilityId === 'response' && item.status === 'failed'), true);
+  // No response artifact was written under the artifacts root.
+  const artifactsDir = path.join(stateDir, 'artifacts');
+  assert.equal(await fs.readdir(artifactsDir).then(() => true).catch(() => false), false);
+});
+
 test('http-api: fire-and-forget query finalizes durable run on async error', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-async-'));
   const controller = {
@@ -2254,7 +2316,7 @@ test('http-api: query setup failures release the active query and every scope', 
     runExclusive: async (fn) => await fn(),
     query: async () => {
       queryCalls += 1;
-      return { text: 'recovered', codeBlocks: [], meta: {} };
+      return { text: 'recovered', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/c/11111111-1111-8111-8111-111111111111'
   };
@@ -2354,7 +2416,7 @@ test('http-api: runs/wait follows a reconciling background query through durable
       assert.equal(durableObservation, true);
       await onProgress?.({ phase: 'reconciling_response', responseDebug: { softDeadlineMs: 10 } });
       await new Promise((resolve) => setTimeout(resolve, 40));
-      return { text: 'late but complete', codeBlocks: [], meta: {} };
+      return { text: 'late but complete', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/c/late-complete'
   };
@@ -2444,7 +2506,7 @@ test('http-api: reconciliation timeout persists diagnostics and releases its pro
         };
         throw error;
       }
-      return { text: 'slot reused', codeBlocks: [], meta: {} };
+      return { text: 'slot reused', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/c/slot-reused'
   };
@@ -2590,7 +2652,7 @@ test('http-api: query forwards explicit model intent without persisting it as ke
           stage: 'before_prompt'
         }
       });
-      return { text: 'project answer', codeBlocks: [], meta: {} };
+      return { text: 'project answer', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/g/g-p-agentify/c/model-intent-run',
     navigate: async () => {},
@@ -2651,7 +2713,7 @@ test('http-api: explicit model intent fails if controller returns without confir
     runExclusive: async (fn) => await fn(),
     query: async ({ modelIntent }) => {
       assert.equal(modelIntent, 'gpt-5.4-pro');
-      return { text: 'unconfirmed model answer', codeBlocks: [], meta: {} };
+      return { text: 'unconfirmed model answer', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/g/g-p-agentify/c/unconfirmed-model',
     navigate: async () => {},
@@ -2772,7 +2834,7 @@ test('http-api: runs list/get/archive expose durable query history', async (t) =
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runs-list-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'history answer', codeBlocks: [], meta: {} }),
+    query: async () => ({ text: 'history answer', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } }),
     getUrl: async () => 'https://chatgpt.com/c/history-run'
   };
   const tabs = {
@@ -2944,7 +3006,7 @@ test('http-api: compact runs/get payload is materially smaller than full replay 
     runExclusive: async (fn) => await fn(),
     query: async ({ prompt }) => {
       assert.equal(prompt, longPrompt);
-      return { text: longAnswer, codeBlocks: [], meta: {} };
+      return { text: longAnswer, codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/c/payload-proof'
   };
@@ -3010,7 +3072,7 @@ test('http-api: runs get reloads query output manifest after restart', async () 
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-query-output-restart-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'restart durable answer', codeBlocks: [], meta: {} }),
+    query: async () => ({ text: 'restart durable answer', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } }),
     getUrl: async () => 'https://chatgpt.com/c/restart-output-run'
   };
   const tabs = {
@@ -3086,7 +3148,7 @@ test('http-api: runs open saved conversations and retry exact materialized repla
         markHeldQueryStarted();
         await new Promise((resolve) => { releaseHeldQuery = resolve; });
       }
-      return { text: `answer ${queryCalls.length}`, codeBlocks: [], meta: {} };
+      return { text: `answer ${queryCalls.length}`, codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => currentUrl
   };
@@ -3434,7 +3496,7 @@ test('http-api: keyed navigate persists conversationUrl for later query recovery
     getUrl: async () => currentUrl2,
     query: async ({ prompt }) => {
       queryCalls.push({ prompt, urlBeforeSend: currentUrl2 });
-      return { text: 'continued', codeBlocks: [], meta: {} };
+      return { text: 'continued', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs2 = {
@@ -3507,7 +3569,7 @@ test('http-api: explicit shared chat materializes outside the default project an
     query: async ({ onProgress }) => {
       currentUrl = 'https://chatgpt.com/c/private-copy';
       await onProgress?.({ phase: 'conversation_materialized', conversationUrl: currentUrl });
-      return { text: 'continued outside project', codeBlocks: [], meta: {} };
+      return { text: 'continued outside project', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => currentUrl
   };
@@ -3673,7 +3735,7 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
       return {
         text: `research answer ${researchCalls.length}`,
         codeBlocks: [],
-        meta: { mode: 'research' },
+        meta: { mode: 'research', completionEvidence: { source: 'deep-research-report', observedAt: 1 } },
         research: {
           files: [{ path: exportPath, name: path.basename(exportPath), mime: 'text/markdown', source: 'chatgpt_export' }],
           exportedMarkdownPath: exportPath,
@@ -3768,7 +3830,9 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
     finished.data.run.researchMeta.outputManifest.files.some((item) => item.role === 'download' && item.name === 'deep-research-1.md'),
     true
   );
-  assert.equal(await fs.readFile(finished.data.run.researchMeta.outputManifest.responsePath, 'utf8'), 'research answer 1\n');
+  // Under qualified completion the downloaded export is canonical, so
+  // response.md and the receipt-hashed bytes are the exported markdown.
+  assert.equal(await fs.readFile(finished.data.run.researchMeta.outputManifest.responsePath, 'utf8'), '# Export 1\n');
 
   const listed = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: {} });
   const summary = listed.data.runs.find((item) => item.id === originalRunId);
@@ -3787,7 +3851,7 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
   assert.equal('materializedReplay' in compact.data.run, false);
   assert.equal(compact.data.run.researchMeta.activation.activated, true);
   assert.equal(path.basename(compact.data.run.researchMeta.outputManifest.responsePath), 'response.md');
-  assert.equal(compact.data.outputText, 'research answer 1\n');
+  assert.equal(compact.data.outputText, '# Export 1\n');
 
   const retried = await req({
     port,
@@ -3829,7 +3893,7 @@ test('http-api: timed-out research navigation releases its provider slot for ano
     runExclusive: async (fn) => await fn(),
     query: async () => {
       queryCalls += 1;
-      return { text: 'slot recovered', codeBlocks: [], meta: {} };
+      return { text: 'slot recovered', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => 'https://chatgpt.com/c/recovered'
   };
@@ -3905,7 +3969,7 @@ test('http-api: research merges saved bundle promptPrefix into packed prompt and
       return {
         text: 'done',
         codeBlocks: [],
-        meta: {},
+        meta: { completionEvidence: { source: 'deep-research-report', observedAt: 1 } },
         research: { files: [], exportedMarkdownPath: null, exportState: null },
         researchMeta: {
           activation: {
@@ -3976,7 +4040,7 @@ test('http-api: research merges saved bundle promptPrefix into packed prompt and
   assert.match(String(finished.data.run.materializedReplay.prompt || ''), /Use the saved research format\./);
 });
 
-test('http-api: research marks placeholder shell text as an error when no export artifact exists', async (t) => {
+test('http-api: research without controller completion evidence saves no artifact and stays non-success', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-placeholder-'));
   t.after(async () => {
     await fs.rm(stateDir, { recursive: true, force: true });
@@ -4041,7 +4105,9 @@ test('http-api: research marks placeholder shell text as an error when no export
 
   assert.equal(finished.data.run.kind, 'research');
   assert.equal(finished.data.run.label, 'Research output incomplete');
-  assert.match(String(finished.data.run.detail || ''), /placeholder UI text/i);
+  assert.match(String(finished.data.run.detail || ''), /completion marker/i);
+  assert.equal(finished.data.run.completionReceipt, null);
+  assert.equal(finished.data.run.outputManifest, null);
   assert.equal(finished.data.run.conversationUrl, 'https://chatgpt.com/c/research-placeholder');
 });
 
@@ -4062,7 +4128,7 @@ test('http-api: research canonical response uses exported markdown when captured
       return {
         text: 'You said:\nInvestigate this.\n\nChatGPT said:\n\nDeep research\nApps\nSites\nChatGPT can make mistakes. Check important info.',
         codeBlocks: [],
-        meta: {},
+        meta: { completionEvidence: { source: 'deep-research-report', observedAt: 1 } },
         research: {
           files: [{ path: exportedPath, name: 'deep-research.md', mime: 'text/markdown', source: 'download://report' }],
           exportedMarkdownPath: exportedPath,
@@ -4123,6 +4189,14 @@ test('http-api: research canonical response uses exported markdown when captured
     '# exported report\n\nreal body\n'
   );
   assert.equal(path.basename(finished.data.run.researchMeta.outputManifest.exportedMarkdownPath), 'deep-research.md');
+  // The receipt hashes the exported markdown itself.
+  assert.equal(finished.data.run.completionReceipt.kind, 'research-report');
+  assert.equal(finished.data.run.completionReceipt.responsePath, finished.data.run.researchMeta.outputManifest.exportedMarkdownPath);
+  const crypto = await import('node:crypto');
+  assert.equal(
+    finished.data.run.completionReceipt.responseSha256,
+    crypto.createHash('sha256').update(Buffer.from('# exported report\n\nreal body\n', 'utf8')).digest('hex')
+  );
 });
 
 test('http-api: research bundle resolution fails asynchronously after run creation', async (t) => {
@@ -4196,7 +4270,7 @@ test('http-api: research reserves the underlying tab against concurrent query ca
       return {
         text: 'done',
         codeBlocks: [],
-        meta: {},
+        meta: { completionEvidence: { source: 'deep-research-report', observedAt: 1 } },
         research: { files: [], exportedMarkdownPath: null, exportState: null },
         researchMeta: {
           activation: {
@@ -4209,7 +4283,7 @@ test('http-api: research reserves the underlying tab against concurrent query ca
         }
       };
     },
-    query: async () => ({ text: 'query', codeBlocks: [], meta: {} }),
+    query: async () => ({ text: 'query', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } }),
     getUrl: async () => 'https://chatgpt.com/c/locked'
   };
   const tabs = {
@@ -4337,7 +4411,7 @@ test('http-api: detached research keeps its operation leases when writing the 20
       return {
         text: 'done',
         codeBlocks: [],
-        meta: {},
+        meta: { completionEvidence: { source: 'deep-research-report', observedAt: 1 } },
         research: { files: [], exportedMarkdownPath: null, exportState: null },
         researchMeta: {
           activation: {
@@ -4419,7 +4493,7 @@ test('http-api: research without tab/key does not lock an unrelated default non-
   const controllers = {
     't0': {
       runExclusive: async (fn) => await fn(),
-      query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+      query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
     },
     't-chatgpt': {
       runExclusive: async (fn) => await fn(),
@@ -4431,7 +4505,7 @@ test('http-api: research without tab/key does not lock an unrelated default non-
         return {
           text: 'done',
           codeBlocks: [],
-          meta: {},
+          meta: { completionEvidence: { source: 'deep-research-report', observedAt: 1 } },
           research: { files: [], exportedMarkdownPath: null, exportState: null },
           researchMeta: {
             activation: {
@@ -4534,7 +4608,7 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
       query: async (args) => {
         oldCalls.query.push(args);
         currentUrls.set('t-old', `https://chatgpt.com/c/original-${oldCalls.query.length}`);
-        return { text: `old ${oldCalls.query.length}`, codeBlocks: [], meta: {} };
+        return { text: `old ${oldCalls.query.length}`, codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       },
       getUrl: async () => currentUrls.get('t-old')
     },
@@ -4551,7 +4625,7 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
       query: async (args) => {
         newCalls.query.push(args);
         currentUrls.set('t-new', `https://chatgpt.com/c/new-${newCalls.query.length}`);
-        return { text: `new ${newCalls.query.length}`, codeBlocks: [], meta: {} };
+        return { text: `new ${newCalls.query.length}`, codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       },
       getUrl: async () => currentUrls.get('t-new')
     }
@@ -4655,7 +4729,7 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
     query: async () => {
       markActiveQueryStarted();
       await activeQueryGate;
-      return { text: 'active result', codeBlocks: [], meta: {} };
+      return { text: 'active result', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     getUrl: async () => currentUrls.get('t-active')
   };
@@ -4710,7 +4784,7 @@ test('http-api: same-tab query/send requests are rejected while a run is already
       await new Promise((resolve) => {
         releaseQuery = resolve;
       });
-      return { text: 'done', codeBlocks: [], meta: {} };
+      return { text: 'done', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     send: async () => ({ ok: true })
   };
@@ -5662,7 +5736,7 @@ test('http-api: route-changing operations exclude provider work across key and t
     },
     query: async () => {
       sentAt.push(currentUrl);
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     send: async () => {
       rawSentAt.push(currentUrl);
@@ -6051,6 +6125,195 @@ test('http-api: route-changing operations exclude provider work across key and t
   assert.deepEqual(sentAt, [originalUrl, originalUrl, originalUrl, originalUrl]);
 });
 
+test('http-api: read-page rejects a contradictory explicit tabId and key before any controller work', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-readpage-conflict-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const controllerCalls = [];
+  const recordCalls = (label) => ({
+    runExclusive: async (fn) => await fn(),
+    getUrl: async () => {
+      controllerCalls.push(`${label}:getUrl`);
+      return `https://chatgpt.com/c/${label}`;
+    },
+    navigate: async (target) => {
+      controllerCalls.push(`${label}:navigate`);
+      return target;
+    },
+    ensureReady: async () => ({ ok: true }),
+    readPageText: async () => {
+      controllerCalls.push(`${label}:readPageText`);
+      return `${label} page text`;
+    }
+  });
+  const tabs = {
+    listTabs: () => [
+      { id: 't0', key: 'alpha', vendorId: 'chatgpt', vendorName: 'ChatGPT' },
+      { id: 't1', key: 'beta', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+    ],
+    ensureTab: async ({ key }) => (key === 'beta' ? 't1' : 't0'),
+    createTab: async ({ key }) => (key === 'beta' ? 't1' : 't0'),
+    closeTab: async () => true,
+    getControllerById: (id) => (id === 't1' ? recordCalls('t1') : recordCalls('t0'))
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const conflict = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { tabId: 't0', key: 'beta' }
+  });
+  assert.equal(conflict.res.status, 400);
+  assert.equal(conflict.data.error, 'selector_conflict');
+  assert.deepEqual(conflict.data.data, { tabId: 't0', key: 'beta', tabKey: 'alpha' });
+  // Neither target was looked up, navigated, or read.
+  assert.deepEqual(controllerCalls, []);
+
+  // An agreeing pair behaves like the tab alone: no conflict, normal read.
+  const agreeing = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { tabId: 't1', key: 'beta' }
+  });
+  assert.equal(agreeing.res.status, 200);
+  assert.equal(agreeing.data.text, 't1 page text');
+});
+
+test('http-api: read-page returns resolved tab identity and served URL provenance', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-readpage-provenance-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const controllers = new Map([
+    ['t0', {
+      runExclusive: async (fn) => await fn(),
+      getUrl: async () => 'https://chatgpt.com/c/tab-zero-conversation',
+      readPageText: async () => 'tab zero text'
+    }],
+    ['t1', {
+      runExclusive: async (fn) => await fn(),
+      getUrl: async () => 'https://chatgpt.com/c/tab-one-conversation',
+      readPageText: async () => 'tab one text'
+    }]
+  ]);
+  const tabs = {
+    listTabs: () => [
+      { id: 't0', key: 'alpha', vendorId: 'chatgpt', vendorName: 'ChatGPT' },
+      { id: 't1', key: 'beta', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+    ],
+    ensureTab: async ({ key }) => (key === 'beta' ? 't1' : 't0'),
+    createTab: async ({ key }) => (key === 'beta' ? 't1' : 't0'),
+    closeTab: async () => true,
+    getControllerById: (id) => controllers.get(id)
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const byTab = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { tabId: 't1' }
+  });
+  assert.equal(byTab.res.status, 200);
+  assert.equal(byTab.data.tabId, 't1');
+  assert.equal(byTab.data.key, 'beta');
+  assert.equal(byTab.data.servedUrl, 'https://chatgpt.com/c/tab-one-conversation');
+  assert.equal(byTab.data.text, 'tab one text');
+
+  const byKey = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { key: 'alpha' }
+  });
+  assert.equal(byKey.res.status, 200);
+  assert.equal(byKey.data.tabId, 't0');
+  assert.equal(byKey.data.key, 'alpha');
+  assert.equal(byKey.data.servedUrl, 'https://chatgpt.com/c/tab-zero-conversation');
+  assert.equal(byKey.data.text, 'tab zero text');
+});
+
+test('http-api: a base-URL keyed tab restores only its own conversation and reports the served URL', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-readpage-restore-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const conversationUrl = 'https://chatgpt.com/c/keyed-restored-conversation';
+  await writeProjects({ gamma: { conversationUrl } }, stateDir);
+  const navigated = [];
+  let currentUrl = 'https://chatgpt.com/';
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    getUrl: async () => currentUrl,
+    navigate: async (target) => {
+      navigated.push(target);
+      currentUrl = target;
+      return target;
+    },
+    ensureReady: async () => ({ ok: true }),
+    readPageText: async () => 'restored conversation text'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'gamma', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const restored = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-page',
+    body: { key: 'gamma' }
+  });
+  assert.equal(restored.res.status, 200);
+  assert.equal(restored.data.tabId, 't0');
+  assert.equal(restored.data.key, 'gamma');
+  assert.equal(restored.data.servedUrl, conversationUrl);
+  assert.equal(restored.data.text, 'restored conversation text');
+  assert.deepEqual(navigated, [conversationUrl]);
+});
+
 test('http-api: an explicit tab cannot bypass ownership of the same logical key', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-key-alias-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
@@ -6067,7 +6330,7 @@ test('http-api: an explicit tab cannot bypass ownership of the same logical key'
         firstStarted = true;
         await firstGate;
         sends.push('t1');
-        return { text: 'first', codeBlocks: [], meta: {} };
+        return { text: 'first', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       },
       getUrl: async () => 'https://chatgpt.com/c/11111111-1111-8111-8111-111111111111'
     }],
@@ -6075,7 +6338,7 @@ test('http-api: an explicit tab cannot bypass ownership of the same logical key'
       runExclusive: async (operation) => await operation(),
       query: async () => {
         sends.push('t2');
-        return { text: 'second', codeBlocks: [], meta: {} };
+        return { text: 'second', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       },
       navigate: async (url) => { secondUrl = url; },
       ensureReady: async () => ({ ok: true }),
@@ -6182,7 +6445,7 @@ test('http-api: query packs context paths before forwarding to controller', asyn
     runExclusive: async (fn) => await fn(),
     query: async (args) => {
       seen = args;
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -6237,7 +6500,7 @@ test('http-api: query merges saved bundle inputs', async (t) => {
     runExclusive: async (fn) => await fn(),
     query: async (args) => {
       seen = args;
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -6301,7 +6564,7 @@ test('http-api: query with keyed tab uses default vendor metadata when no model 
   let ensuredArgs = null;
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [],
@@ -6373,7 +6636,7 @@ test('http-api: image-generation queries prefer the default image project and do
     query: async ({ prompt }) => {
       queryCalls.push({ prompt, urlBeforeSend: currentUrl });
       currentUrl = imageConversationUrl;
-      return { text: 'image ok', codeBlocks: [], meta: {} };
+      return { text: 'image ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -6457,7 +6720,7 @@ test('http-api: image-generation queries without an explicit key use the dedicat
       getUrl: async () => currentUrlByTab.t0,
       query: async ({ prompt, attachments, imageGeneration }) => {
         queryCalls.push({ tabId: 't0', prompt, attachments, imageGeneration, urlBeforeSend: currentUrlByTab.t0 });
-        return { text: 'default', codeBlocks: [], meta: {} };
+        return { text: 'default', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       }
     },
     't-image': {
@@ -6470,7 +6733,7 @@ test('http-api: image-generation queries without an explicit key use the dedicat
       query: async ({ prompt, attachments, imageGeneration }) => {
         queryCalls.push({ tabId: 't-image', prompt, attachments, imageGeneration, urlBeforeSend: currentUrlByTab['t-image'] });
         currentUrlByTab['t-image'] = 'https://chatgpt.com/g/g-p-image/c/thread-image';
-        return { text: 'image ok', codeBlocks: [], meta: {} };
+        return { text: 'image ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       }
     }
   };
@@ -6555,7 +6818,7 @@ test('http-api: image-generation queries use the image-key scope instead of rese
       query: async ({ prompt }) => {
         queryCalls.push({ tabId: 't0', prompt });
         await defaultQueryDone;
-        return { text: 'default ok', codeBlocks: [], meta: {} };
+        return { text: 'default ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       }
     },
     't-image': {
@@ -6565,7 +6828,7 @@ test('http-api: image-generation queries use the image-key scope instead of rese
       getUrl: async () => 'https://chatgpt.com/g/g-p-image/project',
       query: async ({ prompt, imageGeneration }) => {
         queryCalls.push({ tabId: 't-image', prompt, imageGeneration });
-        return { text: 'image ok', codeBlocks: [], meta: {} };
+        return { text: 'image ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
       }
     }
   };
@@ -6724,7 +6987,7 @@ test('http-api: query returns 404 for missing bundle', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-bundle-missing-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
@@ -6794,7 +7057,7 @@ test('http-api: query returns 400 for missing context path', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-context-missing-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
@@ -6833,7 +7096,7 @@ test('http-api: query returns 400 for missing explicit attachment path', async (
   const missing = path.join(dir, 'missing.png');
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
@@ -6871,7 +7134,7 @@ test('http-api: query rejects relative local paths on the direct HTTP surface', 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-query-relative-'));
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
@@ -6914,7 +7177,7 @@ test('http-api: invalid query input does not consume rate-limit budget', async (
     runExclusive: async (fn) => await fn(),
     query: async () => {
       queries += 1;
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -7778,7 +8041,7 @@ test('http-api: query returns vendor-specific context budget', async (t) => {
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'claude' }],
@@ -7817,7 +8080,7 @@ test('http-api: query returns effective override context budget metadata', async
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'claude' }],
@@ -7868,7 +8131,7 @@ test('http-api: query ignores invalid non-positive context budget overrides', as
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'claude' }],
@@ -7925,7 +8188,7 @@ test('http-api: non-positive timeoutMs values fall back to safe defaults', async
     },
     query: async ({ timeoutMs }) => {
       seen.query.push(timeoutMs);
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     send: async ({ timeoutMs }) => {
       seen.send.push(timeoutMs);
@@ -7992,7 +8255,7 @@ test('http-api: oversized numeric overrides are clamped to bounded ceilings', as
     runExclusive: async (fn) => await fn(),
     query: async ({ timeoutMs }) => {
       seen.query.push(timeoutMs);
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     },
     readPageText: async ({ maxChars }) => {
       seen.read.push(maxChars);
@@ -8148,7 +8411,7 @@ test('http-api: query model hint routes to a vendor-scoped tab when default tab 
     runExclusive: async (fn) => await fn(),
     query: async (args) => {
       seenQuery.push(args);
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -8201,7 +8464,7 @@ test('http-api: query model hint routes to a vendor-scoped tab when default tab 
 test('http-api: query rejects unknown vendor hint', async (t) => {
   const controller = {
     runExclusive: async (fn) => await fn(),
-    query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
@@ -8284,7 +8547,7 @@ test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) =
         query: async () => {
           started += 1;
           await gate;
-          return { text: 'ok' };
+          return { text: 'ok', meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
         }
       });
     }
@@ -8363,13 +8626,13 @@ test('http-api: fire-and-forget query queues for provider slot and can be stoppe
             await new Promise((resolve) => {
               releaseQ1 = resolve;
             });
-            return { text: 'q1 done' };
+            return { text: 'q1 done', meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
           }
           if (id === 't2') {
             q2Started = true;
-            return { text: 'q2 done' };
+            return { text: 'q2 done', meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
           }
-          return { text: 'ok' };
+          return { text: 'ok', meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
         }
       });
     }
@@ -8596,7 +8859,7 @@ test('http-api: query pacing returns 429 with retryAfterMs when max wait is 0', 
     runExclusive: async (fn) => await fn(),
     query: async () => {
       calls += 1;
-      return { text: 'ok' };
+      return { text: 'ok', meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   };
   const tabs = {
@@ -8777,7 +9040,7 @@ test('http-api: query rate limits (qpm + inflight)', async (t) => {
     createTab: async () => 't0',
     closeTab: async () => true,
     getControllerById: () => ({
-      query: async () => ({ text: 'ok', codeBlocks: [], meta: {} })
+      query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
     })
   };
 
@@ -8814,7 +9077,7 @@ test('http-api: query rate limits (qpm + inflight)', async (t) => {
   tabs.getControllerById = () => ({
     query: async () => {
       await hang;
-      return { text: 'ok', codeBlocks: [], meta: {} };
+      return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   });
 

@@ -978,7 +978,18 @@ registerTool(
       path: '/read-page',
       body: { model, tabId, key, maxChars: maxChars || 200_000 }
     });
-    return { content: [{ type: 'text', text: data.text || '' }] };
+    // Keep the plain text block for compatibility and forward the complete
+    // HTTP read result — including resolved tab identity and servedUrl — as
+    // structured content so callers can prove which page supplied the text.
+    return {
+      content: [{ type: 'text', text: data.text || '' }],
+      structuredContent: {
+        ok: data.ok,
+        tabId: data.tabId,
+        key: data.key,
+        servedUrl: data.servedUrl
+      }
+    };
   }
 );
 
