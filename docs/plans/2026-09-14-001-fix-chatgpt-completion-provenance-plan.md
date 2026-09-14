@@ -2,7 +2,7 @@
 title: ChatGPT Final-Output Qualification and Page-Read Provenance
 objective: Make unattended callers receive successful ChatGPT runs and page reads only when Agentify can identify a completed output and the page that supplied it.
 type: fix
-status: active
+status: completed
 date: 2026-09-14
 origin: conversation
 ---

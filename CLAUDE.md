@@ -73,7 +73,7 @@ Two stages:
 - [x] Test with a real GPT Pro extended thinking query — **PASS** (waited ~7min, "Thought for 6m 52s", returned full response)
 - [x] `sendVisible: false` after Pro completion is expected — `sendReady` fallback handles it correctly
 - [x] Stage 2 deterministic coverage: controller 177/177, http-api 157/157, full repo `npm test` 862/862 (2026-09-14)
-- [ ] Live probe: build-identified disposable-key run recording DOM labels, evidence source, artifact hash, run status (plan `2026-09-14-001`, consent given, not yet run)
+- [x] Live probe (2026-09-14, `docs/probes/2026-09-14-completion-qualification-probe.md`): qualification pipeline, receipt, and read-page provenance verified live at `fdce09e`. **New pre-existing defect found, not yet fixed:** on project-routed conversations the wait loop can complete on the *previous* assistant reply (captured `'4'`/`'6'` for 3+3/5+5 prompts) — turn-identity race, not a finality failure; needs its own plan (provider-message-id baseline in the wait loop). `Pro thinking` transience live check still not run (deterministic tests only).
 - [ ] If working, open PR upstream at agentify-sh/desktop
 - [ ] Consider adding `isThinking` to the response metadata so callers know thinking is in progress
 - For long queries, submit with `fireAndForget`, then call `agentify_wait_run` or spawn `npm run wait-run -- <runId>`. The waiter succeeds only after receipt-backed output completion; its deadline does not mutate the run.
