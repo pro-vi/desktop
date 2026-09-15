@@ -382,11 +382,13 @@ test('mcp page read keeps plain text and exposes resolved tab provenance', async
   const token = 'mcp-read-page-token';
   const serverId = 'mcp-read-page-server';
   let requestBody = null;
+  const readPageBodies = [];
   const api = http.createServer(async (req, res) => {
     if (req.url === '/health') return sendJson(res, { ok: true, serverId });
     if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
     if (req.url === '/read-page') {
       requestBody = await readJsonBody(req);
+      readPageBodies.push(requestBody);
       return sendJson(res, {
         ok: true,
         tabId: 'tab-provenance',
@@ -413,16 +415,23 @@ test('mcp page read keeps plain text and exposes resolved tab provenance', async
   const client = new Client({ name: 'agentify-read-page-test', version: '1.0.0' }, { capabilities: {} });
 
   let result;
+  let optedUp;
   try {
     await client.connect(transport);
     result = await client.callTool({
       name: 'agentify_read_page',
       arguments: { tabId: 'tab-provenance', key: 'provenance-key' }
     });
+    optedUp = await client.callTool({
+      name: 'agentify_read_page',
+      arguments: { tabId: 'tab-provenance', key: 'provenance-key', maxChars: 150_000 }
+    });
   } finally {
     await client.close();
   }
 
+  assert.equal(readPageBodies[0].maxChars, 20_000);
+  assert.equal(readPageBodies[1].maxChars, 150_000);
   assert.equal(requestBody?.tabId, 'tab-provenance');
   assert.equal(requestBody?.key, 'provenance-key');
   assert.equal(result.content[0].text, 'page text from the resolved tab');

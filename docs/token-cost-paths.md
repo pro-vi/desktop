@@ -89,7 +89,7 @@ is the tracker; implementation commits reference their L-id.
 - Addresses: P-READ-PAGE. Saves up to ~30k per unbounded read.
 - Risk: callers wanting full pages must pass `maxChars`; the HTTP default stays
   200k for non-MCP consumers unless changed with it.
-- Status: proposed (presented 2026-09-15).
+- Status: shipped (L4 → `docs/plans/2026-09-15-001` U3, 2026-09-15).
 
 ### L5 — Trim wait-result debug noise
 

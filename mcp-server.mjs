@@ -967,7 +967,7 @@ registerTool(
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
-      maxChars: z.number().optional().describe('Maximum characters to return.')
+      maxChars: z.number().optional().describe('Maximum characters to return. Defaults to 20000; pass a larger value for longer pages.')
     }
   },
   async ({ model, tabId, key, maxChars }) => {
@@ -976,7 +976,7 @@ registerTool(
       ...conn,
       method: 'POST',
       path: '/read-page',
-      body: { model, tabId, key, maxChars: maxChars || 200_000 }
+      body: { model, tabId, key, maxChars: maxChars || 20_000 }
     });
     // Keep the plain text block for compatibility and forward the complete
     // HTTP read result — including resolved tab identity and servedUrl — as
