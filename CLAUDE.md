@@ -30,6 +30,18 @@ The respawned Electron needs a few seconds before a page is capturable, and noth
 
 This matters because the reload step above is exactly what you do before verifying a change, so a cold-start empty result reads as "my change is broken" when it is not. `readConversationText` has no readiness gate of its own, and `prepareChatEntry`'s readiness wait did not block here. Re-run the call once the app is warm before concluding anything, and prefer a warm run for any evidence you intend to report.
 
+## Tool usage counter
+
+Every authenticated HTTP response is counted per route (calls, errors, cumulative response bytes) and persisted to `<stateDir>/tool-usage.json`. `/health`, OPTIONS, 401/403, and `/usage` itself are excluded. Read it without transcripts:
+
+```bash
+TOKEN=$(cat ~/.agentify-desktop/token.txt)
+PORT=$(python3 -c "import json;print(json.load(open('$HOME/.agentify-desktop/state.json'))['port'])")
+curl -s "http://127.0.0.1:$PORT/usage" -H "authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+Counts start from the instance's first run on a build that has the counter (2026-09-15); they do not backfill history. Query/research output sizes additionally live in each run record under `~/.agentify-desktop/runs/`.
+
 ## Chat location vs coding workspace
 
 - `chatUrl`, `projectUrl`, and the persisted keyed ChatGPT location control the browser thread only.

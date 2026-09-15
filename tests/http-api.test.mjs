@@ -6366,6 +6366,87 @@ test('http-api: a base-URL keyed tab restores only its own conversation and repo
   assert.deepEqual(navigated, [conversationUrl]);
 });
 
+test('http-api: usage endpoint counts per-route calls with outcomes and persists across restart', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-tool-usage-'));
+  t.after(async () => {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    getUrl: async () => 'https://chatgpt.com/c/usage-counted',
+    readPageText: async () => 'counted page text'
+  };
+  const tabs = {
+    listTabs: () => [
+      { id: 't0', key: 'alpha', vendorId: 'chatgpt', vendorName: 'ChatGPT' },
+      { id: 't1', key: 'beta', vendorId: 'chatgpt', vendorName: 'ChatGPT' }
+    ],
+    ensureTab: async ({ key }) => (key === 'beta' ? 't1' : 't0'),
+    createTab: async ({ key }) => (key === 'beta' ? 't1' : 't0'),
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const startServer = async () => {
+    const server = await startHttpApi({
+      providerTabOperations: createProviderTabOperationLeases(),
+      port: 0,
+      token: 'secret',
+      tabs,
+      defaultTabId: 't0',
+      serverId: 'sid-test',
+      stateDir,
+      getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+      getStatus: async () => ({ ok: true })
+    });
+    return server;
+  };
+  const server = await startServer();
+  const port = server.address().port;
+
+  // Liveness is transport, not tool usage.
+  await fetch(`http://127.0.0.1:${port}/health`);
+  // Unauthorized attempts are not counted either.
+  await req({ port, token: 'wrong', method: 'GET', pth: '/usage' });
+
+  const readOk = await req({ port, token: 'secret', method: 'POST', pth: '/read-page', body: { tabId: 't0' } });
+  assert.equal(readOk.res.status, 200);
+  const readConflict = await req({ port, token: 'secret', method: 'POST', pth: '/read-page', body: { tabId: 't0', key: 'beta' } });
+  assert.equal(readConflict.res.status, 400);
+
+  const usage = await req({ port, token: 'secret', method: 'GET', pth: '/usage' });
+  assert.equal(usage.res.status, 200);
+  const counts = usage.data.counts || {};
+  assert.equal(counts['/read-page']?.count, 2);
+  assert.equal(counts['/read-page']?.errors, 1);
+  assert.equal(typeof counts['/read-page']?.responseBytes, 'number');
+  assert.ok(counts['/read-page']?.responseBytes > 0);
+  assert.equal(counts['/read-page']?.lastAt > 0, true);
+  // Transport noise and the usage endpoint itself stay out of the map.
+  assert.equal('/health' in counts, false);
+  assert.equal('/usage' in counts, false);
+
+  // Counts survive a restart on the same state directory. Wait for the
+  // debounced write to land before closing so the restart reads a full file.
+  const usageFile = path.join(stateDir, 'tool-usage.json');
+  await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await fs.readFile(usageFile, 'utf8'));
+      return persisted?.counts?.['/read-page']?.count === 2;
+    } catch {
+      return false;
+    }
+  }, { timeoutMs: 2_000, intervalMs: 20 });
+  // Drain keep-alive sockets before awaiting close, or close() never fires.
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
+  const server2 = await startServer();
+  t.after(() => server2.close());
+  const port2 = server2.address().port;
+  const usage2 = await req({ port: port2, token: 'secret', method: 'GET', pth: '/usage' });
+  assert.equal(usage2.data.counts['/read-page']?.count, 2);
+  assert.equal(usage2.data.counts['/read-page']?.errors, 1);
+});
+
 test('http-api: an explicit tab cannot bypass ownership of the same logical key', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-key-alias-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));

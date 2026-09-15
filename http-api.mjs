@@ -75,6 +75,10 @@ function sendJson(res, code, body) {
     'access-control-allow-methods': 'GET,POST,OPTIONS'
   });
   res.end(data);
+  // Per-route tool usage, attached per request after auth (see the handler).
+  // Counting here keeps every JSON response — success and error — observable
+  // at one exit point without threading context through each route.
+  try { res.__agentifyRecordUsage?.(code, Buffer.byteLength(data)); } catch {}
 }
 
 async function parseBody(req, { maxBytes = 2_000_000 } = {}) {
@@ -1062,6 +1066,62 @@ export function startHttpApi({
   function getPersistedKeyMeta(key) {
     return key ? normalizePersistedChatGptKeyMeta(keyMetaByKey[key]) : null;
   }
+
+  // Per-route tool usage: call count, error count, and cumulative response
+  // bytes per HTTP route, persisted to tool-usage.json so how agents use the
+  // API stays measurable across restarts without transcripts. responseBytes
+  // is the cost proxy for read-shaped tools; query/research output size also
+  // lands in each run's artifacts. Liveness/auth transports (/health, OPTIONS,
+  // 401/403) and /usage itself are not tool usage and stay uncounted.
+  const toolUsagePath = path.join(stateDir, 'tool-usage.json');
+  const toolUsage = { version: 1, counts: Object.create(null) };
+  let toolUsageWriteQueue = fs.readFile(toolUsagePath, 'utf8')
+    .then((raw) => {
+      const parsed = JSON.parse(raw);
+      const counts = parsed && typeof parsed === 'object' ? parsed.counts : null;
+      if (!counts || typeof counts !== 'object') return;
+      for (const [route, entry] of Object.entries(counts)) {
+        if (!entry || typeof entry !== 'object') continue;
+        toolUsage.counts[route] = {
+          count: Math.max(0, Math.floor(Number(entry.count) || 0)),
+          errors: Math.max(0, Math.floor(Number(entry.errors) || 0)),
+          responseBytes: Math.max(0, Math.floor(Number(entry.responseBytes) || 0)),
+          firstAt: Number(entry.firstAt) || Date.now(),
+          lastAt: Number(entry.lastAt) || null
+        };
+      }
+    })
+    .catch(() => {});
+  // Flushes are debounced and the timer is unref'd: a burst of responses
+  // costs one disk write, and a pending flush never keeps the process (or a
+  // test teardown) alive.
+  let toolUsageFlushTimer = null;
+  const scheduleToolUsageFlush = () => {
+    if (toolUsageFlushTimer) return;
+    toolUsageFlushTimer = setTimeout(() => {
+      toolUsageFlushTimer = null;
+      toolUsageWriteQueue = toolUsageWriteQueue
+        .catch(() => {})
+        .then(() => atomicWriteFile(toolUsagePath, `${JSON.stringify(toolUsage, null, 2)}\n`, { mode: 0o600 }))
+        .catch(() => {});
+    }, 250);
+    toolUsageFlushTimer.unref?.();
+  };
+  const recordToolUsage = (route, statusCode, responseBytes) => {
+    if (!route || route === '/health' || route === '/usage') return;
+    const entry = toolUsage.counts[route] || (toolUsage.counts[route] = {
+      count: 0,
+      errors: 0,
+      responseBytes: 0,
+      firstAt: Date.now(),
+      lastAt: null
+    });
+    entry.count += 1;
+    if (statusCode >= 400) entry.errors += 1;
+    entry.responseBytes += Math.max(0, Math.floor(Number(responseBytes) || 0));
+    entry.lastAt = Date.now();
+    scheduleToolUsageFlush();
+  };
 
   function liveContinuationError() {
     const error = new Error('conversation-not-live-bound');
@@ -3151,7 +3211,19 @@ export function startHttpApi({
 
       if (!authOk(req, tokenRef.current)) return sendJson(res, 401, { error: 'unauthorized' });
 
+      // Attached only for authenticated requests: every sendJson response on
+      // this request — success or error — lands in the per-route usage map.
+      res.__agentifyRecordUsage = (code, bytes) => recordToolUsage(url.pathname, code, bytes);
+
       const governor = await getGovernor();
+
+      if (url.pathname === '/usage' && req.method === 'GET') {
+        // Await the load so a fresh server merges the persisted map before
+        // reporting; counts themselves read from memory, so a pending
+        // debounced flush never hides a call.
+        await toolUsageWriteQueue.catch(() => {});
+        return sendJson(res, 200, { ok: true, version: toolUsage.version, counts: toolUsage.counts });
+      }
 
       if (url.pathname === '/status' && req.method === 'GET') {
         const statusBody = {
