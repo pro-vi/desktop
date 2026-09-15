@@ -2,7 +2,7 @@
 title: Token-Cost Lever Defaults
 objective: Cut the tokens agent callers burn per query and per read by moving the MCP surface's inline-payload defaults from unbounded to bounded-preview, without removing any capability an explicit parameter already offers.
 type: feat
-status: active
+status: completed
 date: 2026-09-15
 origin: docs/token-cost-paths.md (L1, L2, L4, L5; conversation 2026-09-15)
 ---
