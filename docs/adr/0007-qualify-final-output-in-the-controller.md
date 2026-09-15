@@ -25,12 +25,12 @@ The rejected alternative was classifying text at receipt creation: length thresh
 
 Positive:
 
-- Unattended callers cannot receive a transient UI state as a successful answer.
-- Unknown future transient surfaces degrade to continued observation or the existing non-success timeout, never to a wrong success.
+- Unattended callers cannot receive a transient UI state the controller recognizes — chrome banners, the observed progress-only label set, an incomplete research panel, or an image placeholder — as a successful answer.
 - The controller, HTTP, and tests share one closed vocabulary of final sources; a new surface is a controller change, not a string list in the finalizer.
 
 Negative:
 
+- Recognition is a closed vocabulary, not a semantic classifier: a stable progress label outside the recognized set (for example a localized variant such as 思考中…) matches nothing, satisfies every gate, and can still complete as receipt-backed success until the vocabulary is extended from captured live evidence. R3's ban on broad word matching accepts this residual by design.
 - A genuinely final surface the controller cannot qualify delays the caller or fails the run; live, build-identified probes are needed when the provider ships new UI states.
 - Completions on provider error surfaces (`hasError`) no longer become success artifacts; those runs now fail.
 - Every vendor's queries flow through the same wait loop, so a vendor whose final surfaces differ from ChatGPT's needs its own qualification sources added to the closed set.
