@@ -6210,6 +6210,20 @@ test('http-api: read-page rejects a contradictory explicit tabId and key before 
   // Neither target was looked up, navigated, or read.
   assert.deepEqual(controllerCalls, []);
 
+  // The URL query parameter is an explicit selector too: resolveTab accepts
+  // ?tabId=, so the conflict check must read it with the same precedence or
+  // the wrong-tab read the check exists to prevent comes back through it.
+  const urlConflict = await fetch(`http://127.0.0.1:${port}/read-page?tabId=t0`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
+    body: JSON.stringify({ key: 'beta' })
+  });
+  const urlConflictData = await urlConflict.json().catch(() => ({}));
+  assert.equal(urlConflict.status, 400);
+  assert.equal(urlConflictData.error, 'selector_conflict');
+  assert.deepEqual(urlConflictData.data, { tabId: 't0', key: 'beta', tabKey: 'alpha' });
+  assert.deepEqual(controllerCalls, []);
+
   // An agreeing pair behaves like the tab alone: no conflict, normal read.
   const agreeing = await req({
     port,
@@ -6220,6 +6234,16 @@ test('http-api: read-page rejects a contradictory explicit tabId and key before 
   });
   assert.equal(agreeing.res.status, 200);
   assert.equal(agreeing.data.text, 't1 page text');
+
+  // A URL tabId that agrees with the key still reads normally.
+  const urlAgreeing = await fetch(`http://127.0.0.1:${port}/read-page?tabId=t1`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
+    body: JSON.stringify({ key: 'beta' })
+  });
+  const urlAgreeingData = await urlAgreeing.json().catch(() => ({}));
+  assert.equal(urlAgreeing.status, 200);
+  assert.equal(urlAgreeingData.text, 't1 page text');
 });
 
 test('http-api: read-page returns resolved tab identity and served URL provenance', async (t) => {

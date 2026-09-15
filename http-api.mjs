@@ -4528,9 +4528,11 @@ export function startHttpApi({
           // differs from the supplied key, the request is contradictory and is
           // rejected before any controller lookup, navigation, or read — the
           // key must not silently re-route the resolved tab to another
-          // conversation. Query and send intentionally keep logical-key
-          // aliasing, so this check lives here, not in resolveTab.
-          const explicitTabId = body?.tabId ? String(body.tabId).trim() : '';
+          // conversation. The tabId is read with resolveTab's precedence
+          // (body first, then the URL query parameter) so the URL route
+          // cannot bypass the check. Query and send intentionally keep
+          // logical-key aliasing, so this check lives here, not in resolveTab.
+          const explicitTabId = (body?.tabId ? String(body.tabId).trim() : '') || getTabIdFromUrl(url) || '';
           const explicitKey = body?.key ? String(body.key).trim() : '';
           if (explicitTabId && explicitKey) {
             const listedTab = getTabMeta(tabs, explicitTabId);
