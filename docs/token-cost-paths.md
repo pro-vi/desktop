@@ -60,7 +60,7 @@ is the tracker; implementation commits reference their L-id.
 - Addresses: P-INLINE-OUTPUT. Saves ~1.5k typical, ~50k worst-case per call.
 - Risk: callers that parsed the unbounded inline text must opt up or read the
   artifact path every result already carries; provenance is intact.
-- Status: planned (`docs/plans/2026-09-15-001`, U1).
+- Status: shipped (L1 → `docs/plans/2026-09-15-001` U1, 2026-09-15).
 
 ### L2 — Stop double-shipping the sync query result
 

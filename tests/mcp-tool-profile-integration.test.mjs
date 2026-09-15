@@ -511,6 +511,88 @@ test('mcp wait timeout returns the latest diagnostic snapshot without mutating t
   assert.match(result.content[0].text, /phase=completed/);
 });
 
+test('mcp wait_run defaults to a bounded output preview and forwards explicit opt-ups', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-wait-preview-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const token = 'mcp-wait-preview-token';
+  const serverId = 'mcp-wait-preview-server';
+  const fullOutput = `${'X'.repeat(2_500)}MIDDLE_SENTINEL`;
+  const waitBodies = [];
+  const receipt = {
+    version: 1,
+    kind: 'assistant-response',
+    responsePath: '/tmp/agentify/runs/run-preview/response.md',
+    responseSha256: 'a'.repeat(64),
+    capturedAt: 1_700_000_000_000
+  };
+  const run = {
+    id: 'run-wait-preview',
+    kind: 'query',
+    status: 'success',
+    phase: 'completed',
+    revision: 3,
+    completionReceipt: receipt,
+    outputManifest: { responsePath: receipt.responsePath }
+  };
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/runs/wait') {
+      const body = await readJsonBody(req);
+      waitBodies.push(body);
+      const cap = Number(body.maxOutputChars) || 200_000;
+      if (body.includeOutputText === false) return sendJson(res, { ok: true, run });
+      return sendJson(res, {
+        ok: true,
+        run,
+        outputText: fullOutput.slice(0, cap),
+        outputTruncated: fullOutput.length > cap,
+        maxOutputChars: cap,
+        outputPath: receipt.responsePath
+      });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-wait-preview-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  let optedUp;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({ name: 'agentify_wait_run', arguments: { runId: run.id } });
+    optedUp = await client.callTool({
+      name: 'agentify_wait_run',
+      arguments: { runId: run.id, maxOutputChars: 200_000 }
+    });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(waitBodies[0].maxOutputChars, 2_000);
+  assert.equal(waitBodies[0].includeOutputText, true);
+  assert.equal(result.isError || false, false);
+  assert.equal(result.structuredContent.outputText.length, 2_000);
+  assert.match(result.content[0].text, /\[output truncated at 2000 chars\]/);
+  assert.match(result.content[0].text, /outputPath=\/tmp\/agentify\/runs\/run-preview\/response\.md/);
+  assert.equal(JSON.stringify(result).includes('MIDDLE_SENTINEL'), false);
+  assert.equal(waitBodies[1].maxOutputChars, 200_000);
+  assert.equal(optedUp.structuredContent.outputText.length, fullOutput.length);
+  assert.equal(JSON.stringify(optedUp).includes('MIDDLE_SENTINEL'), true);
+});
+
 test('mcp query forwards an optional live continuation binding through real stdio and preserves generic queries', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-live-continuation-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));

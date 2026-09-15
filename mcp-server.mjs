@@ -1530,7 +1530,7 @@ registerTool(
       runId: z.string().describe('Durable query or research run id. Dispatch-only send runs are unsupported.'),
       timeoutMs: z.number().optional().describe('Caller-only wait deadline. Omit or use 0 to wait indefinitely; this never changes run state.'),
       includeOutputText: z.boolean().optional().describe('Include saved response markdown. Defaults to true.'),
-      maxOutputChars: z.number().optional().describe('Maximum response characters to include.')
+      maxOutputChars: z.number().optional().describe('Maximum response characters to include. Defaults to 2000 (preview with truncation marker); pass a larger value for more, or read outputPath for the saved full response.')
     }
   },
   async ({ runId, timeoutMs, includeOutputText, maxOutputChars }) => {
@@ -1542,7 +1542,7 @@ registerTool(
         runId,
         timeoutMs: timeoutMs || 0,
         includeOutputText: includeOutputText !== false,
-        maxOutputChars
+        maxOutputChars: maxOutputChars || 2_000
       });
     } catch (error) {
       if (error?.message !== 'run_wait_timeout') throw error;
