@@ -83,7 +83,7 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(tabCreateBlock, 'expected agentify_tab_create registration block');
   assert.ok(!tabCreateBlock[0].includes('modelIntent: z.string().optional().describe('), 'tab_create should not expose sticky modelIntent');
   assert.ok(!tabCreateBlock[0].includes('modelIntent,'), 'tab_create should not forward sticky modelIntent');
-  assert.ok(src.includes("body: { model, tabId, key, maxChars: maxChars || 200_000 }"), 'expected model hint on read_page');
+  assert.ok(src.includes("body: { model, tabId, key, maxChars: maxChars || 20_000 }"), 'expected model hint on read_page');
   assert.ok(src.includes("path: '/read-conversation'"), 'expected read_conversation to hit its dedicated endpoint');
   assert.ok(src.includes("path: '/conversation-artifacts/download'"), 'expected conversation artifact download forwarding');
   assert.ok(src.includes("body: { model, tabId, key, timeoutMs: timeoutMs || 10 * 60_000 }"), 'expected model hint on ensure_ready');
