@@ -541,7 +541,9 @@ test('mcp wait_run defaults to a bounded output preview and forwards explicit op
     phase: 'completed',
     revision: 3,
     completionReceipt: receipt,
-    outputManifest: { responsePath: receipt.responsePath }
+    outputManifest: { responsePath: receipt.responsePath },
+    responseDebug: { version: 1, count: 0 },
+    recovery: { status: 'complete', reason: 'structured_conversation_capture' }
   };
   const api = http.createServer(async (req, res) => {
     if (req.url === '/health') return sendJson(res, { ok: true, serverId });
@@ -600,6 +602,64 @@ test('mcp wait_run defaults to a bounded output preview and forwards explicit op
   assert.equal(waitBodies[1].maxOutputChars, 200_000);
   assert.equal(optedUp.structuredContent.outputText.length, fullOutput.length);
   assert.equal(JSON.stringify(optedUp).includes('MIDDLE_SENTINEL'), true);
+  assert.doesNotMatch(result.content[0].text, /responseDebug=/);
+  assert.doesNotMatch(result.content[0].text, /recovery=/);
+  assert.equal(result.structuredContent.run.responseDebug.count, 0);
+  assert.equal(result.structuredContent.run.recovery.reason, 'structured_conversation_capture');
+});
+
+test('mcp wait_run keeps diagnostics in the text only for non-success outcomes', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-wait-diagnostics-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const token = 'mcp-wait-diagnostics-token';
+  const serverId = 'mcp-wait-diagnostics-server';
+  const run = {
+    id: 'run-wait-error',
+    kind: 'query',
+    status: 'error',
+    phase: 'failed',
+    revision: 2,
+    label: 'provider-error',
+    responseDebug: { version: 1, count: 0, elapsedMs: 1_200 },
+    recovery: { status: 'failed', reason: 'assistant_capture_failed' }
+  };
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/runs/wait') {
+      await readJsonBody(req);
+      return sendJson(res, { ok: true, run });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-wait-diagnostics-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({ name: 'agentify_wait_run', arguments: { runId: run.id } });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /status=error/);
+  assert.match(result.content[0].text, /responseDebug=/);
+  assert.match(result.content[0].text, /recovery=/);
+  assert.equal(result.structuredContent.run.responseDebug.elapsedMs, 1_200);
 });
 
 test('mcp query forwards an optional live continuation binding through real stdio and preserves generic queries', async (t) => {

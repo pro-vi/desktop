@@ -98,7 +98,7 @@ is the tracker; implementation commits reference their L-id.
 - Addresses: P-WAIT-NOISE. Saves ~0.1k per wait.
 - Risk: post-mortem readers must pull diagnostics from the run record (already
   persisted) instead of the wait text.
-- Status: proposed (presented 2026-09-15).
+- Status: shipped (L5 → `docs/plans/2026-09-15-001` U4, 2026-09-15).
 
 ## Open questions
 
