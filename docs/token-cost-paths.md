@@ -70,7 +70,8 @@ is the tracker; implementation commits reference their L-id.
 - Risk: depends on which field the client ingests — verify against the real
   client before claiming the saving; changing both fields at once is the safe
   form (text in `content`, metadata-only `structuredContent`).
-- Status: proposed (presented 2026-09-15; client ingestion unverified).
+- Status: shipped (L2 → `docs/plans/2026-09-15-001` U2, 2026-09-15). Client-side
+  saving stays conditional on client ingestion (residual noted above).
 
 ### L3 — Run sessions on the core tool profile
 

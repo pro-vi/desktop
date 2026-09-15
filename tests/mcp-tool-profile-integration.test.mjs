@@ -309,7 +309,7 @@ test('mcp server tools/list exposes only the selected core profile', async () =>
 
 test('mcp conversation read returns artifact metadata without duplicating the complete transcript', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-read-conversation-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const token = 'mcp-read-conversation-token';
   const serverId = 'mcp-read-conversation-server';
   const hiddenMiddle = 'MIDDLE_MUST_ONLY_EXIST_IN_THE_TRANSCRIPT_FILE';
@@ -378,7 +378,7 @@ test('mcp conversation read returns artifact metadata without duplicating the co
 
 test('mcp page read keeps plain text and exposes resolved tab provenance', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-read-page-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const token = 'mcp-read-page-token';
   const serverId = 'mcp-read-page-server';
   let requestBody = null;
@@ -434,7 +434,7 @@ test('mcp page read keeps plain text and exposes resolved tab provenance', async
 
 test('mcp wait timeout returns the latest diagnostic snapshot without mutating the run', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-wait-timeout-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const token = 'mcp-wait-timeout-token';
   const serverId = 'mcp-wait-timeout-server';
   let waitCalls = 0;
@@ -513,7 +513,7 @@ test('mcp wait timeout returns the latest diagnostic snapshot without mutating t
 
 test('mcp wait_run defaults to a bounded output preview and forwards explicit opt-ups', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-wait-preview-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const token = 'mcp-wait-preview-token';
   const serverId = 'mcp-wait-preview-server';
   const fullOutput = `${'X'.repeat(2_500)}MIDDLE_SENTINEL`;
@@ -595,7 +595,7 @@ test('mcp wait_run defaults to a bounded output preview and forwards explicit op
 
 test('mcp query forwards an optional live continuation binding through real stdio and preserves generic queries', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-live-continuation-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const requests = [];
   const token = 'mcp-live-continuation-token';
   const serverId = 'mcp-live-continuation-server';
@@ -699,9 +699,73 @@ test('mcp query forwards an optional live continuation binding through real stdi
   assert.equal(requests[1].body.prompt, 'Ordinary query');
 });
 
+test('mcp sync query carries the response text exactly once', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-single-copy-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const token = 'mcp-single-copy-token';
+  const serverId = 'mcp-single-copy-server';
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/query') {
+      await readJsonBody(req);
+      return sendJson(res, {
+        ok: true,
+        tabId: 'tab-single-copy',
+        runId: 'run-single-copy',
+        result: {
+          text: 'full response text',
+          codeBlocks: [{ language: 'js', code: 'console.log(1)' }],
+          meta: { completionEvidence: 'assistant-node' },
+          recovery: null
+        },
+        packedContext: { summary: { files: 2, chars: 100 }, chunks: ['PACKED_CONTEXT_SENTINEL'] },
+        packedContextSummary: { files: 2, chars: 100 },
+        bundle: { name: 'bundle-a' }
+      });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-single-copy-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({ name: 'agentify_query', arguments: { key: 'single-copy', prompt: 'P' } });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(result.isError || false, false);
+  assert.equal(result.content[0].text, 'full response text');
+  assert.equal(result.structuredContent.tabId, 'tab-single-copy');
+  assert.equal(result.structuredContent.runId, 'run-single-copy');
+  assert.equal(result.structuredContent.meta.completionEvidence, 'assistant-node');
+  assert.equal(result.structuredContent.packedContextSummary.files, 2);
+  assert.equal(result.structuredContent.bundle.name, 'bundle-a');
+  assert.equal('text' in result.structuredContent, false);
+  assert.equal('codeBlocks' in result.structuredContent, false);
+  assert.equal('packedContext' in result.structuredContent, false);
+  assert.equal(JSON.stringify(result).includes('console.log'), false);
+  assert.equal(JSON.stringify(result).includes('PACKED_CONTEXT_SENTINEL'), false);
+});
+
 test('mcp query surfaces the stable live-continuation guard error through real stdio', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-live-continuation-error-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const requests = [];
   const token = 'mcp-live-continuation-error-token';
   const serverId = 'mcp-live-continuation-error-server';
@@ -848,7 +912,7 @@ test('mcp server library profile exposes the exact eleven catalog and transcript
 
 test('mcp catalog tools forward authenticated HTTP through the real stdio server', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-catalog-state-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const requests = [];
   const token = 'mcp-catalog-test-token';
   const serverId = 'mcp-catalog-test-server';
@@ -1012,7 +1076,7 @@ test('mcp catalog tools forward authenticated HTTP through the real stdio server
 
 test('mcp catalog tools fail closed and redact malformed or private HTTP responses', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-catalog-redaction-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const token = 'mcp-catalog-redaction-token';
   const serverId = 'mcp-catalog-redaction-server';
   const api = http.createServer(async (req, res) => {
@@ -1146,7 +1210,7 @@ test('mcp catalog tools fail closed and redact malformed or private HTTP respons
 
 test('mcp transcript tools forward authenticated HTTP and return only safe metadata', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-transcript-state-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const requests = [];
   const token = 'mcp-transcript-test-token';
   const serverId = 'mcp-transcript-test-server';
@@ -1325,7 +1389,7 @@ test('mcp transcript tools forward authenticated HTTP and return only safe metad
 
 test('mcp transcript tools fail closed and redact malformed or private HTTP responses', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-transcript-redaction-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const token = 'mcp-transcript-redaction-token';
   const serverId = 'mcp-transcript-redaction-server';
   const privateResponseMarker = 'PRIVATE_MCP_RESPONSE_MARKER';
@@ -1465,8 +1529,8 @@ test('mcp image generation resolves and forwards reference attachments', async (
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-image-state-'));
   const mcpCwd = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-image-cwd-'));
   t.after(() => Promise.all([
-    fs.rm(stateDir, { recursive: true, force: true }),
-    fs.rm(mcpCwd, { recursive: true, force: true })
+    fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+    fs.rm(mcpCwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   ]));
   const requests = [];
   const token = 'mcp-image-test-token';

@@ -800,7 +800,7 @@ registerTool(
   'agentify_query',
   {
     description:
-      'Send a prompt to the local Agentify Desktop session and return the assistant response. To continue a Transcript Library source, pass its returned liveSourceId, sourceKey as key, and conversationUrl as chatUrl. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
+      'Send a prompt to the local Agentify Desktop session and return the assistant response. The response text is the returned text block; structuredContent is metadata only. To continue a Transcript Library source, pass its returned liveSourceId, sourceKey as key, and conversationUrl as chatUrl. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
@@ -899,18 +899,18 @@ registerTool(
         structuredContent
       };
     }
+    // The response text ships exactly once — in the content text block clients
+    // ingest. structuredContent stays metadata-only so sync results do not
+    // double the payload for clients that read both fields.
     const structuredContent = {
       runId: data.runId || null,
-      text: data.result?.text || '',
-      codeBlocks: data.result?.codeBlocks || [],
       meta: data.result?.meta || null,
       recovery: data.result?.recovery || null,
-      packedContext: data.packedContext || null,
       packedContextSummary: data.packedContextSummary || data.packedContext?.summary || null,
       bundle: data.bundle || null
     };
     return {
-      content: [{ type: 'text', text: structuredContent.text }],
+      content: [{ type: 'text', text: data.result?.text || '' }],
       structuredContent: { tabId: data.tabId || tabId || null, ...structuredContent }
     };
   }
