@@ -47,15 +47,20 @@ Each path below is one unit of work. Status moves proposed → agreed → shippe
 (landed commit named here) or dropped (reason named). `docs/token-cost-paths.md`
 is the tracker; implementation commits reference their L-id.
 
-### L1 — Cap inline output by default (wait_run / get_run)
+### L1 — Cap inline output by default (wait_run)
 
-- Change: return `outputPath` + `responseSha256` + a ~2,000-char preview by
-  default; full text becomes opt-in (`includeOutputText: true`, `maxOutputChars`
-  honored as today).
+- Change: `agentify_wait_run` defaults `maxOutputChars` to 2,000 — a preview
+  with the existing truncation marker plus artifact path and hash; full text via
+  explicit `maxOutputChars` (opt-up through the existing parameter).
+  `includeOutputText` keeps its default-true semantics. `agentify_get_run`
+  already defaults to no inline text; unchanged. Decided in
+  `docs/plans/2026-09-15-001-feat-token-cost-lever-defaults-plan.md` (preview
+  default chosen over flipping `includeOutputText` to false — callers keep the
+  wait-returns-the-answer contract).
 - Addresses: P-INLINE-OUTPUT. Saves ~1.5k typical, ~50k worst-case per call.
-- Risk: callers that parse the inline text break unless they opt in or read the
-  artifact path; the run store keeps proving completion, so provenance is intact.
-- Status: proposed (presented 2026-09-15).
+- Risk: callers that parsed the unbounded inline text must opt up or read the
+  artifact path every result already carries; provenance is intact.
+- Status: planned (`docs/plans/2026-09-15-001`, U1).
 
 ### L2 — Stop double-shipping the sync query result
 
