@@ -16,7 +16,7 @@ import { createProviderTabOperationLeases } from '../provider-tab-operation-leas
 
 async function tempState(t, name) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `agentify-sync-${name}-`));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return stateDir;
 }
 

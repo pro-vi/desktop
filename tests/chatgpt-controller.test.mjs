@@ -4070,7 +4070,7 @@ test('chatgpt-controller: query fails when attachment upload stays pending', asy
     assert.equal(pointerEvents.some((event) => event.startsWith('down:')), false);
   } finally {
     Date.now = realNow;
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -4137,7 +4137,7 @@ test('chatgpt-controller: query fails fast on direct Add files controls that can
     assert.equal(fallbackCalled, false);
   } finally {
     Date.now = realNow;
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -4190,7 +4190,7 @@ test('chatgpt-controller: query fails when attachment dialog blocks upload', asy
     controller.query({ prompt: 'agentify', attachments: [attachment], timeoutMs: 20_000 }),
     /attachment_upload_failed/
   );
-  await fs.rm(dir, { recursive: true, force: true });
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 test('chatgpt-controller: query does not treat generic attachment chrome as a successful upload', async () => {
@@ -4252,7 +4252,7 @@ test('chatgpt-controller: query does not treat generic attachment chrome as a su
     );
   } finally {
     Date.now = realNow;
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -4350,7 +4350,7 @@ test('chatgpt-controller: query proceeds when uploaded chip is present without v
     assert.equal(events.filter((event) => event.startsWith('text:')).map((event) => event.slice(5)).join(''), 'agentify');
   } finally {
     Date.now = realNow;
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -4427,7 +4427,7 @@ test('chatgpt-controller: research surfaces activation failure and progress meta
 test('chatgpt-controller: research runs under the controller mutex', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-mutex-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const realNow = Date.now;
@@ -4778,7 +4778,7 @@ test('chatgpt-controller: a changed deep research planning panel without the nat
 test('chatgpt-controller: export-mode downloads ignore cited markdown links without download hints', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-export-filter-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const controller = new ChatGPTController({
@@ -4822,7 +4822,7 @@ test('chatgpt-controller: export-mode downloads ignore cited markdown links with
 test('chatgpt-controller: image downloads deduplicate normalized source URLs and retain alt metadata', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-image-dedupe-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const controller = new ChatGPTController({
@@ -4860,7 +4860,7 @@ test('chatgpt-controller: image downloads deduplicate normalized source URLs and
 test('chatgpt-controller: generic file download escalates to research export when no links are present', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-export-generic-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   let exportChecks = 0;
@@ -4937,7 +4937,7 @@ test('chatgpt-controller: generic file download escalates to research export whe
 test('chatgpt-controller: research export opens the report view before clicking export', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-open-report-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   let exportChecks = 0;
@@ -5023,7 +5023,7 @@ test('chatgpt-controller: research export opens the report view before clicking 
 test('chatgpt-controller: research export can click nested deep research controls', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-nested-export-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   let nestedChecks = 0;
@@ -5253,7 +5253,7 @@ test('chatgpt-controller: inventory completeness remains independent from transc
 
 test('chatgpt-controller: conversation download arms capture before clicking and strips provider source', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-conversation-download-'));
-  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const descriptor = createConversationArtifactDescriptor({
     providerConversationId: 'conversation-download',
     providerMessageId: 'message-download',
@@ -5350,7 +5350,7 @@ test('chatgpt-controller: conversation download arms capture before clicking and
   assert.equal(locatorScripts.every((script) => script.includes('exactMessages[0]?.closest')), true);
 
   const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-conversation-download-outside-'));
-  t.after(async () => await fs.rm(outsideDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(outsideDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   downloadedPath = path.join(outsideDir, 'outside.md');
   downloadedSuggestedName = 'wrong.md';
   downloadOutcome = new Promise((resolve) => { resolveDownload = resolve; });
@@ -8328,7 +8328,7 @@ test('chatgpt-controller: legacy projection preserves the pre-V0 top-scroll stal
 test('chatgpt-controller: research export uses native download hook for markdown report', async (t) => {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-research-export-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const realNow = Date.now;

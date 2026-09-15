@@ -43,7 +43,7 @@ async function createFixture(t, {
   const selectedPath = path.join(directory, fileName);
   await fs.writeFile(selectedPath, contents, { mode: 0o600 });
   t.after(async () => {
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   return { directory, selectedPath };
 }

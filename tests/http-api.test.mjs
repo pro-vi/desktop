@@ -44,7 +44,7 @@ async function waitFor(check, { timeoutMs = 1_000, intervalMs = 10 } = {}) {
 
 test('http-api: requires the shared provider tab operation coordinator', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-required-tab-operations-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const tabs = {
     listTabs: () => [],
     ensureTab: async () => 't1',
@@ -125,7 +125,7 @@ test('http-api: rejects unauthorized', async (t) => {
 
 test('http-api: releases only operation scopes that reserve reports as acquired', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-unowned-operation-scope-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const releaseCalls = [];
   const providerTabOperations = {
     assertAvailable: () => {},
@@ -237,7 +237,7 @@ async function startCatalogHttp(t, catalogSync, { requestExportGrant } = {}) {
   });
   t.after(async () => {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   return { port: server.address().port };
 }
@@ -1092,7 +1092,7 @@ async function startContinuationHttp(t, {
   onList = null
 } = {}) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-transcript-continuation-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const events = [];
   let currentObservedUrl = observedUrl;
   let latestRuns = [];
@@ -1783,7 +1783,7 @@ test('http-api: post-query sync keeps its key reserved after releasing the provi
 
 test('http-api: post-query sync re-enters shared tab ownership and publishes a real snapshot', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-real-post-sync-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const conversationUrl = 'https://chatgpt.com/c/33333333-3333-8333-8333-333333333333';
   const location = locationFromConversationUrl(conversationUrl);
   const providerTabOperations = createProviderTabOperationLeases();
@@ -2192,7 +2192,7 @@ test('http-api: query returns runId and persists durable run state', async (t) =
 
 test('http-api: a query result without controller completion evidence creates no artifact, receipt, or success', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-evidence-missing-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const compatibilityTerminals = [];
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -2346,7 +2346,7 @@ test('http-api: query setup failures release the active query and every scope', 
   });
   t.after(async () => {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const port = server.address().port;
 
@@ -2471,7 +2471,7 @@ test('http-api: runs/wait follows a reconciling background query through durable
 
 test('http-api: reconciliation timeout persists diagnostics and releases its provider slot', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-reconcile-timeout-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   let queryCalls = 0;
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -2572,7 +2572,7 @@ test('http-api: reconciliation timeout persists diagnostics and releases its pro
 
 test('http-api: synchronous reconciliation timeout is typed and content-free', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-sync-reconcile-timeout-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const controller = {
     runExclusive: async (fn) => await fn(),
     query: async () => {
@@ -3876,7 +3876,7 @@ test('http-api: research is async, clamps timeout, persists outputs, and retries
 
 test('http-api: timed-out research navigation releases its provider slot for another tab', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-navigation-timeout-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   let settleNavigation;
   const navigation = new Promise((resolve) => { settleNavigation = resolve; });
   t.after(() => settleNavigation());
@@ -4043,7 +4043,7 @@ test('http-api: research merges saved bundle promptPrefix into packed prompt and
 test('http-api: research without controller completion evidence saves no artifact and stays non-success', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-placeholder-'));
   t.after(async () => {
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const researchResult = (meta) => ({
@@ -4142,7 +4142,7 @@ test('http-api: research without controller completion evidence saves no artifac
 test('http-api: research canonical response uses exported markdown when captured text is placeholder chrome', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-exported-markdown-'));
   t.after(async () => {
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   let exportedPath = null;
@@ -4413,7 +4413,7 @@ test('http-api: research reserves the underlying tab against concurrent query ca
 
 test('http-api: detached research keeps its operation leases when writing the 202 response fails', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-response-failure-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   let releaseResearch = null;
   let markResearchEntered;
   const researchEntered = new Promise((resolve) => {
@@ -5326,7 +5326,7 @@ test('http-api: operations run through controller.runExclusive when available', 
 
 test('http-api: read-conversation exposes complete transcript capture through the exclusive controller', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-read-conversation-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   let inExclusive = false;
   let received = null;
   const transcriptText = `User\n${'A'.repeat(30_000)}\n\nAssistant\n${'B'.repeat(30_000)}`;
@@ -5417,7 +5417,7 @@ test('http-api: read-conversation exposes complete transcript capture through th
 
 test('http-api: failed transcript registration removes the unpublished file', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-read-conversation-failure-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   await fs.mkdir(path.join(stateDir, 'artifacts', 'index.jsonl'), { recursive: true });
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -5523,7 +5523,7 @@ test('http-api: read-conversation enters a supplied chatUrl without sending anyt
 
 test('http-api: conversation artifact download registers successes and preserves per-item failures', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-conversation-artifacts-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const savedDescriptor = createConversationArtifactDescriptor({
     providerConversationId: 'conversation-files',
     providerMessageId: 'message-files',
@@ -5619,8 +5619,8 @@ test('http-api: rejected conversation artifact cannot delete a file outside its 
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-conversation-artifact-safety-'));
   const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-conversation-artifact-outside-'));
   t.after(async () => {
-    await fs.rm(stateDir, { recursive: true, force: true });
-    await fs.rm(outsideDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await fs.rm(outsideDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const descriptor = createConversationArtifactDescriptor({
     providerConversationId: 'conversation-safety',
@@ -5835,7 +5835,7 @@ test('http-api: route-changing operations exclude provider work across key and t
     releaseNavigate?.();
     releaseTrack?.();
     if (server.listening) await new Promise((resolve) => server.close(resolve));
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const port = server.address().port;
 
@@ -6155,7 +6155,7 @@ test('http-api: route-changing operations exclude provider work across key and t
 
 test('http-api: read-page rejects a contradictory explicit tabId and key before any controller work', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-readpage-conflict-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const controllerCalls = [];
   const recordCalls = (label) => ({
     runExclusive: async (fn) => await fn(),
@@ -6248,7 +6248,7 @@ test('http-api: read-page rejects a contradictory explicit tabId and key before 
 
 test('http-api: read-page returns resolved tab identity and served URL provenance', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-readpage-provenance-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const controllers = new Map([
     ['t0', {
       runExclusive: async (fn) => await fn(),
@@ -6314,7 +6314,7 @@ test('http-api: read-page returns resolved tab identity and served URL provenanc
 
 test('http-api: a base-URL keyed tab restores only its own conversation and reports the served URL', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-readpage-restore-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const conversationUrl = 'https://chatgpt.com/c/keyed-restored-conversation';
   await writeProjects({ gamma: { conversationUrl } }, stateDir);
   const navigated = [];
@@ -6369,7 +6369,7 @@ test('http-api: a base-URL keyed tab restores only its own conversation and repo
 test('http-api: usage endpoint counts per-route calls with outcomes and persists across restart', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-tool-usage-'));
   t.after(async () => {
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -6449,7 +6449,7 @@ test('http-api: usage endpoint counts per-route calls with outcomes and persists
 
 test('http-api: an explicit tab cannot bypass ownership of the same logical key', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-key-alias-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const providerTabOperations = createProviderTabOperationLeases();
   let releaseFirst;
   let firstStarted = false;
@@ -8480,7 +8480,7 @@ test('http-api: oversized numeric overrides are clamped to bounded ceilings', as
 test('http-api: research export forces the controller export path and registers the markdown artifact', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-research-export-'));
   t.after(async () => {
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const seen = [];

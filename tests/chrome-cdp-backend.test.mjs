@@ -215,7 +215,7 @@ test('chrome-cdp-backend: late open after cancel does not resurrect connection s
 test('chrome-cdp-backend: beginDownloadCapture waits for CDP setup before declaring readiness', async (t) => {
   const { page, calls, listeners, emit } = await createDownloadTestPage();
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-chrome-capture-'));
-  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
   const capture = page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 1_024 });
 
@@ -238,7 +238,7 @@ test('chrome-cdp-backend: beginDownloadCapture waits for CDP setup before declar
 test('chrome-cdp-backend: beginDownloadCapture cancels oversized files and removes partial output', async (t) => {
   const { page, calls, emit } = await createDownloadTestPage();
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-chrome-capture-limit-'));
-  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
   const capture = page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 8 });
   assert.equal(await capture.ready, true);

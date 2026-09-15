@@ -160,12 +160,12 @@ async function grantedArchive(t, zipBytes, {
     });
   } catch (error) {
     await fileHandle.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     throw error;
   }
   t.after(async () => {
     await closeGrantedArchive(archive).catch(() => {});
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   return archive;
 }
@@ -196,7 +196,7 @@ test('chatgpt export reader: an indeterminate close failure is symbolic and neve
   const realFileHandle = await fs.open(archivePath, 'r');
   t.after(async () => {
     await realFileHandle.close().catch(() => {});
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   let closeCalls = 0;
   const fileHandle = {

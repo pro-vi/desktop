@@ -40,7 +40,7 @@ function parseFailure(result) {
 
 test('Transcript Library E2E reporter never derives output from a private-looking filesystem error message', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-e2e-reporter-redaction-'));
-  t.after(async () => await fs.rm(directory, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const marker = 'transcript_private_journal';
   const stateFile = path.join(directory, `${marker}-${crypto.randomUUID()}`);
   await fs.writeFile(stateFile, 'not a state directory', { mode: 0o600, flag: 'wx' });

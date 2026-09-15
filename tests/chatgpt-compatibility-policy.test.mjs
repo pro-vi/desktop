@@ -164,7 +164,7 @@ test('compatibility policy: expected partial transcript reasons do not mark comp
   ]) {
     await t.test(reason, async (t) => {
       const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-policy-partial-transcript-'));
-      t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+      t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
       const store = createCompatibilityStore(stateDir, {
         contractHash: profile.contractHash,
         capabilityIds: profile.capabilities.map(({ id }) => id)

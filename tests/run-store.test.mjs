@@ -169,7 +169,7 @@ test('run-store: case-variant output kinds cannot bypass modern receipt enforcem
 
 test('run-store: response diagnostics persist as an exact content-free summary', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-response-debug-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const store = createRunStore(stateDir);
   await store.load();
   await store.create({
@@ -502,7 +502,7 @@ test('run-store: failed persistence publishes no transition and leaves memory un
 test('run-store: researchMeta persists, merges on patch, and stays out of list summaries', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-research-'));
   t.after(async () => {
-    await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const store = createRunStore(stateDir);
   await store.load();

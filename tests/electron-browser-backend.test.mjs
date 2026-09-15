@@ -456,7 +456,7 @@ test('electron-browser-backend: waitForDownload resolves completed will-download
   const session = await backend.createSession({ url: 'https://chatgpt.com/' });
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-electron-download-'));
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const pending = session.page.waitForDownload({ outDir, timeoutMs: 2_000 });
@@ -486,7 +486,7 @@ test('electron-browser-backend: beginDownloadCapture is ready before the provide
   const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
   const session = await backend.createSession({ url: 'https://chatgpt.com/' });
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-electron-capture-'));
-  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
   const capture = session.page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 1_024 });
 
@@ -515,7 +515,7 @@ test('electron-browser-backend: beginDownloadCapture cancels oversized files and
   const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
   const session = await backend.createSession({ url: 'https://chatgpt.com/' });
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-electron-capture-limit-'));
-  t.after(async () => await fs.rm(outDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
   const capture = session.page.beginDownloadCapture({ outDir, timeoutMs: 2_000, maxBytes: 8 });
   assert.equal(await capture.ready, true);
@@ -554,7 +554,7 @@ test('electron-browser-backend: waitForDownload reserves a suffixed filename whe
   const oldTime = new Date(Date.now() - 60_000);
   await fs.utimes(existingPath, oldTime, oldTime);
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const pending = session.page.waitForDownload({ outDir, timeoutMs: 2_000 });
@@ -593,7 +593,7 @@ test('electron-browser-backend: waitForDownload falls back to the newest matchin
   const oldTime = new Date(Date.now() - 60_000);
   await fs.utimes(existingPath, oldTime, oldTime);
   t.after(async () => {
-    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const pending = session.page.waitForDownload({ outDir, timeoutMs: 2_000 });

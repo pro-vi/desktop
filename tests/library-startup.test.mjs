@@ -13,7 +13,7 @@ import { createTranscriptStore } from '../transcript-store.mjs';
 
 test('library startup: one corrupt private store does not block recovery of the other', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-library-startup-'));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const blobs = createPrivateLibraryBlobStore({ stateDir });
   const initialTranscriptStore = createTranscriptStore({ stateDir, blobs });
   await initialTranscriptStore.load();

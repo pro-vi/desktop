@@ -126,7 +126,7 @@ function proxiedOperations(overrides = {}) {
 
 async function temporaryDirectory(t, label) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `agentify-catalog-sync-${label}-`));
-  t.after(async () => await fs.rm(directory, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return directory;
 }
 

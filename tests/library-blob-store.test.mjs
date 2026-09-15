@@ -35,7 +35,7 @@ function deferred() {
 
 async function tempState(t, name) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `agentify-library-${name}-`));
-  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return stateDir;
 }
 
@@ -487,7 +487,7 @@ test('library blob store: insecure file modes and a symlinked library directory 
   }
 
   const linkedStateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-library-linked-'));
-  t.after(async () => await fs.rm(linkedStateDir, { recursive: true, force: true }));
+  t.after(async () => await fs.rm(linkedStateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const outside = path.join(linkedStateDir, 'outside');
   await fs.mkdir(outside, { mode: 0o700 });
   await fs.symlink(outside, path.join(linkedStateDir, 'transcript-library'));
