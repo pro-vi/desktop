@@ -1475,6 +1475,75 @@ test('chatgpt-controller: a page without provider message ids completes on posit
   }
 });
 
+test('chatgpt-controller: stop-gone timing never starts while a stop control is visible', async () => {
+  // The 2026-09-17 probe run 1 completing snapshot: stop visible AND send
+  // found-and-enabled simultaneously (a hydration remnant). generating is
+  // false under that combination, so stop-gone timing must still be held by
+  // the visible stop itself — completion only after the stop disappears.
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  let waitForAssistantPolls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        const stopStillVisible = waitForAssistantPolls <= 6;
+        return {
+          stop: stopStillVisible,
+          stopCount: stopStillVisible ? 1 : 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: '6',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: '6',
+          providerMessageId: 'msg-new',
+          currentUrl: 'https://chatgpt.com/c/stop-contradiction'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/stop-contradiction'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({ prompt: '3+3?', timeoutMs: 60_000 });
+    assert.equal(result.text, '6');
+    assert.equal(waitForAssistantPolls > 6, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: the wait loop cannot complete on a broad container while hydrating', async () => {
   // Reproduces the 2026-09-17 probe run 1 (docs/probes/2026-09-17-turn-identity-
   // gate-probe.md): on a hydrating chatgpt-contract page only the broad

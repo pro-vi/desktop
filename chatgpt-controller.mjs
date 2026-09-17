@@ -6463,7 +6463,12 @@ export class ChatGPTController {
       // simply not match the current UI. Only block completion when there's active
       // evidence of generation (stop button or thinking state).
       const generating = (activeStop && !snap?.sendEnabled) || effectiveThinking || (activeStop && !snap?.sendFound);
-      if (generating) stopGoneAt = null;
+      // "Stop gone" means the stop control is gone: a hydrating page can show
+      // a visible stop control alongside a found-and-enabled send button, and
+      // under that contradiction generating is false — timing stop-gone from
+      // there let completion fire while the stop was still on screen
+      // (2026-09-17 probe run 1's completing snapshot).
+      if (generating || activeStop) stopGoneAt = null;
       else if (stopGoneAt == null) stopGoneAt = Date.now();
 
       const dynamicStableMs = Math.max(
@@ -6518,7 +6523,7 @@ export class ChatGPTController {
         (snap?.providerMessageId != null && snap.providerMessageId !== preSendProviderMessageId);
       const done = newResponseSeen && !progressOnlyCapture && turnIdentitySatisfied && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
-        (!generating && !effectiveThinking && fallbackStableLongEnough && contentReady));
+        (!generating && !effectiveThinking && !activeStop && fallbackStableLongEnough && contentReady));
       if (done) {
         // The 10s-gated wait debug above leaves the run record frozen at the
         // first poll; emit the completing snapshot so post-mortems see the state
