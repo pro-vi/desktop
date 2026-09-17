@@ -55,6 +55,7 @@ export function parseResponseDebug(value) {
     return typeof input === 'number' && Number.isFinite(input) && input >= 0 ? input : null;
   };
   const booleanOrNull = (input) => typeof input === 'boolean' ? input : null;
+  const stringOrNull = (input) => typeof input === 'string' && input ? input : null;
   return {
     version: 1,
     softDeadlineMs: numberOrNull(value.softDeadlineMs),
@@ -72,7 +73,9 @@ export function parseResponseDebug(value) {
     thinking: booleanOrNull(value.thinking),
     hasContinue: booleanOrNull(value.hasContinue),
     hasError: booleanOrNull(value.hasError),
-    pageTextChanged: booleanOrNull(value.pageTextChanged)
+    pageTextChanged: booleanOrNull(value.pageTextChanged),
+    providerMessageId: stringOrNull(value.providerMessageId),
+    preSendProviderMessageId: stringOrNull(value.preSendProviderMessageId)
   };
 }
 

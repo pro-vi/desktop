@@ -211,13 +211,24 @@ test('run-store: response diagnostics never coerce malformed boundary values', (
     count: null,
     stopCount: false,
     hardDeadlineMs: 20,
-    stop: true
+    stop: true,
+    providerMessageId: 42,
+    preSendProviderMessageId: ''
   });
   assert.equal(parsed.elapsedMs, null);
   assert.equal(parsed.count, null);
   assert.equal(parsed.stopCount, null);
   assert.equal(parsed.hardDeadlineMs, 20);
   assert.equal(parsed.stop, true);
+  assert.equal(parsed.providerMessageId, null);
+  assert.equal(parsed.preSendProviderMessageId, null);
+  const withIds = parseResponseDebug({
+    version: 1,
+    providerMessageId: 'msg-new',
+    preSendProviderMessageId: 'msg-old'
+  });
+  assert.equal(withIds.providerMessageId, 'msg-new');
+  assert.equal(withIds.preSendProviderMessageId, 'msg-old');
 });
 
 test('run-store: response recovery accepts only content-free closed evidence', () => {
