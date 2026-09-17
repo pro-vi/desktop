@@ -149,6 +149,33 @@ function captureExtendsAssistantBaseline(capture, baseline) {
   return current.length >= 2 && current[current.length - 2] === baseline.signature;
 }
 
+// Applies the role-qualified node basis to a wait-loop poll or pre-send
+// snapshot. The selector's broad alternatives (model-response, chat-message,
+// …) can match whole-section containers while a page hydrates; the qualifying
+// set is the matches that themselves carry data-message-author-role="assistant"
+// — the same authority the structured capture narrows by. On strict
+// (chatgpt-contract) pages a snapshot presenting only unqualified matches
+// waits (count 0) instead of capturing a container. Snapshots without a
+// qualifiedCount field pass through on the verbatim basis.
+function applyAssistantNodeBasis(snap, { roleStrict = false } = {}) {
+  if (!snap || typeof snap !== 'object') return snap;
+  const qualified = Number(snap.qualifiedCount);
+  if (Number.isFinite(qualified) && qualified > 0) {
+    return {
+      ...snap,
+      count: qualified,
+      txt: String(snap.qualifiedTxt || ''),
+      lastText: String(snap.qualifiedTxt || ''),
+      providerMessageId: snap.qualifiedProviderMessageId || null,
+      nodeBasis: 'role-qualified'
+    };
+  }
+  if (roleStrict && qualified === 0 && (Number(snap.count) || 0) > 0) {
+    return { ...snap, count: 0, txt: '', lastText: '', providerMessageId: null, nodeBasis: 'role-pending' };
+  }
+  return { ...snap, nodeBasis: 'verbatim' };
+}
+
 function looksLikeResearchShellText(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!text) return false;
@@ -6072,7 +6099,14 @@ export class ChatGPTController {
       'transcript-message-id',
       '[data-message-id]'
     ) || '');
-    const snapshot = await this.#eval(`(() => {
+    const roleSelRaw = this.#transcriptDependencySelector(
+      'transcript-message',
+      '[data-message-author-role]'
+    );
+    const roleSel = JSON.stringify(typeof roleSelRaw === 'string' && roleSelRaw.trim() ? roleSelRaw : '');
+    const roleStrict = this.uiContract?.kind === 'chatgpt' &&
+      typeof roleSelRaw === 'string' && !!roleSelRaw.trim();
+    const snapshot = applyAssistantNodeBasis(await this.#eval(`(() => {
       const nodes = Array.from(document.querySelectorAll(${assistantSel}));
       const lastNode = nodes[nodes.length - 1];
       const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
@@ -6082,8 +6116,26 @@ export class ChatGPTController {
       const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
         ? rawProviderMessageId
         : null;
-      return { count: nodes.length, lastText: (lastNode?.innerText || '').trim(), pageText, providerMessageId };
-    })()`);
+      const roleSel = ${roleSel};
+      const qualifiedNodes = roleSel
+        ? nodes.filter(n => n.getAttribute && n.getAttribute('data-message-author-role') === 'assistant')
+        : [];
+      const qualifiedLast = qualifiedNodes[qualifiedNodes.length - 1] || null;
+      const rawQualifiedProviderMessageId = qualifiedLast?.getAttribute?.('data-message-id') ||
+        (qualifiedLast && ownerSelector ? qualifiedLast.closest(ownerSelector)?.getAttribute?.('data-message-id') : '') || '';
+      const qualifiedProviderMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawQualifiedProviderMessageId)
+        ? rawQualifiedProviderMessageId
+        : null;
+      const qualifiedTxt = (qualifiedLast?.innerText || '').trim();
+      return { count: nodes.length,
+        lastText: (lastNode?.innerText || '').trim(),
+        pageText,
+        providerMessageId,
+        qualifiedCount: qualifiedNodes.length,
+        qualifiedTxt,
+        qualifiedProviderMessageId
+      };
+    })()`), { roleStrict });
     const structuredAssistantBaseline = durableObservation
       ? await this.#captureAssistantBaseline({
           preSendCount: snapshot?.count || 0,
@@ -6120,6 +6172,13 @@ export class ChatGPTController {
       'transcript-message-id',
       '[data-message-id]'
     ) || '');
+    const assistantRoleSelRaw = this.#transcriptDependencySelector(
+      'transcript-message',
+      '[data-message-author-role]'
+    );
+    const assistantRoleSel = JSON.stringify(typeof assistantRoleSelRaw === 'string' && assistantRoleSelRaw.trim() ? assistantRoleSelRaw : '');
+    const roleStrict = this.uiContract?.kind === 'chatgpt' &&
+      typeof assistantRoleSelRaw === 'string' && !!assistantRoleSelRaw.trim();
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
@@ -6202,6 +6261,17 @@ export class ChatGPTController {
         const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
           ? rawProviderMessageId
           : null;
+        const roleSel = ${assistantRoleSel};
+        const qualifiedNodes = roleSel
+          ? nodes.filter(n => n.getAttribute && n.getAttribute('data-message-author-role') === 'assistant')
+          : [];
+        const qualifiedLast = qualifiedNodes[qualifiedNodes.length - 1] || null;
+        const rawQualifiedProviderMessageId = qualifiedLast?.getAttribute?.('data-message-id') ||
+          (qualifiedLast && messageIdOwnerSelector ? qualifiedLast.closest(messageIdOwnerSelector)?.getAttribute?.('data-message-id') : '') || '';
+        const qualifiedProviderMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawQualifiedProviderMessageId)
+          ? rawQualifiedProviderMessageId
+          : null;
+        const qualifiedTxt = (qualifiedLast?.innerText || '').trim();
         const prompt = Array.from(document.querySelectorAll(${promptSel})).find(visible) ||
           Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]')).find(visible) ||
           null;
@@ -6256,7 +6326,10 @@ export class ChatGPTController {
           imageCandidateCount,
           pageText: fallbackMainText,
           currentUrl,
-          providerMessageId
+          providerMessageId,
+          qualifiedCount: qualifiedNodes.length,
+          qualifiedTxt,
+          qualifiedProviderMessageId
         };
         })()`);
         if (durableObservation) {
@@ -6269,6 +6342,7 @@ export class ChatGPTController {
         if (error?.code !== 'response_observation_deadline') throw error;
         break;
       }
+      snap = applyAssistantNodeBasis(snap, { roleStrict });
 
       const mainTxt = String(snap?.txt || '');
       const pageText = String(snap?.pageText || '');
@@ -6324,6 +6398,7 @@ export class ChatGPTController {
         baselineStopCount,
         providerMessageId: snap?.providerMessageId || null,
         preSendProviderMessageId: preSendProviderMessageId || null,
+        nodeBasis: snap?.nodeBasis || 'verbatim',
         sendFound: !!snap?.sendFound,
         sendEnabled: !!snap?.sendEnabled,
         thinking: effectiveThinking,
@@ -6452,6 +6527,7 @@ export class ChatGPTController {
             count: snap?.count || 0,
             hasError: !!snap?.hasError,
             providerMessageId: snap?.providerMessageId || null,
+            nodeBasis: snap?.nodeBasis || 'verbatim',
             modeUsed: actualMode?.intent || null,
             actualModeIntent: actualMode?.intent || null,
             actualModeLabel: actualMode?.label || null,

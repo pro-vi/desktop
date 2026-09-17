@@ -1475,6 +1475,269 @@ test('chatgpt-controller: a page without provider message ids completes on posit
   }
 });
 
+test('chatgpt-controller: the wait loop cannot complete on a broad container while hydrating', async () => {
+  // Reproduces the 2026-09-17 probe run 1 (docs/probes/2026-09-17-turn-identity-
+  // gate-probe.md): on a hydrating chatgpt-contract page only the broad
+  // container matches (count 1, zero role-qualified nodes) and its innerText
+  // is the whole page section — prompt echo, timing, footer, the answer. The
+  // loop must wait for the role-attributed node instead of capturing the
+  // container, then complete on it.
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  const chromeSoup = '3+3? Answer with the number only.\nWorked for 9s\n\nChatGPT can make mistakes. Check important info.\n\n6\nPro';
+  let waitForAssistantPolls = 0;
+  const containerSnapshot = () => ({
+    stop: waitForAssistantPolls <= 2,
+    stopCount: 0,
+    sendEnabled: waitForAssistantPolls > 2,
+    sendFound: true,
+    txt: chromeSoup,
+    count: 1,
+    usedFallback: false,
+    hasError: false,
+    hasContinue: false,
+    hasRegenerate: false,
+    isThinking: false,
+    imageCandidateCount: 0,
+    pageText: chromeSoup,
+    providerMessageId: 'cont-1',
+    qualifiedCount: 0,
+    qualifiedTxt: '',
+    qualifiedProviderMessageId: null,
+    currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/cold'
+  });
+  const qualifiedSnapshot = () => ({
+    stop: false,
+    stopCount: 0,
+    sendEnabled: true,
+    sendFound: true,
+    txt: '6 fresh section text',
+    count: 2,
+    usedFallback: false,
+    hasError: false,
+    hasContinue: false,
+    hasRegenerate: false,
+    isThinking: false,
+    imageCandidateCount: 0,
+    pageText: '6 fresh section text',
+    providerMessageId: 'cont-2',
+    qualifiedCount: 1,
+    qualifiedTxt: '6',
+    qualifiedProviderMessageId: 'msg-new',
+    currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/cold'
+  });
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) {
+        return {
+          count: 1,
+          lastText: 'previous answer section',
+          pageText: 'previous answer section',
+          providerMessageId: 'cont-0',
+          qualifiedCount: 0,
+          qualifiedTxt: '',
+          qualifiedProviderMessageId: null
+        };
+      }
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        return waitForAssistantPolls >= 6 ? qualifiedSnapshot() : containerSnapshot();
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/g/g-p-agentify/c/cold'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    },
+    uiContract: {
+      kind: 'chatgpt',
+      profile: {
+        exemptions: [
+          { dependency: 'transcript-message', selector: '[data-message-author-role]' },
+          { dependency: 'transcript-message-id', selector: '[data-message-id]' }
+        ]
+      }
+    }
+  });
+
+  try {
+    const result = await controller.query({ prompt: '3+3? Answer with the number only.', timeoutMs: 60_000 });
+    assert.equal(result.text, '6');
+    assert.equal(waitForAssistantPolls >= 6, true);
+    assert.equal(result.meta.providerMessageId, 'msg-new');
+    assert.equal(result.meta.nodeBasis, 'role-qualified');
+    assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a page whose qualified nodes never mount runs to timeout, not a container capture', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  const chromeSoup = 'section text that stays forever';
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 0, lastText: '', pageText: '' };
+      }
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: chromeSoup,
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: chromeSoup,
+          providerMessageId: 'cont-1',
+          qualifiedCount: 0,
+          qualifiedTxt: '',
+          qualifiedProviderMessageId: null,
+          currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/cold'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/g/g-p-agentify/c/cold'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    },
+    uiContract: {
+      kind: 'chatgpt',
+      profile: {
+        exemptions: [{ dependency: 'transcript-message', selector: '[data-message-author-role]' }]
+      }
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.query({ prompt: 'ask', timeoutMs: 20_000 }),
+      /timeout_waiting_for_response/
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a vendor page without the role attribute keeps the verbatim node basis', async () => {
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  let waitForAssistantPolls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 1, lastText: 'old vendor reply', pageText: 'old vendor reply' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        const mounted = waitForAssistantPolls >= 4;
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: mounted ? 'vendor answer' : 'old vendor reply',
+          count: mounted ? 2 : 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: mounted ? 'vendor answer' : 'old vendor reply',
+          currentUrl: 'https://other-vendor.example/c/degraded'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://other-vendor.example/c/degraded'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({ prompt: 'ask', timeoutMs: 60_000 });
+    assert.equal(result.text, 'vendor answer');
+    assert.equal(result.meta.nodeBasis, 'verbatim');
+    assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: the wait loop cannot complete on the previous assistant reply', async () => {
   // Reproduces the 2026-09-14 probe (docs/probes/2026-09-14-completion-qualification-
   // probe.md): after send on a project-routed conversation, the stop control alone

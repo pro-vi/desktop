@@ -75,7 +75,8 @@ export function parseResponseDebug(value) {
     hasError: booleanOrNull(value.hasError),
     pageTextChanged: booleanOrNull(value.pageTextChanged),
     providerMessageId: stringOrNull(value.providerMessageId),
-    preSendProviderMessageId: stringOrNull(value.preSendProviderMessageId)
+    preSendProviderMessageId: stringOrNull(value.preSendProviderMessageId),
+    nodeBasis: stringOrNull(value.nodeBasis)
   };
 }
 
