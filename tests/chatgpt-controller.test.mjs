@@ -1335,6 +1335,167 @@ test('chatgpt-controller: a stabilized progress-only assistant label stays trans
   }
 });
 
+test('chatgpt-controller: the wait loop cannot complete on the previous assistant reply', async () => {
+  // Reproduces the 2026-09-14 probe (docs/probes/2026-09-14-completion-qualification-
+  // probe.md): after send on a project-routed conversation, the stop control alone
+  // establishes newResponseSeen, the stop disappears, and the PREVIOUS reply's text
+  // is stable — the done condition fired on that snapshot and saved the previous
+  // turn's answer as receipt-backed success before the new node mounted (observed
+  // mount latency: seconds). The completing node must be one that did not exist at
+  // send time; turn identity, not finality.
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  let waitForAssistantPolls = 0;
+  const raceSnapshot = () => ({
+    stop: waitForAssistantPolls <= 2,
+    stopCount: 0,
+    sendEnabled: waitForAssistantPolls > 2,
+    sendFound: true,
+    txt: '4',
+    count: 1,
+    usedFallback: false,
+    hasError: false,
+    hasContinue: false,
+    hasRegenerate: false,
+    isThinking: false,
+    imageCandidateCount: 0,
+    pageText: '2+2?\n4',
+    providerMessageId: 'msg-old',
+    currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/race'
+  });
+  const mountedSnapshot = () => ({
+    stop: false,
+    stopCount: 0,
+    sendEnabled: true,
+    sendFound: true,
+    txt: '6',
+    count: 2,
+    usedFallback: false,
+    hasError: false,
+    hasContinue: false,
+    hasRegenerate: false,
+    isThinking: false,
+    imageCandidateCount: 0,
+    pageText: '3+3?\n6',
+    providerMessageId: 'msg-new',
+    currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/race'
+  });
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 1, lastText: '4', pageText: '2+2?\n4', providerMessageId: 'msg-old' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        return waitForAssistantPolls >= 8 ? mountedSnapshot() : raceSnapshot();
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/g/g-p-agentify/c/race'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({
+      prompt: '3+3? Answer with the number only.',
+      timeoutMs: 60_000,
+      durableObservation: true
+    });
+    assert.equal(result.text, '6');
+    assert.equal(result.meta.providerMessageId, 'msg-new');
+    assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a previous reply that is never replaced times out instead of completing', async () => {
+  // The race's negative pole: the new turn never mounts, so the only stable
+  // assistant node is the pre-send tail. No completion may fire on it.
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  let waitForAssistantPolls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 1, lastText: '4', pageText: '2+2?\n4', providerMessageId: 'msg-old' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        return {
+          stop: waitForAssistantPolls <= 2,
+          stopCount: 0,
+          sendEnabled: waitForAssistantPolls > 2,
+          sendFound: true,
+          txt: '4',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: '2+2?\n4',
+          providerMessageId: 'msg-old',
+          currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/race'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/g/g-p-agentify/c/race'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    await assert.rejects(
+      controller.query({ prompt: '5+5? Answer with the number only.', timeoutMs: 20_000 }),
+      /timeout_waiting_for_response/
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: only transient text through the deadline keeps the existing non-success terminal', async () => {
   const page = {
     async navigate() {},
