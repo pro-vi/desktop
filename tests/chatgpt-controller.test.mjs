@@ -5746,6 +5746,7 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
     async navigate() {},
     async evaluate(js) {
       evaluations.push(js);
+      if (js.includes('first-message probe')) return { count: 3 };
       const rawTurns = [
         { ordinal: 0, providerMessageId: 'm-1', role: 'user', text: 'First turn' },
         { ordinal: 1, providerMessageId: 'm-2', role: 'assistant', text: 'First reply' },
@@ -5801,10 +5802,167 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
     scrollPasses: 4,
     artifactInventory: { status: 'complete', items: [] }
   });
-  assert.equal(evaluations.length, 1);
-  assert.match(evaluations[0], /data-message-author-role/);
-  assert.match(evaluations[0], /scrollTop/);
-  assert.match(evaluations[0], /const cap = 16777216/);
+  assert.equal(evaluations.length, 2);
+  assert.match(evaluations[0], /first-message probe/);
+  assert.match(evaluations[1], /data-message-author-role/);
+  assert.match(evaluations[1], /scrollTop/);
+  assert.match(evaluations[1], /const cap = 16777216/);
+});
+
+test('chatgpt-controller: a hydrating conversation read waits for the first message before capturing', async () => {
+  // The 2026-08-03 cold-start shape: readConversationText ~3s after the page
+  // loads found zero mounted messages and reported conversation_messages_
+  // not_found immediately; the warm rerun captured everything. On a canonical
+  // conversation the capture now polls (bounded) for the first message.
+  let probeCalls = 0;
+  let bundleRan = false;
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'm-1', role: 'user', text: 'Question' },
+    { ordinal: 1, providerMessageId: 'm-2', role: 'assistant', text: 'Answer' }
+  ];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('first-message probe')) {
+        probeCalls += 1;
+        return { count: probeCalls >= 3 ? 2 : 0 };
+      }
+      bundleRan = true;
+      return {
+        status: 'complete',
+        rawTurns,
+        evidence: {
+          topBoundary: true,
+          bottomBoundary: true,
+          orderedWindowStitching: true,
+          messageCount: 2,
+          providerIdCount: 2,
+          byteCount: rawTurns.reduce((total, turn) =>
+            total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0),
+          windowCount: 2,
+          scrollPasses: 2
+        }
+      };
+    },
+    async getUrl() { return 'https://chatgpt.com/c/hydrating-thread'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.readConversationText({ firstMessageWaitMs: 2_000, firstMessagePollMs: 5 });
+  assert.equal(probeCalls, 3);
+  assert.equal(bundleRan, true);
+  assert.equal(result.messageCount, 2);
+  assert.equal(result.complete, true);
+});
+
+test('chatgpt-controller: a conversation whose messages never mount still reports not-found after the wait', async () => {
+  let probeCalls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('first-message probe')) {
+        probeCalls += 1;
+        return { count: 0 };
+      }
+      return {
+        status: 'partial',
+        reason: 'conversation_messages_not_found',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0,
+          windowCount: 1,
+          scrollPasses: 0
+        }
+      };
+    },
+    async getUrl() { return 'https://chatgpt.com/c/never-mounts'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const startedAt = Date.now();
+  const result = await controller.readConversationText({ firstMessageWaitMs: 60, firstMessagePollMs: 10 });
+  assert.equal(probeCalls >= 2, true);
+  assert.equal(Date.now() - startedAt >= 60, true);
+  assert.equal(result.complete, false);
+  assert.equal(result.captureReason, 'conversation_messages_not_found');
+});
+
+test('chatgpt-controller: a non-conversation read does not wait for messages', async () => {
+  const evaluations = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      evaluations.push(js);
+      return {
+        status: 'partial',
+        reason: 'conversation_messages_not_found',
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0,
+          windowCount: 1,
+          scrollPasses: 0
+        }
+      };
+    },
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.readConversationText({ firstMessageWaitMs: 60, firstMessagePollMs: 10 });
+  assert.equal(evaluations.some((js) => js.includes('first-message probe')), false);
+  assert.equal(result.complete, false);
 });
 
 test('chatgpt-controller: conversation inventory collects files from earlier virtualized windows', async () => {

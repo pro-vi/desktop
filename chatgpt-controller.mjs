@@ -989,7 +989,7 @@ export class ChatGPTController {
     return { text, truncated: totalChars > cap, totalChars };
   }
 
-  async captureConversation({ maxCaptureBytes = 4 * 1024 * 1024 } = {}) {
+  async captureConversation({ maxCaptureBytes = 4 * 1024 * 1024, firstMessageWaitMs = 10_000, firstMessagePollMs = 500 } = {}) {
     const cap = Math.max(1, Math.min(16 * 1024 * 1024, Math.floor(Number(maxCaptureBytes) || 4 * 1024 * 1024)));
     const operation = async () => await this.runCompatibilityCapability('transcript', async () => {
       const readOwnedTarget = async () => {
@@ -1032,7 +1032,9 @@ export class ChatGPTController {
         captured = before
           ? (await this.#captureConversationBundle({
               maxCaptureBytes: cap,
-              providerConversationId: before.providerConversationId
+              providerConversationId: before.providerConversationId,
+              firstMessageWaitMs,
+              firstMessagePollMs
             })).captureWindow
           : {
               status: 'partial',
@@ -1121,7 +1123,9 @@ export class ChatGPTController {
   async #captureConversationBundle({
     maxCaptureBytes,
     includeLegacyDiagnostic = false,
-    providerConversationId = null
+    providerConversationId = null,
+    firstMessageWaitMs = 10_000,
+    firstMessagePollMs = 500
   }) {
     const messageSelector = this.#transcriptDependencySelector(
       'transcript-message',
@@ -1177,6 +1181,26 @@ export class ChatGPTController {
       };
     }
     let captured;
+    // Cold-start: a just-navigated conversation can still be hydrating when
+    // the capture eval runs — its first read finds zero messages and the
+    // bundle would report conversation_messages_not_found immediately (the
+    // 2026-08-03 shape: messageCount 0 ~3s after tab creation, warm rerun
+    // fine). On canonical conversations, wait (bounded) for the first
+    // role-bearing message before capturing.
+    if (providerConversationId != null && messageSelector && firstMessageWaitMs > 0) {
+      const firstMessageDeadline = Date.now() + firstMessageWaitMs;
+      while (Date.now() < firstMessageDeadline) {
+        const probe = await this.#eval(`(() => {
+          // first-message probe for the capture bundle
+          const probeMessageSel = ${JSON.stringify(messageSelector)};
+          const count = probeMessageSel ? document.querySelectorAll(probeMessageSel).length : -1;
+          return { count };
+        })()`).catch(() => null);
+        const probeCount = Number(probe?.count);
+        if (!Number.isFinite(probeCount) || probeCount !== 0) break;
+        await sleep(firstMessagePollMs);
+      }
+    }
     try {
       captured = await this.#evalCapture(`(async () => {
       const cap = ${maxCaptureBytes};
@@ -3004,7 +3028,7 @@ export class ChatGPTController {
     return { captureWindow: captured.captureWindow, artifactInventory };
   }
 
-  async readConversationText({ maxChars = 200_000, includeTranscriptText = false } = {}) {
+  async readConversationText({ maxChars = 200_000, includeTranscriptText = false, firstMessageWaitMs = 10_000, firstMessagePollMs = 500 } = {}) {
     const projectionCap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
     const maxCaptureBytes = 16 * 1024 * 1024;
     let captureWindow;
@@ -3024,7 +3048,9 @@ export class ChatGPTController {
         async () => await this.#captureConversationBundle({
           maxCaptureBytes,
           includeLegacyDiagnostic: true,
-          providerConversationId
+          providerConversationId,
+          firstMessageWaitMs,
+          firstMessagePollMs
         })
       );
       ({ legacyDiagnosticReason = null, ...captureWindow } = capturedBundle.captureWindow);
