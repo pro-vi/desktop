@@ -2,7 +2,7 @@
 title: Cold-Start Capture Residual
 objective: The first read or query after the app spawns captures the real page state — never an empty transcript or a chrome-polluted node — without callers retrying.
 type: fix
-status: active
+status: completed
 date: 2026-09-17
 origin: conversation 2026-09-17 (probe run 1 + CLAUDE.md 2026-08-03 note); evidence docs/probes/2026-09-17-turn-identity-gate-probe.md, CLAUDE.md "Do not trust the first call after agentify_shutdown"
 ---

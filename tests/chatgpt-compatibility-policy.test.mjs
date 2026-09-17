@@ -113,7 +113,8 @@ test('compatibility policy: captureConversation fails closed on unresolved trans
   const observations = [];
   let evaluationCount = 0;
   const page = {
-    async evaluate() {
+    async evaluate(js) {
+      if (js.includes('first-message probe')) return { count: 1 };
       evaluationCount += 1;
       if (evaluationCount === 1) return null;
       return {
@@ -192,7 +193,8 @@ test('compatibility policy: expected partial transcript reasons do not mark comp
       };
       let evaluationCount = 0;
       const page = {
-        async evaluate() {
+        async evaluate(js) {
+          if (js.includes('first-message probe')) return { count: 1 };
           evaluationCount += 1;
           return evaluationCount === 1 ? resolvedRaw('assistant-message') : partialCapture;
         },

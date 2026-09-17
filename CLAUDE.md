@@ -24,11 +24,13 @@ Claude Code session
 
 Changes to an MCP tool schema (for example, adding `chatUrl` to `agentify_query` or `agentify_read_conversation`) require both reloads: restart the MCP server so the client sees the new tool schema, then run `agentify_shutdown` so Electron reloads the HTTP routing/controller implementation.
 
-### Do not trust the first call after `agentify_shutdown`
+### Do not trust the first call after `agentify_shutdown` — largely fixed 2026-09-17
 
-The respawned Electron needs a few seconds before a page is capturable, and nothing blocks a read until it is. Observed 2026-08-03: an `agentify_read_conversation` issued ~3s after tab creation returned `messageCount: 0` while `agentify_status` showed the tab already sitting on the right conversation URL and `readiness` recorded `fail` / `anchor-postcondition-failed`. The identical call on the warm app returned all six messages. Navigation had succeeded; only the capture was early.
+The respawned Electron needs a few seconds before its pages finish hydrating, and historically nothing blocked a capture until they were. Observed 2026-08-03: an `agentify_read_conversation` issued ~3s after tab creation returned `messageCount: 0` while `agentify_status` showed the right conversation URL and `readiness` recorded `fail` / `anchor-postcondition-failed`; observed again 2026-09-17 (probe run 1): the first query after spawn captured whole-section chrome (prompt echo + timing + footer + answer) as the assistant node text.
 
-This matters because the reload step above is exactly what you do before verifying a change, so a cold-start empty result reads as "my change is broken" when it is not. `readConversationText` has no readiness gate of its own, and `prepareChatEntry`'s readiness wait did not block here. Re-run the call once the app is warm before concluding anything, and prefer a warm run for any evidence you intend to report.
+As of `0d80911` (plan `2026-09-17-002`) both shapes are gated at the capture surfaces and verified live on the first post-spawn calls (`docs/probes/2026-09-17-cold-start-capture-probe.md`): the capture bundle waits (bounded ~10s) for the first role-bearing message on canonical conversations, and the wait loop completes only on a role-qualified assistant node (`meta.nodeBasis`) — never on a hydrating broad container — with no completion channel firing while a stop control is visible. Readiness itself still proves only the composer (by design: send paths must not block on transcript hydration).
+
+Residual advice: a cold capture can still take longer (the bounded wait) and unqualified pages run to their existing timeout/recovery instead of completing on a container — if a first result looks wrong, check `meta.nodeBasis` and the run's `responseDebug` before suspecting your change, and prefer a warm run for evidence you intend to report.
 
 ## Tool usage counter
 
