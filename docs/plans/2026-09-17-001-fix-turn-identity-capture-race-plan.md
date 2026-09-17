@@ -2,7 +2,7 @@
 title: Turn-Identity Capture Race Fix
 objective: Unattended callers receive the answer to the prompt they sent — never the previous turn's reply wearing a valid receipt.
 type: fix
-status: active
+status: completed
 date: 2026-09-17
 origin: /oracle row O1 (handoff emitted 2026-09-15, this conversation); evidence docs/probes/2026-09-14-completion-qualification-probe.md
 ---
