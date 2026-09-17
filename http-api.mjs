@@ -4624,7 +4624,7 @@ export function startHttpApi({
           const controller = tabs.getControllerById(tabId);
           const tabKey = (body.key ? String(body.key).trim() : '') || getTabMeta(tabs, tabId)?.key || null;
           let servedUrl = null;
-          const text = await runExclusive(controller, async () => {
+          const page = await runExclusive(controller, async () => {
             // If tab is on base URL after restart, navigate to saved conversation
             if (tabKey && typeof controller.getUrl === 'function') {
               const currentUrl = await controller.getUrl().catch(() => '');
@@ -4635,21 +4635,23 @@ export function startHttpApi({
                 await controller.ensureReady({ timeoutMs: 30_000 });
               }
             }
-            const pageText = await controller.readPageText({ maxChars });
+            const pageResult = await controller.readPageText({ maxChars });
             // Served-page provenance comes from the controller under the same
             // exclusive lease, after any restoration — never from cached tab
             // metadata, which can lag a navigation or a restart.
             servedUrl = typeof controller.getUrl === 'function'
               ? await controller.getUrl().catch(() => null)
               : null;
-            return pageText;
+            return pageResult;
           });
           return sendJson(res, 200, {
             ok: true,
             tabId,
             key: getTabMeta(tabs, tabId)?.key || null,
             servedUrl,
-            text
+            text: String(page?.text || ''),
+            truncated: page?.truncated ?? null,
+            totalChars: Number.isFinite(Number(page?.totalChars)) ? Number(page.totalChars) : null
           });
         } finally {
           releaseOperationScopes(heldScopes, op.id);

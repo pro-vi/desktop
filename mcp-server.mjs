@@ -969,7 +969,7 @@ registerTool(
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),
       key: z.string().optional().describe('Stable tab key; creates a tab if missing.'),
-      maxChars: z.number().optional().describe('Maximum characters to return. Defaults to 20000; pass a larger value for longer pages.')
+      maxChars: z.number().optional().describe('Maximum characters to return. Defaults to 20000; pass a larger value for longer pages. truncated=true means the page was cut at the cap (totalChars holds the full length); null means unknown.')
     }
   },
   async ({ model, tabId, key, maxChars }) => {
@@ -989,7 +989,9 @@ registerTool(
         ok: data.ok,
         tabId: data.tabId,
         key: data.key,
-        servedUrl: data.servedUrl
+        servedUrl: data.servedUrl,
+        truncated: data.truncated ?? null,
+        totalChars: data.totalChars ?? null
       }
     };
   }

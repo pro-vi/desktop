@@ -5433,9 +5433,48 @@ test('chatgpt-controller: readPageText falls back to nested deep research conten
     }
   });
 
-  const text = await controller.readPageText({ maxChars: 500 });
-  assert.match(text, /RAGBench and TRACe/);
+  const result = await controller.readPageText({ maxChars: 500 });
+  assert.match(result.text, /RAGBench and TRACe/);
+  assert.equal(result.truncated, null);
+  assert.equal(result.totalChars, null);
   assert.match(nestedExpression, /rootFrame\?\.contentDocument \|\| document/);
+});
+
+test('chatgpt-controller: readPageText reports exact truncation against the cap', async () => {
+  const fullPage = `${'P'.repeat(900)}END`;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      const cap = Number((js.match(/const cap = (\d+)/) || [])[1]);
+      return { text: fullPage.slice(0, cap), totalChars: fullPage.length };
+    },
+    async getUrl() { return 'https://chatgpt.com/c/truncation'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const cut = await controller.readPageText({ maxChars: 500 });
+  assert.equal(cut.text.length, 500);
+  assert.equal(cut.truncated, true);
+  assert.equal(cut.totalChars, 903);
+
+  const whole = await controller.readPageText({ maxChars: 5_000 });
+  assert.equal(whole.text, fullPage);
+  assert.equal(whole.truncated, false);
+  assert.equal(whole.totalChars, 903);
 });
 
 test('chatgpt-controller: readConversationText returns the complete virtualized transcript', async () => {

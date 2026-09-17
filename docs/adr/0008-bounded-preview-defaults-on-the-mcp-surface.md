@@ -26,7 +26,7 @@ Positive:
 Negative:
 
 - External callers relying on unbounded inline text or on `structuredContent.text` must opt up or read the artifact path; no in-repo consumer did at decision time.
-- `read_page` truncation is silent (pre-existing at 200k, more reachable at 20k) — named as the L4 residual in `docs/token-cost-paths.md`.
+- `read_page` truncation is silent (pre-existing at 200k, more reachable at 20k) — named as the L4 residual in `docs/token-cost-paths.md`. *(Amended 2026-09-17: the residual is closed — `/read-page` and `agentify_read_page` structuredContent now carry `truncated` and `totalChars`; exact on normal pages, `null`/unknown on the nested deep-research fallback.)*
 
 ## Revisit Triggers
 

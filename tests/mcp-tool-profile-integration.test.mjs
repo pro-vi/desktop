@@ -394,7 +394,9 @@ test('mcp page read keeps plain text and exposes resolved tab provenance', async
         tabId: 'tab-provenance',
         key: 'provenance-key',
         servedUrl: 'https://chatgpt.com/c/provenance-conversation',
-        text: 'page text from the resolved tab'
+        text: 'page text from the resolved tab',
+        truncated: false,
+        totalChars: 29
       });
     }
     return sendJsonStatus(res, 404, { error: 'not_found' });
@@ -438,6 +440,8 @@ test('mcp page read keeps plain text and exposes resolved tab provenance', async
   assert.equal(result.structuredContent.tabId, 'tab-provenance');
   assert.equal(result.structuredContent.key, 'provenance-key');
   assert.equal(result.structuredContent.servedUrl, 'https://chatgpt.com/c/provenance-conversation');
+  assert.equal(result.structuredContent.truncated, false);
+  assert.equal(result.structuredContent.totalChars, 29);
   assert.equal(result.isError || false, false);
 });
 

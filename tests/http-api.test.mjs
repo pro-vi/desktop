@@ -4943,7 +4943,7 @@ test('http-api: body_too_large returns 413', async (t) => {
     ensureTab: async () => 't0',
     createTab: async () => 't0',
     closeTab: async () => true,
-    getControllerById: () => ({ readPageText: async () => '' })
+    getControllerById: () => ({ readPageText: async () => ({ text: '', truncated: false, totalChars: 0 }) })
   };
   const server = await startHttpApi({
     providerTabOperations: createProviderTabOperationLeases(),
@@ -4975,7 +4975,7 @@ test('http-api: invalid JSON returns 400', async (t) => {
     ensureTab: async () => 't0',
     createTab: async () => 't0',
     closeTab: async () => true,
-    getControllerById: () => ({ readPageText: async () => '' })
+    getControllerById: () => ({ readPageText: async () => ({ text: '', truncated: false, totalChars: 0 }) })
   };
   const server = await startHttpApi({
     providerTabOperations: createProviderTabOperationLeases(),
@@ -5770,7 +5770,7 @@ test('http-api: route-changing operations exclude provider work across key and t
       rawSentAt.push(currentUrl);
       return { ok: true };
     },
-    readPageText: async () => 'redacted fixture',
+    readPageText: async () => ({ text: 'redacted fixture', truncated: false, totalChars: 16 }),
     ensureReady: async () => ({ ok: true }),
     getUrl: async () => currentUrl,
     navigate: async (to) => {
@@ -6170,7 +6170,7 @@ test('http-api: read-page rejects a contradictory explicit tabId and key before 
     ensureReady: async () => ({ ok: true }),
     readPageText: async () => {
       controllerCalls.push(`${label}:readPageText`);
-      return `${label} page text`;
+      return { text: `${label} page text`, truncated: false, totalChars: `${label} page text`.length };
     }
   });
   const tabs = {
@@ -6253,12 +6253,12 @@ test('http-api: read-page returns resolved tab identity and served URL provenanc
     ['t0', {
       runExclusive: async (fn) => await fn(),
       getUrl: async () => 'https://chatgpt.com/c/tab-zero-conversation',
-      readPageText: async () => 'tab zero text'
+      readPageText: async () => ({ text: 'tab zero text', truncated: false, totalChars: 13 })
     }],
     ['t1', {
       runExclusive: async (fn) => await fn(),
       getUrl: async () => 'https://chatgpt.com/c/tab-one-conversation',
-      readPageText: async () => 'tab one text'
+      readPageText: async () => ({ text: 'tab one text', truncated: true, totalChars: 4_000 })
     }]
   ]);
   const tabs = {
@@ -6297,6 +6297,8 @@ test('http-api: read-page returns resolved tab identity and served URL provenanc
   assert.equal(byTab.data.key, 'beta');
   assert.equal(byTab.data.servedUrl, 'https://chatgpt.com/c/tab-one-conversation');
   assert.equal(byTab.data.text, 'tab one text');
+  assert.equal(byTab.data.truncated, true);
+  assert.equal(byTab.data.totalChars, 4_000);
 
   const byKey = await req({
     port,
@@ -6328,7 +6330,7 @@ test('http-api: a base-URL keyed tab restores only its own conversation and repo
       return target;
     },
     ensureReady: async () => ({ ok: true }),
-    readPageText: async () => 'restored conversation text'
+    readPageText: async () => ({ text: 'restored conversation text', truncated: false, totalChars: 26 })
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'gamma', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
@@ -6374,7 +6376,7 @@ test('http-api: usage endpoint counts per-route calls with outcomes and persists
   const controller = {
     runExclusive: async (fn) => await fn(),
     getUrl: async () => 'https://chatgpt.com/c/usage-counted',
-    readPageText: async () => 'counted page text'
+    readPageText: async () => ({ text: 'counted page text', truncated: false, totalChars: 17 })
   };
   const tabs = {
     listTabs: () => [
@@ -8392,7 +8394,7 @@ test('http-api: oversized numeric overrides are clamped to bounded ceilings', as
     },
     readPageText: async ({ maxChars }) => {
       seen.read.push(maxChars);
-      return 'ok';
+      return { text: 'ok', truncated: false, totalChars: 2 };
     },
     downloadLastAssistantImages: async ({ maxImages, outDir }) => {
       seen.images.push(maxImages);

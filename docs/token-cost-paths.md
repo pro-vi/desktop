@@ -88,12 +88,13 @@ is the tracker; implementation commits reference their L-id.
   opt-up unchanged.
 - Addresses: P-READ-PAGE. Saves up to ~30k per unbounded read.
 - Risk: callers wanting full pages must pass `maxChars`; the HTTP default stays
-  200k for non-MCP consumers unless changed with it. Residual (named at the
-  2026-09-15 gate): the cut is silent — `readPageText` slices to the cap and
-  neither HTTP nor MCP marks truncation (pre-existing at 200k, 10x more
-  reachable at 20k). A `truncated` flag through controller→HTTP→MCP is the
-  fix; until then, text length equal to the requested cap implies a cut.
-- Status: shipped (L4 → `docs/plans/2026-09-15-001` U3, 2026-09-15).
+  200k for non-MCP consumers unless changed with it. The cut is no longer
+  silent: `readPageText` returns the pre-slice length and `/read-page` plus
+  `agentify_read_page` structuredContent carry `truncated` (exact on normal
+  pages; `null`/unknown on the nested deep-research fallback) and `totalChars`
+  (2026-09-17).
+- Status: shipped (L4 → `docs/plans/2026-09-15-001` U3, 2026-09-15;
+  truncation flag 2026-09-17).
 
 ### L5 — Trim wait-result debug noise
 

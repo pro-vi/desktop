@@ -927,8 +927,9 @@ export class ChatGPTController {
   }
 
   async readPageText({ maxChars = 200_000 } = {}) {
-    let text = await this.#eval(`(() => {
-      const cap = ${maxChars};
+    const cap = Math.max(0, Math.floor(Number(maxChars) || 0));
+    const result = await this.#eval(`(() => {
+      const cap = ${cap};
       const clean = (s) => String(s || '').replace(/\\u0000/g, '').replace(/\\s+\\n/g, '\\n').trim();
       const root = document.querySelector('main') || document.body || document.documentElement;
 
@@ -944,14 +945,21 @@ export class ChatGPTController {
         txt = clean(hints.join('\\n'));
       }
 
-      return txt.slice(0, cap);
+      // Return the pre-slice length so the caller can tell the text was cut —
+      // a silent slice turns a capped read into a convincing whole page.
+      return { text: txt.slice(0, cap), totalChars: txt.length };
     })()`);
-    text = String(text || '');
+    const text = String(result?.text || '');
+    const totalChars = Number.isFinite(Number(result?.totalChars)) ? Number(result.totalChars) : text.length;
     if (!text || looksLikeResearchShellText(text)) {
       const deepText = await this.#readDeepResearchText({ maxChars }).catch(() => '');
-      if (deepText) return deepText;
+      if (deepText) {
+        // The nested reader caps internally without exposing the pre-slice
+        // length; this branch's truncation state is unknown, not false.
+        return { text: deepText, truncated: null, totalChars: null };
+      }
     }
-    return text;
+    return { text, truncated: totalChars > cap, totalChars };
   }
 
   async captureConversation({ maxCaptureBytes = 4 * 1024 * 1024 } = {}) {
