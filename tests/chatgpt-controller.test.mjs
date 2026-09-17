@@ -1301,6 +1301,7 @@ test('chatgpt-controller: a stabilized progress-only assistant label stays trans
           isThinking: false,
           imageCandidateCount: 0,
           pageText: labelPhase ? 'prior answer' : txt,
+          providerMessageId: 'new-answer',
           currentUrl: 'https://chatgpt.com/c/pro-thinking-label'
         };
       }
@@ -1329,6 +1330,145 @@ test('chatgpt-controller: a stabilized progress-only assistant label stays trans
     });
     assert.equal(result.text, 'I did some thinking about your question; the answer is 42.');
     assert.equal(waitForAssistantPolls >= 5, true);
+    assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a completing node without a provider message id cannot finish an id-bearing page', async () => {
+  // Fail-closed pole of the turn-identity gate: the page exposed the pre-send
+  // tail's id, a new node mounted, but its id attribute has not landed yet —
+  // the run must keep observing until the id appears, never complete on the
+  // unidentified node.
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  let waitForAssistantPolls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 1, lastText: '4', pageText: '2+2?\n4', providerMessageId: 'msg-old' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        const idLanded = waitForAssistantPolls >= 6;
+        return {
+          stop: waitForAssistantPolls <= 2,
+          stopCount: 0,
+          sendEnabled: waitForAssistantPolls > 2,
+          sendFound: true,
+          txt: '6',
+          count: 2,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: '3+3?\n6',
+          providerMessageId: idLanded ? 'msg-new' : null,
+          currentUrl: 'https://chatgpt.com/g/g-p-agentify/c/idless'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/g/g-p-agentify/c/idless'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({ prompt: '3+3?', timeoutMs: 60_000 });
+    assert.equal(result.text, '6');
+    assert.equal(result.meta.providerMessageId, 'msg-new');
+    assert.equal(waitForAssistantPolls >= 6, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a page without provider message ids completes on positional advancement and records the absence', async () => {
+  // Degradation pole: neither the pre-send tail nor the polls expose an id
+  // (vendor or page without data-message-id). The gate is off; today's
+  // count-growth advancement completes the run, and the meta records that no
+  // provider id was available.
+  const realNow = Date.now;
+  let fakeNow = 3_000_000;
+  Date.now = () => {
+    fakeNow += 400;
+    return fakeNow;
+  };
+
+  let waitForAssistantPolls = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 1, lastText: 'old reply', pageText: 'old reply' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('codeBlocks')) return { codeBlocks: [] };
+      if (js.includes('fallbackMainText') && js.includes('imageCandidateCount')) {
+        waitForAssistantPolls += 1;
+        const mounted = waitForAssistantPolls >= 5;
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: mounted ? 'fresh answer' : 'old reply',
+          count: mounted ? 2 : 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          imageCandidateCount: 0,
+          pageText: mounted ? 'fresh answer' : 'old reply',
+          currentUrl: 'https://chatgpt.com/g/other-vendor/c/degraded'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/g/other-vendor/c/degraded'; },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({ page, selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]',
+    assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+
+  try {
+    const result = await controller.query({ prompt: 'ask', timeoutMs: 60_000 });
+    assert.equal(result.text, 'fresh answer');
+    assert.equal(result.meta.providerMessageId, null);
     assert.equal(result.meta.completionEvidence?.source, 'assistant-node');
   } finally {
     Date.now = realNow;

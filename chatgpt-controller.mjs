@@ -6094,6 +6094,7 @@ export class ChatGPTController {
     preSendText = '',
     preSendPageText = '',
     preSendStopCount = 0,
+    preSendProviderMessageId = null,
     minimumTimeoutMs = 0,
     minimumStableMs = 0,
     extraThinkingPattern = '',
@@ -6107,6 +6108,10 @@ export class ChatGPTController {
   } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+    const assistantOwnerSel = JSON.stringify(this.#transcriptDependencySelector(
+      'transcript-message-id',
+      '[data-message-id]'
+    ) || '');
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
@@ -6183,6 +6188,12 @@ export class ChatGPTController {
         const sendFound = !!send;
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
+        const messageIdOwnerSelector = ${assistantOwnerSel};
+        const messageIdOwner = lastNode && messageIdOwnerSelector ? lastNode.closest(messageIdOwnerSelector) : null;
+        const rawProviderMessageId = lastNode?.getAttribute?.('data-message-id') || messageIdOwner?.getAttribute?.('data-message-id') || '';
+        const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
+          ? rawProviderMessageId
+          : null;
         const prompt = Array.from(document.querySelectorAll(${promptSel})).find(visible) ||
           Array.from(document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"], textarea, [role="textbox"], [contenteditable="true"]')).find(visible) ||
           null;
@@ -6236,7 +6247,8 @@ export class ChatGPTController {
           isThinking,
           imageCandidateCount,
           pageText: fallbackMainText,
-          currentUrl
+          currentUrl,
+          providerMessageId
         };
         })()`);
         if (durableObservation) {
@@ -6302,6 +6314,8 @@ export class ChatGPTController {
         rawStop: !!snap?.stop,
         stopCount,
         baselineStopCount,
+        providerMessageId: snap?.providerMessageId || null,
+        preSendProviderMessageId: preSendProviderMessageId || null,
         sendFound: !!snap?.sendFound,
         sendEnabled: !!snap?.sendEnabled,
         thinking: effectiveThinking,
@@ -6382,7 +6396,18 @@ export class ChatGPTController {
       // the surface settled: keep observing until real output or the existing
       // reconciliation timeout.
       const progressOnlyCapture = isProgressOnlyAssistantText(txt);
-      const done = newResponseSeen && !progressOnlyCapture && (
+      // Turn identity: when the page exposed the pre-send tail's provider
+      // message id, only a completing node whose id differs may finish the run.
+      // The stop control alone proves generation started, not that the observed
+      // node is the new reply — on project-routed conversations the previous
+      // reply stays mounted and stable while the new turn takes seconds to
+      // mount (2026-09-14 probe: "3+3"/"5+5" captured the previous answers as
+      // receipt-backed success). Pages that expose no id degrade to the
+      // positional/textual advancement above, with the absence recorded in the
+      // result meta.
+      const turnIdentitySatisfied = preSendProviderMessageId == null || nestedResearchReport ||
+        (snap?.providerMessageId != null && snap.providerMessageId !== preSendProviderMessageId);
+      const done = newResponseSeen && !progressOnlyCapture && turnIdentitySatisfied && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
         (!generating && !effectiveThinking && fallbackStableLongEnough && contentReady));
       if (done) {
@@ -6418,6 +6443,7 @@ export class ChatGPTController {
           meta: {
             count: snap?.count || 0,
             hasError: !!snap?.hasError,
+            providerMessageId: snap?.providerMessageId || null,
             modeUsed: actualMode?.intent || null,
             actualModeIntent: actualMode?.intent || null,
             actualModeLabel: actualMode?.label || null,
@@ -6579,6 +6605,7 @@ export class ChatGPTController {
         preSendText: prePrompt?.lastText || '',
         preSendPageText: prePrompt?.pageText || '',
         preSendStopCount: sendDebug?.initialStopCount || 0,
+        preSendProviderMessageId: prePrompt?.providerMessageId || null,
         imageGeneration,
         durableObservation,
         reconcileGraceMs,
@@ -7155,6 +7182,7 @@ export class ChatGPTController {
           preSendText: preSend?.lastText || '',
           preSendPageText: preSend?.pageText || '',
           preSendStopCount: sendDebug?.initialStopCount || 0,
+          preSendProviderMessageId: preSend?.providerMessageId || null,
           minimumTimeoutMs: 60 * 60_000,
           minimumStableMs: 60_000,
           durableObservation: true,
