@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
 import { ensureToken, writeState } from '../state.mjs';
 import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from '../mcp-lib.mjs';
+
+const repoDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 async function tempDir() {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-desktop-test-'));
@@ -135,9 +138,12 @@ test('mcp-lib: ensureDesktopRunning resolves bundled electron relative to deskto
 
     const conn = await ensureDesktopRunning({ stateDir: dir, fetchImpl, spawnImpl, timeoutMs: 3000 });
     assert.equal(conn.serverId, 'sid-new');
+    // The binary and entry must resolve from the package's own directory,
+    // regardless of cwd or what the checkout folder happens to be named.
     assert.equal(path.isAbsolute(spawnedCmd), true);
-    assert.match(spawnedCmd, /desktop[\\/]+node_modules[\\/]+\.bin[\\/]+electron(?:\.cmd)?$/);
-    assert.equal(spawnedArgs?.[0]?.endsWith(path.join('desktop', 'main.mjs')), true);
+    assert.equal(spawnedCmd, path.join(repoDir, 'node_modules', '.bin', process.platform === 'win32' ? 'electron.cmd' : 'electron'));
+    assert.equal(spawnedArgs?.[0], path.join(repoDir, 'main.mjs'));
+    assert.equal(spawnedCmd.startsWith(fakeCwd), false);
   } finally {
     process.chdir(originalCwd);
   }

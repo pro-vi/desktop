@@ -56,7 +56,12 @@ test('compatibility store: writes mode 0600 before publish and serializes tabs',
   store.subscribe((state) => publications.push(state.revision));
   const first = store.record(event('fail'));
   const second = store.record(event('fail'));
-  for (let i = 0; i < 20 && writes.length === 0; i++) {
+  // Bounded real-time wait for the first write call: record() reaches the
+  // injected writeFile through a real-ENOENT load and the serialization
+  // queue, which can take longer than a fixed handful of loop turns when
+  // parallel test files saturate the fs threadpool.
+  const waitDeadline = Date.now() + 2_000;
+  while (writes.length === 0 && Date.now() < waitDeadline) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.deepEqual(publications, []);
