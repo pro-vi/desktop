@@ -2,7 +2,7 @@
 title: CI Gate, Probe Convention, Clean-Environment Acceptance
 objective: A push to main is verified only by a green CI run for its exact SHA on the local Tart runners — the check of record, post-push detection rather than prevention; the oracle bank's remaining rows close with it.
 type: feat
-status: active
+status: completed
 date: 2026-09-18
 origin: /oracle rows O2/O3/O4 (re-ranked in conversation 2026-09-17/18: O3 full gap, O2 shrunk to convention + deferred runner, O4 folds as the acceptance ceremony)
 ---
