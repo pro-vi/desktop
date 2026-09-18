@@ -10,6 +10,13 @@ import test from 'node:test';
 const execFileAsync = promisify(execFile);
 const repoDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const runner = path.join(repoDir, 'scripts', 'visual-proof-transcript-library.mjs');
+// These proofs launch a real Electron renderer, so they need a display
+// server. Headless Linux CI has none (DISPLAY unset) — skip there with the
+// reason stated; any environment that provides a display (macOS local runs,
+// a future xvfb or macOS CI lane) runs them for real.
+const needsDisplaySkip = process.platform === 'linux' && !process.env.DISPLAY
+  ? 'visual proof needs a real Electron renderer; no display server on this host — run on a GUI host (see BACKLOG.md GUI CI lane)'
+  : false;
 const evidencePrefix = 'agentify-transcript-library-visual-proof-';
 const forbiddenMarkers = [
   'VISUAL_PROOF_PRIVATE_TRANSCRIPT_SENTINEL',
@@ -67,7 +74,7 @@ function assertCleanPrivacyEvidence(privacy) {
   }
 }
 
-test('visual proof captures the actual Electron renderer states and emits review-gated manifests', { timeout: 90_000 }, async (t) => {
+test('visual proof captures the actual Electron renderer states and emits review-gated manifests', { timeout: 90_000, skip: needsDisplaySkip }, async (t) => {
   let evidenceDir = null;
   t.after(async () => {
     if (evidenceDir) await removeOwnedEvidenceDirectory(evidenceDir);
@@ -187,7 +194,7 @@ test('visual proof captures the actual Electron renderer states and emits review
   }
 });
 
-test('visual proof privacy verdicts fail when a boundary sentinel reaches rendered text or captured diagnostics', { timeout: 60_000 }, async () => {
+test('visual proof privacy verdicts fail when a boundary sentinel reaches rendered text or captured diagnostics', { timeout: 60_000, skip: needsDisplaySkip }, async () => {
   const renderedLeak = await runRunner(['capture', '--privacy-probe', 'rendered-transcript-body']);
   assert.equal(renderedLeak.output.status, 'privacy-probe-observed');
   assert.equal(renderedLeak.output.verdict, 'fail');

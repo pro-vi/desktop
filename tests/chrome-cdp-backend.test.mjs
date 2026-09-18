@@ -594,7 +594,10 @@ test('chrome-cdp-backend: dispose resets started state and clears stale tab clos
 
 test('chrome-cdp-backend: start does not reuse a disconnected client as healthy state', async () => {
   let connectCalls = 0;
-  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state' });
+  // This test stubs fetch and WebSocket and never talks to a real browser;
+  // pin a universally-present executable so the launch step does not depend
+  // on a host Chrome install (absent on headless Linux CI).
+  const backend = new ChromeCdpBrowserBackend({ stateDir: '/tmp/agentify-test-state', executablePath: '/usr/bin/true' });
   backend.started = true;
   backend.client = {
     connected: false,
