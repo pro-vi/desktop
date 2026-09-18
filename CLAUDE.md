@@ -48,6 +48,18 @@ curl -s "http://127.0.0.1:$PORT/usage" -H "authorization: Bearer $TOKEN" | pytho
 
 Counts start from the instance's first run on a build that has the counter (2026-09-15); they do not backfill history. Query/research output sizes additionally live in each run record under `~/.agentify-desktop/runs/`.
 
+## Canonical gate (2026-09-18)
+
+`npm test` is the fast local command — the full stub-based suite, no Electron launch, minutes. The check of record is the Tart CI run: every push to `main` fires `.github/workflows/ci.yml` on the household Linux VM (`[self-hosted, Linux, ARM64, tart]`, Node 24, `npm ci && npm test`, 30-min timeout). Jobs queue up to 24h while the laptop sleeps — a queued run is not a missing one.
+
+**Verification contract:** a revision is verified only by a successful CI run for its exact SHA; missing, queued, canceled, or overdue evidence does not verify it. After pushing to `main`, work that depends on the push is not done until the run for that SHA is green (`gh run list -R pro-vi/desktop --branch main`, or the SHA-scoped `actions/runs?head_sha=` API) or the push is explicitly recorded as unresolved. `workflow_dispatch` is also armed — `gh workflow run ci.yml -R pro-vi/desktop --ref main` — and doubles as the diagnostic path when a push does not seem to fire (dispatch works even when push delivery does not, separating trigger delivery from runner pickup).
+
+Optional local pre-push convenience (documented, never auto-installed): `npm test && git push`. The workflow has no `pull_request` trigger on purpose (a fork PR would run untrusted code on the shared household runner) and no concurrency group on purpose (nothing to supersede without PRs; every SHA keeps its own run).
+
+## Live provider probes
+
+Probes against the real ChatGPT surface need explicit scoped consent from the user for that probe before anything is sent. Follow the exemplar skeleton under `docs/probes/` (respawn via `agentify_shutdown` → exercise one bounded behavior → verify against the run record → record under `docs/probes/YYYY-MM-DD-<name>.md` → close the tab). A reusable consent-gated probe runner is deferred in `BACKLOG.md` with a reopen trigger, not silently dropped.
+
 ## Chat location vs coding workspace
 
 - `chatUrl`, `projectUrl`, and the persisted keyed ChatGPT location control the browser thread only.
