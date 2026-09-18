@@ -826,6 +826,7 @@ test('mcp sync query carries the response text exactly once', async (t) => {
 
   assert.equal(result.isError || false, false);
   assert.equal(result.content[0].text, 'full response text');
+  assert.equal(result.content[1].text, 'transcript=/tmp/agentify/runs/run-single-copy/snapshot.json\nturn=msg-9');
   assert.equal(result.structuredContent.providerMessageId, 'msg-9');
   assert.equal(result.structuredContent.transcript.state, 'ready');
   assert.equal(result.structuredContent.transcript.snapshotPath, '/tmp/agentify/runs/run-single-copy/snapshot.json');

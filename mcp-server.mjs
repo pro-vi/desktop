@@ -918,8 +918,23 @@ registerTool(
       packedContextSummary: data.packedContextSummary || data.packedContext?.summary || null,
       bundle: data.bundle || null
     };
+    // The answer rides the first text block; the transcript pointer rides a
+    // second compact block — structuredContent alone is not something every
+    // client surfaces to the model, and the pointer is the durable way to
+    // read this conversation selectively.
+    const contentBlocks = [{ type: 'text', text: data.result?.text || '' }];
+    if (data.transcript?.state || data.providerMessageId) {
+      const pointerLines = [];
+      if (data.transcript?.state === 'ready' && data.transcript.snapshotPath) {
+        pointerLines.push(`transcript=${data.transcript.snapshotPath}`);
+      } else if (data.transcript?.state) {
+        pointerLines.push(`transcript_state=${data.transcript.state}`);
+      }
+      if (data.providerMessageId) pointerLines.push(`turn=${data.providerMessageId}`);
+      if (pointerLines.length) contentBlocks.push({ type: 'text', text: pointerLines.join('\n') });
+    }
     return {
-      content: [{ type: 'text', text: data.result?.text || '' }],
+      content: contentBlocks,
       structuredContent: {
         tabId: data.tabId || tabId || null,
         ...structuredContent,
