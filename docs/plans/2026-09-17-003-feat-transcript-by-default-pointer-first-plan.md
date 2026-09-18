@@ -2,7 +2,7 @@
 title: Transcript by Default, Pointer-First Results
 objective: Every keyed conversation gets a durable local transcript file by default, and query results lead with a pointer to it — agents read and grep the chat like a local file instead of pulling inline payloads.
 type: feat
-status: active
+status: completed
 date: 2026-09-17
 origin: conversation 2026-09-17 (the user's "chat as a queryable local file" ideal; three-gaps analysis; confirmation to architect)
 ---

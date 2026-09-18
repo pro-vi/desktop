@@ -32,6 +32,10 @@ As of `0d80911` (plan `2026-09-17-002`) both shapes are gated at the capture sur
 
 Residual advice: a cold capture can still take longer (the bounded wait) and unqualified pages run to their existing timeout/recovery instead of completing on a container — if a first result looks wrong, check `meta.nodeBasis` and the run's `responseDebug` before suspecting your change, and prefer a warm run for evidence you intend to report.
 
+## Transcript by default (2026-09-17)
+
+Every successful keyed text query on a canonical conversation auto-tracks a Transcript Library source (idempotent by conversation identity) and publishes a whole-conversation snapshot after finalize, detached from the response. The run record's `outputManifest.transcript` carries the lifecycle — `pending` at finalize, `ready` only when the committed snapshot verifiably contains the run's answer turn (`meta.providerMessageId`), `failed`/`not_applicable` with explicit reasons otherwise; stranded pendings reconcile at startup. The snapshot is a local JSON file (`~/.agentify-desktop/transcript-library/blobs/snapshot/…`) — agents read/grep it directly; `transcript=`/`turn=` lines ride wait/get results. Blocking paths grace-wait ≤2s; a `pending` after that settles in the record shortly.
+
 ## Tool usage counter
 
 Every authenticated HTTP response is counted per route (calls, errors, cumulative response bytes) and persisted to `<stateDir>/tool-usage.json`. `/health`, OPTIONS, 401/403, and `/usage` itself are excluded. Read it without transcripts:
