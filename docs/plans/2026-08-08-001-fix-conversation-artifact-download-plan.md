@@ -2,7 +2,7 @@
 title: Conversation Artifact Capture
 objective: Agentify reports and retrieves files attached anywhere in a ChatGPT conversation without opening a native Save dialog.
 type: fix
-status: active
+status: completed
 date: 2026-08-08
 origin: standalone conversation and live probe of https://chatgpt.com/c/6a759b6a-7b5c-83e8-b94e-9cb65ff2de27
 ---

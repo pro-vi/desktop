@@ -2,7 +2,7 @@
 title: Transcript Library Program Design
 objective: Preserve live and exported ChatGPT conversations as identity-stable, immutable, citable source material that coding agents can retrieve and continue safely.
 type: feat
-status: approved-for-build
+status: completed
 date: 2026-07-30
 origin: chat architecture + Fable second-opinion adjudication
 ---
