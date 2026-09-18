@@ -337,6 +337,30 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     });
   }
 
+  // The one mutation permitted on finalized runs: the transcript block inside
+  // outputManifest, written by post-query transcript publication. A ready
+  // attachment is fixed — later snapshots of the same conversation attach to
+  // their own runs, never re-point this one.
+  async function attachTranscript(runId, transcript = null) {
+    const id = assertRunId(runId);
+    if (!transcript || typeof transcript !== 'object' || typeof transcript.state !== 'string') {
+      throw new Error('transcript_state_required');
+    }
+    return await enqueueRunOp(id, async () => {
+      const current = records.get(id);
+      if (!current) throw new Error('run_not_found');
+      if (current.outputManifest?.transcript?.state === 'ready') return safeClone(current);
+      const next = normalizeRun({
+        ...current,
+        outputManifest: { ...(current.outputManifest || {}), transcript },
+        id,
+        startedAt: current.startedAt,
+        updatedAt: Date.now()
+      });
+      return await writeRecord(next);
+    });
+  }
+
   async function finalize(runId, patchData = {}) {
     const id = assertRunId(runId);
     return await enqueueRunOp(id, async () => {
@@ -423,6 +447,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     load,
     create,
     patch,
+    attachTranscript,
     finalize,
     finalizeStaleRunning,
     archive,

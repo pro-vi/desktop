@@ -1080,7 +1080,8 @@ async function startContinuationHttp(t, {
   observedUrl = 'https://chatgpt.com/c/thread-123',
   queryError = null,
   queryResultUrl = null,
-  syncImpl = async () => ({ status: 'complete' }),
+  inspectTurnIds = ['message-2'],
+  syncImpl = async () => ({ outcome: { kind: 'complete', snapshot: { hash: 'f'.repeat(64), contentHash: 'e'.repeat(64) } }, source: { key: 'thread-key' } }),
   maxInflightQueries = 2,
   sourcePatch = {},
   sourceTabPatch = {},
@@ -1122,7 +1123,7 @@ async function startContinuationHttp(t, {
           currentObservedUrl = queuedNavigationUrl;
         }).catch(() => {});
       }
-      return { text: 'receipt-backed continuation', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
+      return { text: 'receipt-backed continuation', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 }, providerMessageId: 'message-2' } };
     },
     navigate: async (targetUrl) => {
       events.push(['navigate', targetUrl]);
@@ -1202,7 +1203,15 @@ async function startContinuationHttp(t, {
       statusAtSync = latestRuns.find((run) => run.status === 'success')?.status || null;
       events.push(['sync', sourceId, trigger]);
       return await syncImpl();
-    }
+    },
+    inspectSnapshot: async () => ({
+      turnIds: inspectTurnIds,
+      snapshotPath: path.join(stateDir, 'snapshot-fixture.json'),
+      snapshotHash: 'f'.repeat(64),
+      contentHash: 'e'.repeat(64),
+      turnCount: inspectTurnIds.length,
+      characterCount: 42
+    })
   };
   const server = await startHttpApi({
     providerTabOperations: createProviderTabOperationLeases(),
@@ -1264,6 +1273,7 @@ test('http-api: receipt-backed continuation and retry invoke the same post-query
   });
   assert.equal(query.res.status, 200);
   assert.equal(query.data.result.text, 'receipt-backed continuation');
+  await waitFor(() => started.getStatusAtSync() === 'success');
   assert.equal(started.getStatusAtSync(), 'success');
   assertLiveSequence(started.events);
   assert.equal(started.events.find(([kind]) => kind === 'prepare')[1], 'https://chatgpt.com/c/thread-123');
@@ -1289,6 +1299,7 @@ test('http-api: receipt-backed continuation and retry invoke the same post-query
   });
   assert.equal(retried.res.status, 200);
   assert.equal(retried.data.result.text, 'receipt-backed continuation');
+  await waitFor(() => started.events.slice(beforeRetry).some(([kind]) => kind === 'sync'));
   assertLiveSequence(started.events.slice(beforeRetry));
 });
 
@@ -1723,62 +1734,115 @@ test('http-api: generic queries preserve non-library behavior and provider failu
 });
 
 test('http-api: post-query sync keeps its key reserved after releasing the provider slot', async (t) => {
-  let releaseSync;
-  let syncStarted = false;
-  const syncGate = new Promise((resolve) => { releaseSync = resolve; });
-  const started = await startContinuationHttp(t, {
-    maxInflightQueries: 1,
-    syncImpl: async () => {
-      syncStarted = true;
-      await syncGate;
-      return { status: 'complete' };
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-key-reserved-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const conversationUrl = 'https://chatgpt.com/c/44444444-4444-8444-8444-444444444444';
+  const location = locationFromConversationUrl(conversationUrl);
+  const providerTabOperations = createProviderTabOperationLeases();
+  let releaseCapture;
+  const captureGate = new Promise((resolve) => { releaseCapture = resolve; });
+  const rawTurns = [
+    { ordinal: 0, providerMessageId: 'message-1', role: 'user', text: 'Fixture prompt' },
+    { ordinal: 1, providerMessageId: 'message-2', role: 'assistant', text: 'Fixture reply' }
+  ];
+  const capture = {
+    status: 'complete',
+    conversationUrl,
+    capturedAt: '2026-08-08T12:00:00.000Z',
+    rawTurns,
+    evidence: {
+      topBoundary: true,
+      bottomBoundary: true,
+      orderedWindowStitching: true,
+      scrollPasses: 1,
+      windowCount: 1,
+      messageCount: rawTurns.length,
+      providerIdCount: rawTurns.length,
+      byteCount: 42
     }
+  };
+  let captureEntered = false;
+  const controller = {
+    runExclusive: async (operation) => await operation(),
+    prepareChatEntry: async () => {},
+    query: async () => ({ text: 'receipt-backed continuation', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } }),
+    getUrl: async () => conversationUrl,
+    captureConversation: async () => {
+      captureEntered = true;
+      await captureGate;
+      return capture;
+    }
+  };
+  const listedTabs = [{ id: 't0', key: 'gated-key', vendorId: 'chatgpt', vendorName: 'ChatGPT' }];
+  const tabs = {
+    listTabs: () => listedTabs,
+    ensureTab: async ({ key }) => listedTabs.find((tab) => tab.key === key)?.id || 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller,
+    updateTabMeta: () => {}
+  };
+  const blobs = createPrivateLibraryBlobStore({ stateDir });
+  const store = createTranscriptStore({ stateDir, blobs });
+  const transcriptSync = createTranscriptSyncService({
+    store,
+    blobs,
+    capture: createChatGptTranscriptCapture({ tabs, providerTabOperations }),
+    providerTabOperations
   });
+  await transcriptSync.track({
+    label: 'Gated fixture',
+    tags: [],
+    key: 'gated-key',
+    identity: identityFromOwnedLocation('profile-main', location),
+    location
+  });
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-key-reserved',
+    stateDir,
+    transcriptSync,
+    providerTabOperations,
+    getSettings: async () => ({
+      maxInflightQueries: 1,
+      maxQueriesPerMinute: 100,
+      minTabGapMs: 0,
+      minGlobalGapMs: 0,
+      showTabsByDefault: false
+    }),
+    getStatus: async () => ({ ok: true, url: conversationUrl, blocked: false })
+  });
+  t.after(() => server.close());
+
   const submitted = await req({
-    port: started.port,
+    port: server.address().port,
     token: 'secret',
     method: 'POST',
     pth: '/query',
-    body: {
-      liveSourceId: 'source-1',
-      key: 'thread-key',
-      chatUrl: 'https://chatgpt.com/c/thread-123',
-      prompt: 'async continuation',
-      fireAndForget: true
-    }
+    body: { key: 'gated-key', chatUrl: conversationUrl, prompt: 'gated continuation', fireAndForget: true }
   });
   assert.equal(submitted.res.status, 202);
-  await waitFor(() => syncStarted);
+  await waitFor(() => captureEntered);
 
   const conflicting = await req({
-    port: started.port,
+    port: server.address().port,
     token: 'secret',
     method: 'POST',
     pth: '/query',
-    body: {
-      key: 'thread-key',
-      chatUrl: 'https://chatgpt.com/c/thread-123',
-      prompt: 'must wait'
-    }
+    body: { key: 'gated-key', chatUrl: conversationUrl, prompt: 'must wait' }
   });
   assert.equal(conflicting.res.status, 409);
   assert.equal(conflicting.data.error, 'tab_busy');
 
-  const otherTab = await req({
-    port: started.port,
-    token: 'secret',
-    method: 'POST',
-    pth: '/query',
-    body: { key: 'other-key', prompt: 'independent provider work' }
-  });
-  assert.equal(otherTab.res.status, 200);
-  assert.equal(otherTab.data.result.text, 'receipt-backed continuation');
-
-  releaseSync();
+  releaseCapture();
   await waitFor(async () => {
-    const status = await req({ port: started.port, token: 'secret', method: 'GET', pth: '/status' });
+    const status = await req({ port: server.address().port, token: 'secret', method: 'GET', pth: '/status' });
     return status.data.activeQuery === null;
   });
+  await waitFor(() => providerTabOperations.snapshot().length === 0);
 });
 
 test('http-api: post-query sync re-enters shared tab ownership and publishes a real snapshot', async (t) => {
@@ -1819,8 +1883,9 @@ test('http-api: post-query sync re-enters shared tab ownership and publishes a r
     getUrl: async () => currentUrl,
     captureConversation: async () => {
       captureCalls += 1;
-      assert.equal(providerTabOperations.current('key:live-key')?.kind, 'query');
-      assert.equal(providerTabOperations.current('tab:t0')?.kind, 'query');
+      // Detached publication holds its OWN key reservation while capturing —
+      // the same exclusivity the query held, under the sync operation.
+      assert.equal(providerTabOperations.current('key:live-key')?.kind, 'transcript-sync');
       return capture;
     }
   };
@@ -1887,10 +1952,31 @@ test('http-api: post-query sync re-enters shared tab ownership and publishes a r
   });
 
   assert.equal(response.res.status, 200);
+  await waitFor(async () => (await transcriptSync.list())[0]?.latestLiveSnapshot?.kind === 'snapshot');
+  await waitFor(() => captureCalls >= 1);
   assert.equal(captureCalls, 1);
   const [updated] = await transcriptSync.list();
   assert.equal(updated.latestLiveSnapshot?.kind, 'snapshot');
+  await waitFor(() => providerTabOperations.snapshot().length === 0);
   assert.deepEqual(providerTabOperations.snapshot(), []);
+
+  // The run record's transcript block reaches `ready` with a real local path
+  // whose file exists on disk.
+  const record = await waitFor(async () => {
+    const run = await req({
+      port: server.address().port,
+      token: 'secret',
+      method: 'POST',
+      pth: '/runs/get',
+      body: { runId: response.data.runId }
+    });
+    return run.data.run?.outputManifest?.transcript?.state === 'ready' ? run.data.run : null;
+  });
+  const transcript = record.outputManifest.transcript;
+  assert.equal(typeof transcript.snapshotPath, 'string');
+  const snapshotFile = await fs.readFile(transcript.snapshotPath, 'utf8');
+  assert.match(snapshotFile, /Fixture reply/);
+  assert.equal(transcript.turnCount, 2);
 });
 
 test('http-api: status returns getStatus output', async (t) => {
@@ -9269,4 +9355,76 @@ test('http-api: send uses governor too', async (t) => {
   qpm = 100;
   const r3 = await req({ port, token: 'secret', method: 'POST', pth: '/send', body: { text: 'hi3' } });
   assert.equal(r3.res.status, 200);
+});
+
+test('http-api: transcript publication is answer-anchored and explicit about every state', async (t) => {
+  // The committed snapshot lacks the run's answer turn: `ready` is withheld
+  // with a named reason, and the run's success is untouched.
+  const anchored = await startContinuationHttp(t, { inspectTurnIds: ['message-other'] });
+  const query = await req({
+    port: anchored.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123', prompt: 'anchor check' }
+  });
+  assert.equal(query.res.status, 200);
+  const absent = await waitFor(async () => {
+    const run = await req({ port: anchored.port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: query.data.runId } });
+    const transcript = run.data.run?.outputManifest?.transcript;
+    return transcript?.state === 'failed' ? transcript : null;
+  });
+  assert.equal(absent.reason, 'answer_turn_absent');
+  assert.equal(absent.snapshotPath, undefined);
+
+  // Publication still in flight: the record shows its durable `pending`
+  // state, and lands a terminal state once the sync settles.
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  const slow = await startContinuationHttp(t, {
+    syncImpl: async () => {
+      await slowGate;
+      return { outcome: { kind: 'complete', snapshot: { hash: 'f'.repeat(64), contentHash: 'e'.repeat(64) } }, source: { key: 'thread-key' } };
+    }
+  });
+  const slowQuery = await req({
+    port: slow.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123', prompt: 'slow publication', fireAndForget: true }
+  });
+  assert.equal(slowQuery.res.status, 202);
+  await waitFor(async () => {
+    const run = await req({ port: slow.port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: slowQuery.data.runId } });
+    return run.data.run?.status === 'success' ? run.data.run : null;
+  });
+  {
+    const run = await req({ port: slow.port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: slowQuery.data.runId } });
+    assert.equal(run.data.run.outputManifest.transcript.state, 'pending');
+  }
+  releaseSlow();
+  await waitFor(async () => {
+    const run = await req({ port: slow.port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: slowQuery.data.runId } });
+    return run.data.run?.outputManifest?.transcript?.state === 'ready' ? run.data.run : null;
+  });
+
+  // A canonical conversation with the answer turn present: pending at
+  // finalize, ready with the local path after publication.
+  const ready = await startContinuationHttp(t, {});
+  const tracked = await req({
+    port: ready.port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123', prompt: 'ready check' }
+  });
+  assert.equal(tracked.res.status, 200);
+  const block = await waitFor(async () => {
+    const current = await req({ port: ready.port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: tracked.data.runId } });
+    const transcript = current.data.run?.outputManifest?.transcript;
+    return transcript?.state === 'ready' ? transcript : null;
+  });
+  assert.equal(typeof block.snapshotPath, 'string');
+  assert.equal(block.turnCount, 1);
 });

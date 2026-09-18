@@ -1259,33 +1259,128 @@ export function startHttpApi({
     return matches[0];
   }
 
-  async function syncLiveTranscriptAfterQuery({
+  function attachTranscriptState(runId, transcript) {
+    return Promise.resolve()
+      .then(() => runStore.attachTranscript(runId, transcript))
+      .catch(() => {});
+  }
+
+  // Post-query transcript publication, fully detached from the caller's
+  // response: resolve the conversation's transcript source (explicit
+  // continuation sources win; otherwise the conversation is auto-tracked
+  // idempotently), sync it, and attach the snapshot to the run record — but
+  // `ready` only when the committed snapshot verifiably contains the run's
+  // answer turn. The run's finalize already wrote a `pending` transcript
+  // state; every terminal state below is explicit, and publication failure
+  // never touches run success.
+  function publishRunTranscript({
+    runId,
     liveSourceId = null,
     key,
     conversationUrl,
-    imageGeneration = false,
+    providerMessageId = null,
     operationId = null
   } = {}) {
     if (
-      imageGeneration ||
-      !liveSourceId ||
+      !runId ||
       typeof key !== 'string' ||
       !key ||
       typeof conversationUrl !== 'string' ||
       !conversationUrl ||
       !transcriptSync ||
-      typeof transcriptSync.sync !== 'function'
+      typeof transcriptSync.sync !== 'function' ||
+      typeof transcriptSync.inspectSnapshot !== 'function' ||
+      (!liveSourceId && typeof transcriptSync.resolveSource !== 'function')
     ) {
       return;
     }
+    const work = async () => {
+      let sourceId = liveSourceId || null;
+      if (!sourceId) {
+        let location = null;
+        try {
+          location = locationFromConversationUrl(conversationUrl);
+        } catch {}
+        if (!location) {
+          await attachTranscriptState(runId, { state: 'not_applicable', reason: 'conversation_not_canonical' });
+          return;
+        }
+        const resolved = await transcriptSync.resolveSource({ key, location });
+        if (resolved?.status !== 'resolved' || !resolved?.source?.id) {
+          await attachTranscriptState(runId, { state: 'not_applicable', reason: resolved?.reason || 'source_unresolved' });
+          return;
+        }
+        sourceId = resolved.source.id;
+      }
+      try {
+        const result = await transcriptSync.sync(sourceId, 'post-query');
+        const outcome = result?.outcome;
+        if (outcome?.kind !== 'complete' || !outcome.snapshot) {
+          await attachTranscriptState(runId, {
+            state: 'failed',
+            reason: outcome?.kind === 'partial'
+              ? `partial_${outcome.reason || 'incomplete'}`
+              : (outcome?.reason || 'incomplete')
+          });
+          return;
+        }
+        const snapshot = await transcriptSync.inspectSnapshot(outcome.snapshot);
+        if (providerMessageId && !snapshot.turnIds.includes(providerMessageId)) {
+          await attachTranscriptState(runId, { state: 'failed', reason: 'answer_turn_absent' });
+          return;
+        }
+        await attachTranscriptState(runId, {
+          state: 'ready',
+          snapshotPath: snapshot.snapshotPath,
+          snapshotHash: snapshot.snapshotHash,
+          contentHash: snapshot.contentHash,
+          turnCount: snapshot.turnCount,
+          characterCount: snapshot.characterCount,
+          liveSourceId: sourceId,
+          sourceKey: result?.source?.key || null
+        });
+      } catch {
+        await attachTranscriptState(runId, { state: 'failed', reason: 'transcript_sync_error' });
+      }
+    };
+    const guarded = async () => { try { await work(); } catch {} };
+    if (operationId && typeof operationScopes.runWithOwner === 'function') {
+      Promise.resolve(operationScopes.runWithOwner(operationId, guarded)).catch(() => {});
+    } else {
+      guarded().catch(() => {});
+    }
+  }
+
+  // Startup reconciliation: runs whose finalize wrote `pending` but whose
+  // publication never landed (crash between finalize and the detached sync)
+  // get one bounded re-publication pass.
+  async function reconcilePendingTranscripts() {
+    if (!transcriptSync || typeof transcriptSync.sync !== 'function') return;
     try {
-      const syncOperation = async () => await transcriptSync.sync(liveSourceId, 'post-query');
-      if (operationId && typeof operationScopes.runWithOwner === 'function') {
-        await operationScopes.runWithOwner(operationId, syncOperation);
-      } else {
-        await syncOperation();
+      const { runs } = await runStore.list({ limit: 200 });
+      for (const run of runs || []) {
+        const transcript = run?.outputManifest?.transcript;
+        if (transcript?.state !== 'pending') continue;
+        publishRunTranscript({
+          runId: run.id,
+          liveSourceId: run.logicalRequest?.liveSourceId || null,
+          key: run.key,
+          conversationUrl: run.conversationUrl,
+          providerMessageId: run.responseDebug?.providerMessageId || null
+        });
       }
     } catch {}
+  }
+
+  // Whether a served URL is a canonical owned conversation — the transcript
+  // publication gate. parseChatGptEntryTarget throws on non-conforming
+  // conversation ids, so callers route through this instead.
+  function isCanonicalConversationUrl(url) {
+    try {
+      return parseChatGptEntryTarget(url)?.kind === 'canonical-conversation';
+    } catch {
+      return false;
+    }
   }
 
   function persistKeyLocation(key, { url = null, projectUrl = null, conversationUrl = null, sourceUrl = null } = {}) {
@@ -1311,6 +1406,9 @@ export function startHttpApi({
       detail: 'Interrupted by Agentify Desktop restart.'
     });
     emitRunsChanged();
+    // Runs left `pending` by a crash between finalize and transcript
+    // publication get one bounded re-publication pass at startup.
+    reconcilePendingTranscripts().catch(() => {});
   });
 
   const createRunRecord = async (record) => {
@@ -2082,7 +2180,8 @@ export function startHttpApi({
     conversationUrl = null,
     modeIntent = null,
     modelIntent = null,
-    activeQuery = null
+    activeQuery = null,
+    transcriptState = null
   } = {}) => {
     // Bare nonempty text proves nothing about finality: the controller must
     // have qualified the capture (final assistant answer, image output, or a
@@ -2160,6 +2259,10 @@ export function startHttpApi({
       modeUsed: usage.modeUsed || null,
       modelUsed: usage.modelUsed || null,
       degradedFrom: usage.degradedFrom || null,
+      // Transcript publication state persisted with the manifest: `pending`
+      // means the detached post-query publication owes this run a terminal
+      // state; `not_applicable` means no publication will run.
+      ...(transcriptState ? { transcript: { state: transcriptState } } : {}),
       files: artifacts.map((item) => ({
         id: item.id,
         path: item.path,
@@ -3114,7 +3217,8 @@ export function startHttpApi({
             conversationUrl,
             modeIntent: originalModeIntent,
             modelIntent: originalModelIntent,
-            activeQuery
+            activeQuery,
+            transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
           });
           completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
         } catch (error) {
@@ -3155,13 +3259,14 @@ export function startHttpApi({
         detachedRetryStarted = true;
         runRetryWithLease().then(async (completed) => {
           if (nextKind === 'query') {
-            await syncLiveTranscriptAfterQuery({
+            publishRunTranscript({
+              runId: op.id,
               liveSourceId,
               key: effectiveKey,
               conversationUrl: completed?.conversationUrl || null,
-              imageGeneration,
+              providerMessageId: completed?.result?.meta?.providerMessageId || null,
               operationId: op.id
-            });
+              });
           }
           return completed;
         }).catch((error) => {
@@ -3177,13 +3282,14 @@ export function startHttpApi({
 
       const completed = await runRetryWithLease();
       if (nextKind === 'query') {
-        await syncLiveTranscriptAfterQuery({
+        publishRunTranscript({
+          runId: op.id,
           liveSourceId,
           key: effectiveKey,
           conversationUrl: completed?.conversationUrl || null,
-          imageGeneration,
+          providerMessageId: completed?.result?.meta?.providerMessageId || null,
           operationId: op.id
-        });
+          });
       }
       return { ok: true, tabId, runId: op.id, retryOf: original.id, result: completed?.result || null };
     } catch (error) {
@@ -4156,7 +4262,8 @@ export function startHttpApi({
                   conversationUrl,
                   modeIntent,
                   modelIntent,
-                  activeQuery
+                  activeQuery,
+                  transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
                 });
                 completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
               } catch (error) {
@@ -4193,13 +4300,14 @@ export function startHttpApi({
               const tabMeta = getTabMeta(tabs, tabId);
               detachedQueryStarted = true;
               runQueryWithLease().then(async (completed) => {
-                await syncLiveTranscriptAfterQuery({
+                publishRunTranscript({
+                  runId: op.id,
                   liveSourceId,
                   key: effectiveKey,
                   conversationUrl: completed?.conversationUrl || null,
-                  imageGeneration,
+                  providerMessageId: completed?.result?.meta?.providerMessageId || null,
                   operationId: op.id
-                });
+                  });
                 return completed;
               }).catch((error) => {
                 const outcome = outcomeFromError(error, op);
@@ -4221,13 +4329,14 @@ export function startHttpApi({
             }
 
             const completed = await runQueryWithLease();
-            await syncLiveTranscriptAfterQuery({
+            publishRunTranscript({
+              runId: op.id,
               liveSourceId,
               key: effectiveKey,
               conversationUrl: completed?.conversationUrl || null,
-              imageGeneration,
+              providerMessageId: completed?.result?.meta?.providerMessageId || null,
               operationId: op.id
-            });
+              });
             return sendJson(res, 200, {
               ok: true,
               tabId,

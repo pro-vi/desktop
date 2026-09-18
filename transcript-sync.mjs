@@ -8,7 +8,7 @@ import {
   locationFromConversationUrl,
   projectUrlForLocation
 } from './chatgpt-location.mjs';
-import { makeTranscriptSnapshot } from './library-blob-store.mjs';
+import { makeTranscriptSnapshot, parseSnapshotRef } from './library-blob-store.mjs';
 import {
   normalizeLiveCapture,
   parseConversationCapture
@@ -436,9 +436,26 @@ export function createTranscriptSyncService({
     }
   }
 
+  // Reads a committed snapshot for verification: which provider message ids
+  // its turns carry, the file's local path, and its counts. Callers anchor a
+  // run to a snapshot by checking the run's answer turn id among the ids.
+  async function inspectSnapshot(snapshotRef) {
+    const ref = parseSnapshotRef(snapshotRef);
+    const snapshot = await blobs.getSnapshot(ref);
+    return {
+      turnIds: (snapshot.turns || []).map((turn) => turn.identity?.providerMessageId).filter((id) => id),
+      snapshotPath: blobs.pathFor(ref),
+      snapshotHash: ref.hash,
+      contentHash: ref.contentHash,
+      turnCount: (snapshot.turns || []).length,
+      characterCount: Number(snapshot.characterCount) || 0
+    };
+  }
+
   return Object.freeze({
     track,
     resolveSource,
+    inspectSnapshot,
     sync,
     list: async () => await store.list(),
     forget: async (sourceId) => await changedAfter(store.forget(sourceId))
