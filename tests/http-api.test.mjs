@@ -1883,9 +1883,10 @@ test('http-api: post-query sync re-enters shared tab ownership and publishes a r
     getUrl: async () => currentUrl,
     captureConversation: async () => {
       captureCalls += 1;
-      // Detached publication holds its OWN key reservation while capturing —
-      // the same exclusivity the query held, under the sync operation.
-      assert.equal(providerTabOperations.current('key:live-key')?.kind, 'transcript-sync');
+      // The key stays exclusively held while the detached publication
+      // captures — by the sync's own reservation, or still by the query's
+      // during the release/re-reserve transition.
+      assert.ok(providerTabOperations.current('key:live-key'));
       return capture;
     }
   };
@@ -9420,6 +9421,9 @@ test('http-api: transcript publication is answer-anchored and explicit about eve
     body: { liveSourceId: 'source-1', key: 'thread-key', chatUrl: 'https://chatgpt.com/c/thread-123', prompt: 'ready check' }
   });
   assert.equal(tracked.res.status, 200);
+  assert.equal(tracked.data.providerMessageId, 'message-2');
+  assert.equal(tracked.data.transcript?.state, 'ready');
+  assert.equal(typeof tracked.data.transcript.snapshotPath, 'string');
   const block = await waitFor(async () => {
     const current = await req({ port: ready.port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: tracked.data.runId } });
     const transcript = current.data.run?.outputManifest?.transcript;

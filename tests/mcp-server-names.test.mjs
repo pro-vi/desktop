@@ -55,6 +55,9 @@ test('mcp-server registers agentify_* tools only', async () => {
   assert.ok(src.includes("'agentify_list_runs'"), 'expected agentify_list_runs tool');
   assert.ok(src.includes("'agentify_get_run'"), 'expected agentify_get_run tool');
   assert.ok(src.includes("'agentify_wait_run'"), 'expected agentify_wait_run tool');
+  // The transcript teaching rides RESULTS (transcript=/turn= lines), not
+  // per-session description growth: exactly one clause per tool.
+  assert.equal((src.match(/JSON-transcript/g) || []).length, 3, 'query/wait/get each carry one transcript clause');
   assert.ok(src.includes('await waitForRun({'), 'expected wait_run to use the shared durable waiter');
   assert.ok(src.includes('Next: call agentify_wait_run'), 'async tools should teach the wait workflow in their result');
   assert.ok(src.includes('Do not poll this to await completion'), 'get_run should identify itself as snapshot-only');

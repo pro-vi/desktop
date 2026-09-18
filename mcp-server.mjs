@@ -117,6 +117,13 @@ function runStatusText(run = {}, data = {}) {
   // persisted run record (and structuredContent.run) instead of the text.
   if (run.responseDebug && run.status !== 'success') lines.push(`responseDebug=${JSON.stringify(run.responseDebug)}`);
   if (run.recovery && run.status !== 'success') lines.push(`recovery=${JSON.stringify(run.recovery)}`);
+  // The durable conversation transcript is a local JSON file; `ready` means
+  // it verifiably contains this run's answer turn (turn= names that turn).
+  const transcriptBlock = run?.outputManifest?.transcript;
+  if (transcriptBlock?.state === 'ready' && transcriptBlock.snapshotPath) {
+    lines.push(`transcript=${transcriptBlock.snapshotPath}`);
+    if (run.responseDebug?.providerMessageId) lines.push(`turn=${run.responseDebug.providerMessageId}`);
+  }
   const outputPath = runOutputPath(run, data);
   if (outputPath) lines.push(`outputPath=${outputPath}`);
   if (data.outputError) lines.push(`outputError=${data.outputError}`);
@@ -802,7 +809,7 @@ registerTool(
   'agentify_query',
   {
     description:
-      'Send a prompt to the local Agentify Desktop session and return the assistant response. The response text is the returned text block; structuredContent is metadata only. To continue a Transcript Library source, pass its returned liveSourceId, sourceKey as key, and conversationUrl as chatUrl. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
+      'Send a prompt to the local Agentify Desktop session and return the assistant response, with answer-artifact and JSON-transcript paths for selective local reading. The response text is the returned text block; structuredContent is metadata only. To continue a Transcript Library source, pass its returned liveSourceId, sourceKey as key, and conversationUrl as chatUrl. For long work, set fireAndForget=true, then pass the returned runId to agentify_wait_run; use agentify_get_run only for a non-blocking status snapshot.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection (e.g., "chatgpt" or "claude"); does not switch the provider UI model picker.'),
       tabId: z.string().optional().describe('Tab/session id to use (for parallel jobs).'),
@@ -913,7 +920,12 @@ registerTool(
     };
     return {
       content: [{ type: 'text', text: data.result?.text || '' }],
-      structuredContent: { tabId: data.tabId || tabId || null, ...structuredContent }
+      structuredContent: {
+        tabId: data.tabId || tabId || null,
+        ...structuredContent,
+        providerMessageId: data.providerMessageId || null,
+        ...(data.transcript ? { transcript: data.transcript } : {})
+      }
     };
   }
 );
@@ -1492,7 +1504,7 @@ registerTool(
 registerTool(
   'agentify_get_run',
   {
-    description: 'Fetch one non-blocking durable-run snapshot. Do not poll this to await completion; call agentify_wait_run instead. Set full=true only for replay/debug.',
+    description: 'Fetch one non-blocking durable-run snapshot with answer-artifact and JSON-transcript paths for selective local reading. Do not poll this to await completion; call agentify_wait_run instead. Set full=true only for replay/debug.',
     inputSchema: {
       runId: z.string().describe('Durable run id.'),
       full: z.boolean().optional().describe('Return the full durable replay/debug record. Defaults to false for low-token polling.'),
@@ -1529,7 +1541,7 @@ registerTool(
 registerTool(
   'agentify_wait_run',
   {
-    description: 'Wait for a durable output-bearing run to truly finish. Success is returned only after Agentify validates and registers the saved response artifacts. Waiting does not cancel or mutate the run.',
+    description: 'Wait for a durable output-bearing run to truly finish. Success is returned only after Agentify validates and registers the saved response artifacts, with answer-artifact and JSON-transcript paths for selective local reading. Waiting does not cancel or mutate the run.',
     inputSchema: {
       runId: z.string().describe('Durable query or research run id. Dispatch-only send runs are unsupported.'),
       timeoutMs: z.number().optional().describe('Caller-only wait deadline. Omit or use 0 to wait indefinitely; this never changes run state.'),

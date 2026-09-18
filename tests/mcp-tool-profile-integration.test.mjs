@@ -792,6 +792,8 @@ test('mcp sync query carries the response text exactly once', async (t) => {
           meta: { completionEvidence: 'assistant-node' },
           recovery: null
         },
+        providerMessageId: 'msg-9',
+        transcript: { state: 'ready', snapshotPath: '/tmp/agentify/runs/run-single-copy/snapshot.json' },
         packedContext: { summary: { files: 2, chars: 100 }, chunks: ['PACKED_CONTEXT_SENTINEL'] },
         packedContextSummary: { files: 2, chars: 100 },
         bundle: { name: 'bundle-a' }
@@ -824,6 +826,9 @@ test('mcp sync query carries the response text exactly once', async (t) => {
 
   assert.equal(result.isError || false, false);
   assert.equal(result.content[0].text, 'full response text');
+  assert.equal(result.structuredContent.providerMessageId, 'msg-9');
+  assert.equal(result.structuredContent.transcript.state, 'ready');
+  assert.equal(result.structuredContent.transcript.snapshotPath, '/tmp/agentify/runs/run-single-copy/snapshot.json');
   assert.equal(result.structuredContent.tabId, 'tab-single-copy');
   assert.equal(result.structuredContent.runId, 'run-single-copy');
   assert.equal(result.structuredContent.meta.completionEvidence, 'assistant-node');

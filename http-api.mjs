@@ -1383,6 +1383,38 @@ export function startHttpApi({
     }
   }
 
+  // Bounded transcript-readiness grace for blocking result paths: waits (on
+  // run-store notifications, never an unconditional sleep) for a `pending`
+  // transcript publication to reach a terminal state, then re-reads the
+  // record. Timeout returns whatever the record holds — an explicit pending,
+  // never a speculative path.
+  async function awaitRunTranscriptTerminal(runId, waitMs = 2_000) {
+    const id = String(runId || '').trim();
+    if (!id) return null;
+    const deadline = Date.now() + waitMs;
+    const current = () => Promise.resolve(runStore.get(id)).catch(() => null);
+    const isPending = (run) => run?.status === 'success' && run?.outputManifest?.transcript?.state === 'pending';
+    let first = await current();
+    if (!isPending(first)) return first;
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+      const timer = setTimeout(finish, Math.max(1, deadline - Date.now()));
+      timer.unref?.();
+      const unsubscribe = runStore.subscribe(async () => {
+        const run = await current();
+        if (!isPending(run)) finish();
+      });
+    }).catch(() => {});
+    return await current();
+  }
+
   function persistKeyLocation(key, { url = null, projectUrl = null, conversationUrl = null, sourceUrl = null } = {}) {
     if (!key) return Promise.resolve(null);
     const patch = locationPatchForPersistence({ url, projectUrl, conversationUrl });
@@ -3218,7 +3250,7 @@ export function startHttpApi({
             modeIntent: originalModeIntent,
             modelIntent: originalModelIntent,
             activeQuery,
-            transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
+            transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !transcriptSync || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
           });
           completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
         } catch (error) {
@@ -4263,7 +4295,7 @@ export function startHttpApi({
                   modeIntent,
                   modelIntent,
                   activeQuery,
-                  transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
+                  transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !transcriptSync || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
                 });
                 completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
               } catch (error) {
@@ -4337,11 +4369,18 @@ export function startHttpApi({
               providerMessageId: completed?.result?.meta?.providerMessageId || null,
               operationId: op.id
               });
+            // Blocking callers get a bounded transcript-readiness grace: the
+            // detached publication usually lands within it, so the common
+            // response carries a ready pointer instead of a pending state.
+            const withTranscript = await awaitRunTranscriptTerminal(op.id);
+            const transcript = withTranscript?.outputManifest?.transcript || null;
             return sendJson(res, 200, {
               ok: true,
               tabId,
               runId: op.id,
               result: completed.result,
+              providerMessageId: completed?.result?.meta?.providerMessageId || null,
+              ...(transcript ? { transcript: { state: transcript.state, ...(transcript.state === 'ready' ? { snapshotPath: transcript.snapshotPath } : {}) } } : {}),
               packedContext: packed.context,
               packedContextSummary: packed.context?.summary || null,
               packedContextBudget: effectiveBudget,
@@ -4649,6 +4688,9 @@ export function startHttpApi({
           signal: abortController.signal
         });
         if (res.destroyed || !waited) return;
+        if (isTerminalRunStatus(waited.status) && waited.status === 'success') {
+          await awaitRunTranscriptTerminal(waited.id);
+        }
         const payload = await getRunPayload({ ...body, runId: waited.id });
         return sendJson(res, isTerminalRunStatus(waited.status) ? 200 : 202, payload);
       }
