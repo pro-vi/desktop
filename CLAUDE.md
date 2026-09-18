@@ -60,6 +60,11 @@ Optional local pre-push convenience (documented, never auto-installed): `npm tes
 
 Probes against the real ChatGPT surface need explicit scoped consent from the user for that probe before anything is sent. Follow the exemplar skeleton under `docs/probes/` (respawn via `agentify_shutdown` → exercise one bounded behavior → verify against the run record → record under `docs/probes/YYYY-MM-DD-<name>.md` → close the tab). A reusable consent-gated probe runner is deferred in `BACKLOG.md` with a reopen trigger, not silently dropped.
 
+## Ops gotchas
+
+- Raw HTTP `/runs/wait` returns a periodic status snapshot well before its `timeoutMs` — only the MCP wrapper adds real blocking. When driving the HTTP API directly (the curl patterns above), poll in a loop until the run is terminal.
+- `gh` in this fork resolves to the upstream `agentify-sh/desktop` by default; a bare `gh run watch <id>` 404s against it. Use `-R pro-vi/desktop` on every command, or `gh repo set-default pro-vi/desktop` once per clone (done on this machine; fresh clones are not).
+
 ## Chat location vs coding workspace
 
 - `chatUrl`, `projectUrl`, and the persisted keyed ChatGPT location control the browser thread only.
@@ -67,7 +72,7 @@ Probes against the real ChatGPT surface need explicit scoped consent from the us
 - Never derive or replace a coding workspace from a ChatGPT URL.
 - A `/share/...` URL is a source snapshot. Only the resulting validated `/c/...` URL becomes durable conversation affinity after the first successful reply.
 
-## GPT Pro Extended Thinking Fix (in progress)
+## GPT Pro Extended Thinking Fix (shipped 2026-09-14; turn-identity race closed 2026-09-17)
 
 `agentify_query` returns after ~5 seconds during GPT Pro's "Extended Pro" thinking mode instead of waiting for the full response (~20 min). Three compounding bugs in `chatgpt-controller.mjs`:
 
@@ -103,7 +108,7 @@ Two stages:
 - [x] Test with a real GPT Pro extended thinking query — **PASS** (waited ~7min, "Thought for 6m 52s", returned full response)
 - [x] `sendVisible: false` after Pro completion is expected — `sendReady` fallback handles it correctly
 - [x] Stage 2 deterministic coverage: controller 177/177, http-api 157/157, full repo `npm test` 862/862 (2026-09-14)
-- [x] Live probe (2026-09-14, `docs/probes/2026-09-14-completion-qualification-probe.md`): qualification pipeline, receipt, and read-page provenance verified live at `fdce09e`. **New pre-existing defect found, not yet fixed:** on project-routed conversations the wait loop can complete on the *previous* assistant reply (captured `'4'`/`'6'` for 3+3/5+5 prompts) — turn-identity race, not a finality failure; needs its own plan (provider-message-id baseline in the wait loop). `Pro thinking` transience live check still not run (deterministic tests only).
+- [x] Live probe (2026-09-14, `docs/probes/2026-09-14-completion-qualification-probe.md`): qualification pipeline, receipt, and read-page provenance verified live at `fdce09e`. The pre-existing defect that probe found — the wait loop completing on the *previous* assistant reply on project-routed conversations (turn-identity race) — was closed 2026-09-17 by the pre-send provider-message-id baseline in the wait loop (plan `2026-09-17-001`, ADR 0009, live-probed). `Pro thinking` transience live check still not run (deterministic tests only).
 - [ ] If working, open PR upstream at agentify-sh/desktop
 - [ ] Consider adding `isThinking` to the response metadata so callers know thinking is in progress
 - For long queries, submit with `fireAndForget`, then call `agentify_wait_run` or spawn `npm run wait-run -- <runId>`. The waiter succeeds only after receipt-backed output completion; its deadline does not mutate the run.
