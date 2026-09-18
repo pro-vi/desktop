@@ -15,6 +15,10 @@ import {
 } from './transcript-contract.mjs';
 
 const TRACK_KEYS = Object.freeze(['label', 'tags', 'key', 'identity', 'location']);
+// Automatic tracking namespaces fresh sources under one local scope; the
+// conversation identity — not the scope — is the dedup anchor, so an existing
+// same-conversation source under any scope wins before a create.
+const AUTO_TRACK_PROFILE_SCOPE_ID = 'profile-main';
 const TRANSPORT_CODES = new Set([
   'ECONNABORTED',
   'ECONNREFUSED',
@@ -304,6 +308,44 @@ export function createTranscriptSyncService({
     }));
   }
 
+  // Idempotent resolution for automatic tracking: the conversation is the
+  // anchor, so an existing source for the same provider conversation wins
+  // regardless of which profile scope named it; a key already bound to a
+  // different conversation is never rebound. Register-exists races resolve
+  // by re-reading the winner.
+  async function resolveSource({ key, location, label = 'Auto-tracked conversation', tags = [] } = {}) {
+    const identity = identityFromOwnedLocation(AUTO_TRACK_PROFILE_SCOPE_ID, location);
+    const exact = await store.findSource(identity);
+    if (exact) return { status: 'resolved', source: exact, created: false };
+    const sources = await store.list();
+    const byConversation = sources.find(({ identity: candidate }) =>
+      candidate.provider === identity.provider &&
+      candidate.providerConversationId === identity.providerConversationId
+    );
+    if (byConversation) return { status: 'resolved', source: byConversation, created: false };
+    const keyOwner = sources.find((source) => source.key === key);
+    if (keyOwner) return { status: 'skipped', reason: 'key-bound-elsewhere', source: null };
+    try {
+      const source = await changedAfter(store.register({
+        label,
+        tags,
+        key,
+        identity,
+        target: { kind: 'owned-conversation', location }
+      }));
+      return { status: 'resolved', source, created: true };
+    } catch (error) {
+      if (error?.message !== 'transcript_source_exists' && error?.message !== 'transcript_source_key_exists') throw error;
+      const raced = await store.findSource(identity) ||
+        (await store.list()).find(({ identity: candidate }) =>
+          candidate.provider === identity.provider &&
+          candidate.providerConversationId === identity.providerConversationId
+        );
+      if (raced) return { status: 'resolved', source: raced, created: false };
+      return { status: 'skipped', reason: 'key-bound-elsewhere', source: null };
+    }
+  }
+
   async function syncOwnedSource(source, trigger) {
     const attempt = await changedAfter(store.beginAttempt(source.id, trigger));
     let captured;
@@ -396,6 +438,7 @@ export function createTranscriptSyncService({
 
   return Object.freeze({
     track,
+    resolveSource,
     sync,
     list: async () => await store.list(),
     forget: async (sourceId) => await changedAfter(store.forget(sourceId))

@@ -646,3 +646,67 @@ test('transcript sync: forget is local metadata work and never calls the provide
   assert.equal(captureCalls, 0);
   assert.deepEqual(await service.list(), []);
 });
+
+test('transcript sync: automatic resolution is idempotent by conversation and never rebinds a key', async (t) => {
+  const { service } = await realParts(t, 'resolve', async () => completeCapture());
+  const location = locationFromConversationUrl('https://chatgpt.com/c/resolve-thread');
+
+  const first = await service.resolveSource({ key: 'auto-key', location });
+  assert.equal(first.status, 'resolved');
+  assert.equal(first.created, true);
+
+  const second = await service.resolveSource({ key: 'auto-key', location });
+  assert.equal(second.status, 'resolved');
+  assert.equal(second.created, false);
+  assert.equal(second.source.id, first.source.id);
+
+  // A source for the SAME conversation under a different profile scope wins
+  // over creating a fresh auto source — the conversation is the anchor.
+  const explicit = await service.track(trackInput({ thread: 'resolve-thread', key: 'explicit-key', scope: 'personal' }));
+  const third = await service.resolveSource({ key: 'yet-another-key', location });
+  assert.equal(third.status, 'resolved');
+  assert.equal(third.created, false);
+  assert.equal(third.source.identity.providerConversationId, explicit.identity.providerConversationId);
+
+  // A key bound to a different conversation is never rebound.
+  const elsewhere = await service.resolveSource({
+    key: 'auto-key',
+    location: locationFromConversationUrl('https://chatgpt.com/c/other-thread')
+  });
+  assert.equal(elsewhere.status, 'skipped');
+  assert.equal(elsewhere.reason, 'key-bound-elsewhere');
+});
+
+test('transcript sync: a register race resolves to the concurrent winner', async () => {
+  const existing = {
+    id: 'source-existing',
+    identity: { provider: 'chatgpt', profileScopeId: 'personal', providerConversationId: 'race-thread' },
+    key: 'raced-key',
+    enabled: true
+  };
+  const store = {
+    register: async () => { throw new Error('transcript_source_exists'); },
+    findSource: async () => null,
+    list: async () => [existing],
+    getSource: async () => existing,
+    beginAttempt: async () => { throw new Error('unused'); },
+    commitComplete: async () => { throw new Error('unused'); },
+    finishIncomplete: async () => { throw new Error('unused'); },
+    forget: async () => existing
+  };
+  const blobs = { putSnapshot: async () => { throw new Error('unused'); } };
+  const service = createTranscriptSyncService({
+    store,
+    blobs,
+    capture: capturePort(async () => completeCapture()),
+    providerTabOperations: createProviderTabOperationLeases()
+  });
+
+  const outcome = await service.resolveSource({
+    key: 'fresh-key',
+    location: locationFromConversationUrl('https://chatgpt.com/c/race-thread')
+  });
+  assert.equal(outcome.status, 'resolved');
+  assert.equal(outcome.created, false);
+  assert.equal(outcome.source.id, 'source-existing');
+});
