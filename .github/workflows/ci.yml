@@ -1,17 +1,27 @@
 name: CI
 
+# push-to-main only (no PR trigger: this repo is direct-to-main, and a fork PR
+# would run untrusted code on the shared household runner). workflow_dispatch
+# arms the no-fire diagnostic path: dispatch works even when push delivery
+# does not, separating trigger delivery from runner pickup.
 on:
   push:
-  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
+# Deliberately no concurrency block: with no PRs there is nothing to
+# supersede, and a ref-keyed group would replace *pending* runs even with
+# cancel-in-progress off — every pushed SHA keeps its own run.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test
+    runs-on: [self-hosted, Linux, ARM64, tart]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '24'
           cache: npm
       - run: npm ci
       - run: npm test
