@@ -122,3 +122,42 @@ test('context-packer: prioritizes source files over dotfiles and workflow metada
   assert.match(packed.context.summary.inlineFiles[0], /src\/main\.js$/);
   assert.equal(packed.context.summary.omittedByReason.inline_limit, 2);
 });
+
+test('context-packer: reports a file cut at the read sample, not only one cut by chunking', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-context-truncated-'));
+  await fs.writeFile(path.join(dir, 'big.md'), 'x'.repeat(30_000), 'utf8');
+  await fs.writeFile(path.join(dir, 'small.md'), 'whole file\n', 'utf8');
+
+  // The default budget reads 18,000 chars and chunks them into exactly 3 x 6,000,
+  // so chunking alone never sees the missing 12,000.
+  const packed = await prepareQueryContext({
+    prompt: 'Count the x characters.',
+    contextPaths: [path.join(dir, 'big.md'), path.join(dir, 'small.md')],
+    maxFileChars: 18_000,
+    maxChunkChars: 6_000,
+    maxChunksPerFile: 3
+  });
+
+  assert.match(packed.prompt, /### File: big\.md \(chunk 3\/3\+\)/);
+  assert.equal(packed.context.summary.truncatedCount, 1);
+  assert.deepEqual(packed.context.summary.truncatedFiles, [{ path: 'big.md', inlinedChars: 18_000, fileBytes: 30_000 }]);
+  assert.equal(packed.context.summary.inlineFiles.length, 2);
+  assert.equal(packed.context.summary.omittedCount, 0);
+});
+
+test('context-packer: reports a file whose later chunks did not fit the context budget', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-context-budget-cut-'));
+  await fs.writeFile(path.join(dir, 'doc.md'), 'y'.repeat(9_000), 'utf8');
+
+  const packed = await prepareQueryContext({
+    prompt: 'Read it.',
+    contextPaths: [path.join(dir, 'doc.md')],
+    maxContextChars: 4_000,
+    maxFileChars: 9_000,
+    maxChunkChars: 3_000,
+    maxChunksPerFile: 3
+  });
+
+  assert.equal(packed.context.summary.truncatedCount, 1);
+  assert.deepEqual(packed.context.summary.truncatedFiles, [{ path: 'doc.md', inlinedChars: 3_000, fileBytes: 9_000 }]);
+});

@@ -49,7 +49,7 @@ import {
 } from './artifact-store.mjs';
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
-import { prepareQueryContext } from './context-packer.mjs';
+import { CONTEXT_LIMIT_CAPS, prepareQueryContext } from './context-packer.mjs';
 import { createRunStore, parseResponseDebug, parseResponseRecovery } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 import { providerTabOperationEvidence } from './provider-tab-operation-leases.mjs';
@@ -658,6 +658,40 @@ function contextBudgetForVendor(vendorId) {
     }
   };
   return presets[key] || presets.chatgpt;
+}
+
+// Request field -> prepareQueryContext() budget field.
+const CONTEXT_BUDGET_FIELDS = {
+  maxContextChars: 'maxContextChars',
+  maxContextFiles: 'maxFiles',
+  maxContextFileChars: 'maxFileChars',
+  maxContextChunkChars: 'maxChunkChars',
+  maxContextChunksPerFile: 'maxChunksPerFile',
+  maxContextInlineFiles: 'maxInlineFiles',
+  maxContextAttachments: 'maxAttachmentFiles'
+};
+
+function effectiveContextBudget(body, vendorBudget) {
+  const budget = {};
+  const clampedLimits = {};
+  for (const [param, field] of Object.entries(CONTEXT_BUDGET_FIELDS)) {
+    const cap = CONTEXT_LIMIT_CAPS[param];
+    budget[field] = positiveIntOr(body?.[param], vendorBudget[field], cap);
+    const requested = Number(body?.[param]);
+    if (Number.isFinite(requested) && Math.floor(requested) > cap) {
+      clampedLimits[param] = { requested: Math.floor(requested), applied: cap };
+    }
+  }
+  // Raising the file or chunk size without naming a chunk count asks for the
+  // file size to be the limit, so give each file enough chunks to reach it.
+  const sizeRequested = positiveIntOr(body?.maxContextFileChars, 0) || positiveIntOr(body?.maxContextChunkChars, 0);
+  if (sizeRequested && !positiveIntOr(body?.maxContextChunksPerFile, 0)) {
+    budget.maxChunksPerFile = Math.min(
+      CONTEXT_LIMIT_CAPS.maxContextChunksPerFile,
+      Math.max(budget.maxChunksPerFile, Math.ceil(budget.maxFileChars / budget.maxChunkChars))
+    );
+  }
+  return { budget, clampedLimits };
 }
 
 function defaultResearchMeta({ tabId = null, outputDir = null } = {}) {
@@ -3931,15 +3965,7 @@ export function startHttpApi({
             patchActiveQuery(tabId, { phase: 'preparing_context', blocked: false, blockedKind: null });
             const vendorBudget = contextBudgetForVendor('chatgpt');
             const merged = mergeQueryInputs({ bundle, promptPrefix: '', attachments, contextPaths });
-            const effectiveBudget = {
-              maxContextChars: positiveIntOr(body.maxContextChars, vendorBudget.maxContextChars, 500_000),
-              maxFiles: positiveIntOr(body.maxContextFiles, vendorBudget.maxFiles, 500),
-              maxFileChars: positiveIntOr(body.maxContextFileChars, vendorBudget.maxFileChars, 100_000),
-              maxChunkChars: positiveIntOr(body.maxContextChunkChars, vendorBudget.maxChunkChars, 20_000),
-              maxChunksPerFile: positiveIntOr(body.maxContextChunksPerFile, vendorBudget.maxChunksPerFile, 20),
-              maxInlineFiles: positiveIntOr(body.maxContextInlineFiles, vendorBudget.maxInlineFiles, 100),
-              maxAttachmentFiles: positiveIntOr(body.maxContextAttachments, vendorBudget.maxAttachmentFiles, 50)
-            };
+            const { budget: effectiveBudget, clampedLimits } = effectiveContextBudget(body, vendorBudget);
             const packed = await prepareQueryContext({
               prompt,
               promptPrefix: merged.promptPrefix,
@@ -3953,6 +3979,7 @@ export function startHttpApi({
               maxInlineFiles: effectiveBudget.maxInlineFiles,
               maxAttachmentFiles: effectiveBudget.maxAttachmentFiles
             });
+            packed.context.summary.clampedLimits = clampedLimits;
             await patchRunRecord(op.id, {
               materializedReplay: materializedReplay({ packed, timeoutMs, kind: 'research' }),
               packedContextSummary: packed.context?.summary || null,
@@ -4187,15 +4214,7 @@ export function startHttpApi({
               throw err;
             }
             const merged = mergeQueryInputs({ bundle, promptPrefix, attachments, contextPaths });
-            const effectiveBudget = {
-              maxContextChars: positiveIntOr(body.maxContextChars, vendorBudget.maxContextChars, 500_000),
-              maxFiles: positiveIntOr(body.maxContextFiles, vendorBudget.maxFiles, 500),
-              maxFileChars: positiveIntOr(body.maxContextFileChars, vendorBudget.maxFileChars, 100_000),
-              maxChunkChars: positiveIntOr(body.maxContextChunkChars, vendorBudget.maxChunkChars, 20_000),
-              maxChunksPerFile: positiveIntOr(body.maxContextChunksPerFile, vendorBudget.maxChunksPerFile, 20),
-              maxInlineFiles: positiveIntOr(body.maxContextInlineFiles, vendorBudget.maxInlineFiles, 100),
-              maxAttachmentFiles: positiveIntOr(body.maxContextAttachments, vendorBudget.maxAttachmentFiles, 50)
-            };
+            const { budget: effectiveBudget, clampedLimits } = effectiveContextBudget(body, vendorBudget);
             const packed = await prepareQueryContext({
               prompt,
               promptPrefix: merged.promptPrefix,
@@ -4209,6 +4228,7 @@ export function startHttpApi({
               maxInlineFiles: effectiveBudget.maxInlineFiles,
               maxAttachmentFiles: effectiveBudget.maxAttachmentFiles
             });
+            packed.context.summary.clampedLimits = clampedLimits;
             const controller = tabs.getControllerById(tabId);
             const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
             await patchRunRecord(op.id, {

@@ -842,6 +842,60 @@ test('mcp sync query carries the response text exactly once', async (t) => {
   assert.equal(JSON.stringify(result).includes('PACKED_CONTEXT_SENTINEL'), false);
 });
 
+test('mcp query states truncated files and capped limits in a text block', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-context-notice-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const token = 'mcp-context-notice-token';
+  const serverId = 'mcp-context-notice-server';
+  const packedContextSummary = {
+    truncatedCount: 1,
+    truncatedFiles: [{ path: 'plan.md', inlinedChars: 20000, fileBytes: 78806 }],
+    clampedLimits: { maxContextChunkChars: { requested: 90000, applied: 20000 } }
+  };
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/query') {
+      const body = await readJsonBody(req);
+      if (body.fireAndForget) {
+        return sendJson(res, { ok: true, async: true, tabId: 'tab-notice', runId: 'run-async', queryId: 'run-async', packedContextSummary });
+      }
+      return sendJson(res, { ok: true, tabId: 'tab-notice', runId: 'run-sync', result: { text: 'answer', meta: null, recovery: null }, packedContextSummary });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-context-notice-test', version: '1.0.0' }, { capabilities: {} });
+
+  let syncResult;
+  let asyncResult;
+  try {
+    await client.connect(transport);
+    syncResult = await client.callTool({ name: 'agentify_query', arguments: { key: 'notice', prompt: 'P' } });
+    asyncResult = await client.callTool({ name: 'agentify_query', arguments: { key: 'notice', prompt: 'P', fireAndForget: true } });
+  } finally {
+    await client.close();
+  }
+
+  const notice = 'context_truncated=plan.md sent_chars=20000 file_bytes=78806\ncontext_limit_capped=maxContextChunkChars requested=90000 applied=20000';
+  assert.equal(syncResult.content[0].text, 'answer');
+  assert.equal(syncResult.content.at(-1).text, notice);
+  assert.match(asyncResult.content[0].text, /^Query submitted\. runId=run-async\./);
+  assert.equal(asyncResult.content[1].text, notice);
+});
+
 test('mcp query surfaces the stable live-continuation guard error through real stdio', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-live-continuation-error-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));

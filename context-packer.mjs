@@ -193,6 +193,18 @@ async function walkPath(absPath, out, { maxFiles }) {
   if (st.isFile()) out.push({ absPath, size: st.size });
 }
 
+// Hard ceiling for each caller-supplied context limit, keyed by request field.
+// A larger request is applied at the cap and reported back to the caller.
+export const CONTEXT_LIMIT_CAPS = Object.freeze({
+  maxContextChars: 500_000,
+  maxContextFiles: 500,
+  maxContextFileChars: 100_000,
+  maxContextChunkChars: 20_000,
+  maxContextChunksPerFile: 20,
+  maxContextInlineFiles: 100,
+  maxContextAttachments: 50
+});
+
 function chunkText(text, maxChunkChars, maxChunksPerFile) {
   const chunks = [];
   let offset = 0;
@@ -212,12 +224,17 @@ function summarizeContext({ roots, filesScanned, inlineFiles, attachedFiles, omi
     const reason = String(item?.reason || 'unknown');
     omittedByReason[reason] = (omittedByReason[reason] || 0) + 1;
   }
+  const truncatedFiles = inlineFiles
+    .filter((item) => item.truncated)
+    .map((item) => ({ path: item.path, inlinedChars: item.inlinedChars, fileBytes: item.fileBytes }));
   return {
     roots: roots.map((item) => item.input),
     filesScanned,
     inlineFileCount: inlineFiles.length,
     inlineFiles: inlineFiles.map((item) => item.path),
     inlineChunkCount: inlineFiles.reduce((sum, item) => sum + Number(item?.chunks || 0), 0),
+    truncatedCount: truncatedFiles.length,
+    truncatedFiles,
     explicitAttachmentCount: explicitAttachments.length,
     explicitAttachments: explicitAttachments.map((item) => item.path),
     autoAttachmentCount: autoAttachments.length,
@@ -349,9 +366,14 @@ export async function prepareQueryContext({
     }
 
     const text = sample.toString('utf8').replace(/\u0000/g, '');
-    const { chunks, truncated } = chunkText(text, maxChunkChars, maxChunksPerFile);
+    const chunked = chunkText(text, maxChunkChars, maxChunksPerFile);
+    const { chunks } = chunked;
+    // The sample itself stops at maxFileChars, so a file can be cut before
+    // chunking ever sees the rest of it.
+    const truncated = chunked.truncated || sample.length < file.size;
     const lang = codeFenceLang(file.absPath);
     const acceptedChunks = [];
+    let inlinedChars = 0;
     for (let i = 0; i < chunks.length; i++) {
       const header = `### File: ${named}${chunks.length > 1 ? ` (chunk ${i + 1}/${chunks.length}${truncated && i === chunks.length - 1 ? '+' : ''})` : truncated ? ' (truncated)' : ''}\n`;
       const block = `${header}\`\`\`${lang}\n${chunks[i]}\n\`\`\`\n`;
@@ -359,9 +381,16 @@ export async function prepareQueryContext({
       inlineBlocks.push(block);
       acceptedChunks.push(i + 1);
       usedChars += block.length;
+      inlinedChars += chunks[i].length;
     }
     if (acceptedChunks.length) {
-      inlineFiles.push({ path: named, chunks: acceptedChunks.length, truncated: truncated || acceptedChunks.length < chunks.length });
+      inlineFiles.push({
+        path: named,
+        chunks: acceptedChunks.length,
+        truncated: truncated || acceptedChunks.length < chunks.length,
+        inlinedChars,
+        fileBytes: file.size
+      });
     } else {
       omitted.push({ path: named, reason: 'context_budget' });
     }

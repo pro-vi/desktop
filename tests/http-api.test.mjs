@@ -8348,6 +8348,60 @@ test('http-api: query returns effective override context budget metadata', async
   assert.equal(r.data.packedContextBudget.maxAttachmentFiles, 5);
 });
 
+test('http-api: query reports context limits held to their caps and derives chunks from the file limit', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-budget-capped-'));
+  await fs.writeFile(path.join(dir, 'plan.md'), 'z'.repeat(40_000), 'utf8');
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: dir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const capped = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'Review.', contextPaths: [path.join(dir, 'plan.md')], maxContextFileChars: 90_000, maxContextChunkChars: 90_000, maxContextChunksPerFile: 1 }
+  });
+  assert.equal(capped.res.status, 200);
+  assert.equal(capped.data.packedContextBudget.maxChunkChars, 20_000);
+  assert.deepEqual(capped.data.packedContextSummary.clampedLimits, { maxContextChunkChars: { requested: 90_000, applied: 20_000 } });
+  assert.deepEqual(capped.data.packedContextSummary.truncatedFiles, [{ path: 'plan.md', inlinedChars: 20_000, fileBytes: 40_000 }]);
+
+  // Raising only the file limit used to leave the default 3 x 6,000 chunks as
+  // the real ceiling; the chunk count now follows the file limit.
+  const fileOnly = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { prompt: 'Review.', contextPaths: [path.join(dir, 'plan.md')], maxContextFileChars: 50_000 }
+  });
+  assert.equal(fileOnly.res.status, 200);
+  assert.equal(fileOnly.data.packedContextBudget.maxChunksPerFile, 9);
+  assert.deepEqual(fileOnly.data.packedContextSummary.clampedLimits, {});
+  assert.equal(fileOnly.data.packedContextSummary.truncatedCount, 0);
+});
+
 test('http-api: query ignores invalid non-positive context budget overrides', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-budget-invalid-'));
   await fs.writeFile(path.join(dir, 'repo.txt'), 'hello from repo\n', 'utf8');

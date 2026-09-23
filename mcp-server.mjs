@@ -44,6 +44,7 @@ import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from './mcp
 import { waitForRun } from './run-waiter.mjs';
 import { resolveMcpToolProfile } from './mcp-tool-profile.mjs';
 import { isSafeLibraryHttpErrorCode } from './library-http-errors.mjs';
+import { CONTEXT_LIMIT_CAPS } from './context-packer.mjs';
 
 const server = new McpServer({ name: 'agentify-desktop', version: '0.1.0' });
 const stateDir = defaultStateDir();
@@ -90,6 +91,19 @@ function asyncQueryStructuredContent(data = {}) {
     runId: data.runId || null,
     packedContextSummary: data.packedContextSummary || null
   };
+}
+
+// Not every client shows structuredContent to the model, so a file cut to fit
+// the budget, or a limit held to its cap, is also stated in a text block.
+function packedContextNotice(summary) {
+  const lines = [];
+  for (const file of summary?.truncatedFiles || []) {
+    lines.push(`context_truncated=${file.path} sent_chars=${file.inlinedChars} file_bytes=${file.fileBytes}`);
+  }
+  for (const [param, limit] of Object.entries(summary?.clampedLimits || {})) {
+    lines.push(`context_limit_capped=${param} requested=${limit.requested} applied=${limit.applied}`);
+  }
+  return lines.join('\n');
 }
 
 function runOutputPath(run = {}, data = {}) {
@@ -825,13 +839,13 @@ registerTool(
       promptPrefix: z.string().optional().describe('Optional reusable instruction block prepended before packed context and prompt.'),
       attachments: z.array(z.string()).optional().describe('Local file paths to upload before sending the prompt.'),
       contextPaths: z.array(z.string()).optional().describe('Local files/folders to pack into the prompt and/or attach automatically.'),
-      maxContextChars: z.number().optional().describe('Maximum packed inline context characters to add before the prompt.'),
-      maxContextFiles: z.number().optional().describe('Maximum number of files to scan from contextPaths.'),
-      maxContextFileChars: z.number().optional().describe('Maximum sampled characters per text file before chunking.'),
-      maxContextChunkChars: z.number().optional().describe('Maximum characters per inline chunk when a text file is split.'),
-      maxContextChunksPerFile: z.number().optional().describe('Maximum number of chunks to inline for any single file.'),
-      maxContextInlineFiles: z.number().optional().describe('Maximum number of text files to inline into the prompt.'),
-      maxContextAttachments: z.number().optional().describe('Maximum binary/image files auto-attached from contextPaths.'),
+      maxContextChars: z.number().optional().describe(`Maximum packed inline context characters to add before the prompt. Capped at ${CONTEXT_LIMIT_CAPS.maxContextChars}.`),
+      maxContextFiles: z.number().optional().describe(`Maximum number of files to scan from contextPaths. Capped at ${CONTEXT_LIMIT_CAPS.maxContextFiles}.`),
+      maxContextFileChars: z.number().optional().describe(`Maximum characters inlined per text file. Capped at ${CONTEXT_LIMIT_CAPS.maxContextFileChars}. Without maxContextChunksPerFile, enough chunks are used to reach this size.`),
+      maxContextChunkChars: z.number().optional().describe(`Maximum characters per inline chunk when a text file is split. Capped at ${CONTEXT_LIMIT_CAPS.maxContextChunkChars}.`),
+      maxContextChunksPerFile: z.number().optional().describe(`Maximum number of chunks to inline for any single file. Capped at ${CONTEXT_LIMIT_CAPS.maxContextChunksPerFile}.`),
+      maxContextInlineFiles: z.number().optional().describe(`Maximum number of text files to inline into the prompt. Capped at ${CONTEXT_LIMIT_CAPS.maxContextInlineFiles}.`),
+      maxContextAttachments: z.number().optional().describe(`Maximum binary/image files auto-attached from contextPaths. Capped at ${CONTEXT_LIMIT_CAPS.maxContextAttachments}.`),
       timeoutMs: z.number().optional().describe('Soft response-observation deadline. Agentify continues listening after this deadline; it does not prove provider failure.'),
       fireAndForget: z.boolean().optional().describe('Return a runId immediately. Next call agentify_wait_run to await proven completion, or agentify_get_run for a non-blocking snapshot.')
     }
@@ -903,10 +917,10 @@ registerTool(
     });
     if (data.async) {
       const structuredContent = asyncQueryStructuredContent(data);
-      return {
-        content: [{ type: 'text', text: `Query submitted. runId=${structuredContent.runId || ''}. Next: call agentify_wait_run with this runId for proven completion. Use agentify_get_run only for a non-blocking snapshot.` }],
-        structuredContent
-      };
+      const content = [{ type: 'text', text: `Query submitted. runId=${structuredContent.runId || ''}. Next: call agentify_wait_run with this runId for proven completion. Use agentify_get_run only for a non-blocking snapshot.` }];
+      const notice = packedContextNotice(structuredContent.packedContextSummary);
+      if (notice) content.push({ type: 'text', text: notice });
+      return { content, structuredContent };
     }
     // The response text ships exactly once — in the content text block clients
     // ingest. structuredContent stays metadata-only so sync results do not
@@ -933,6 +947,8 @@ registerTool(
       if (data.providerMessageId) pointerLines.push(`turn=${data.providerMessageId}`);
       if (pointerLines.length) contentBlocks.push({ type: 'text', text: pointerLines.join('\n') });
     }
+    const contextNotice = packedContextNotice(structuredContent.packedContextSummary);
+    if (contextNotice) contentBlocks.push({ type: 'text', text: contextNotice });
     return {
       content: contentBlocks,
       structuredContent: {

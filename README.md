@@ -268,7 +268,8 @@ Use this when you want to hand a repo or folder tree to the model without manual
 It tells you, at a glance:
 - which roots were scanned
 - how many files were scanned
-- which text files were inlined
+- which text files were inlined, and which of them were cut to fit (`truncatedFiles`)
+- which requested limits were held to their caps (`clampedLimits`)
 - which files were auto-attached
 - which files were skipped and why
 
