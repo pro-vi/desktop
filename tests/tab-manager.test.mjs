@@ -117,3 +117,34 @@ test('tab-manager: controller factory receives vendor identity byte-for-byte and
   assert.equal(calls[0].vendorName, 'ChatGPT Preview');
   assert.equal(manager.getControllerById(tabId), controller);
 });
+
+test('tab-manager: idleTabIds lists only unused tabs that nobody is looking at', async () => {
+  const presenters = new Map();
+  const browserBackend = {
+    async createSession({ tabId }) {
+      const presenter = { visible: false, minimized: false, isVisible() { return this.visible; }, isMinimized() { return this.minimized; } };
+      presenters.set(tabId, presenter);
+      return { page: {}, presenter, isClosed: () => false, close: async () => {} };
+    }
+  };
+  const manager = new TabManager({ browserBackend, createController: async () => ({}) });
+
+  const idle = await manager.createTab({ key: 'idle' });
+  const recent = await manager.createTab({ key: 'recent' });
+  const shown = await manager.createTab({ key: 'shown' });
+  const parked = await manager.createTab({ key: 'parked' });
+  const attention = await manager.createTab({ key: 'attention' });
+  const protectedTab = await manager.createTab({ key: 'default', protectedTab: true });
+  presenters.get(shown).visible = true;
+  presenters.get(parked).minimized = true;
+  manager.forcedFocusTabs.add(attention);
+
+  const later = Date.now() + 60_000;
+  for (const id of [idle, recent, shown, parked, attention, protectedTab]) manager.tabs.get(id).lastUsedAt = later - 60_000;
+  manager.tabs.get(recent).lastUsedAt = later - 1_000;
+
+  assert.deepEqual(manager.idleTabIds({ idleMs: 30_000, now: later }), [idle]);
+
+  manager.touchTab(idle);
+  assert.deepEqual(manager.idleTabIds({ idleMs: 30_000, now: Date.now() + 1_000 }), []);
+});

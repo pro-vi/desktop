@@ -174,6 +174,24 @@ export class TabManager {
     return out;
   }
 
+  touchTab(id) {
+    const tab = this.tabs.get(id);
+    if (tab) tab.lastUsedAt = Date.now();
+  }
+
+  // Unprotected tabs unused for idleMs whose window nobody has on screen or
+  // parked in the Dock, and that are not asking for attention.
+  idleTabIds({ idleMs, now = Date.now() } = {}) {
+    const out = [];
+    for (const tab of this.tabs.values()) {
+      if (tab.protectedTab || this.forcedFocusTabs.has(tab.id)) continue;
+      if (now - tab.lastUsedAt < idleMs) continue;
+      if (tab.presenter?.isVisible?.() || tab.presenter?.isMinimized?.()) continue;
+      out.push(tab.id);
+    }
+    return out;
+  }
+
   getControllerById(id) {
     const tab = this.tabs.get(id);
     if (!tab) throw new Error('tab_not_found');

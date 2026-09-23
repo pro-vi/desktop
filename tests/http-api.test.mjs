@@ -9486,3 +9486,80 @@ test('http-api: transcript publication is answer-anchored and explicit about eve
   assert.equal(typeof block.snapshotPath, 'string');
   assert.equal(block.turnCount, 1);
 });
+
+test('http-api: idle sweep closes unused tabs but not the default tab or one whose key is leased', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-idle-close-'));
+  const closed = [];
+  const tabRows = [
+    { id: 't0', key: 'default', vendorId: 'chatgpt' },
+    { id: 't1', key: 'finished-call', vendorId: 'chatgpt' },
+    { id: 't2', key: 'busy-call', vendorId: 'chatgpt' }
+  ];
+  const open = () => tabRows.filter((row) => !closed.includes(row.id));
+  const tabs = {
+    listTabs: () => open(),
+    idleTabIds: () => open().map((row) => row.id),
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async (id) => { closed.push(id); return true; },
+    getControllerById: () => ({})
+  };
+  const providerTabOperations = createProviderTabOperationLeases();
+  providerTabOperations.reserve('key:busy-call', { id: 'run-in-flight', kind: 'query' });
+  const server = await startHttpApi({
+    providerTabOperations,
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: dir,
+    getStatus: async () => ({ ok: true }),
+    idleTabCloseMs: 1,
+    idleTabSweepMs: 10
+  });
+  t.after(() => server.close());
+
+  await waitFor(() => closed.includes('t1'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(closed, ['t1']);
+  assert.equal(providerTabOperations.current('key:busy-call').id, 'run-in-flight');
+
+  providerTabOperations.release('key:busy-call', 'run-in-flight');
+  await waitFor(() => closed.includes('t2'));
+  assert.deepEqual(closed, ['t1', 't2']);
+  assert.deepEqual(providerTabOperations.snapshot(), []);
+});
+
+test('http-api: a finished query marks its tab used, so idle time starts when the query ends', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-idle-touch-'));
+  const touched = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
+    idleTabIds: () => [],
+    touchTab: (id) => touched.push(id),
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: dir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const r = await req({ port: server.address().port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'hi' } });
+  assert.equal(r.res.status, 200);
+  assert.ok(touched.includes('t0'));
+});

@@ -63,6 +63,7 @@ Probes against the real ChatGPT surface need explicit scoped consent from the us
 ## Ops gotchas
 
 - Raw HTTP `/runs/wait` returns a periodic status snapshot well before its `timeoutMs` — only the MCP wrapper adds real blocking. When driving the HTTP API directly (the curl patterns above), poll in a loop until the run is terminal.
+- An unused non-default tab closes after 15 minutes (`closeIdleTabs()` in `http-api.mjs`): a hidden Electron window renders at the display's refresh rate with or without background throttling, so idle tabs cost GPU until closed. The key's conversation URL is persisted and a later call on that key reopens it; a stale `tabId` returns `tab_not_found`.
 - `gh` in this fork resolves to the upstream `agentify-sh/desktop` by default; a bare `gh run watch <id>` 404s against it. Use `-R pro-vi/desktop` on every command, or `gh repo set-default pro-vi/desktop` once per clone (done on this machine; fresh clones are not).
 
 ## Chat location vs coding workspace

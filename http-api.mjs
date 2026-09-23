@@ -1061,7 +1061,9 @@ export function startHttpApi({
   transcriptRead,
   catalogSync,
   requestExportGrant,
-  providerTabOperations
+  providerTabOperations,
+  idleTabCloseMs = 15 * 60_000,
+  idleTabSweepMs = 60_000
 }) {
   if (
     typeof providerTabOperations?.assertAvailable !== 'function' ||
@@ -2594,7 +2596,32 @@ export function startHttpApi({
 
   const clearScope = (scope, expectedId = null) => {
     if (!scope) return;
-    return operationScopes.release(scope, expectedId);
+    const released = operationScopes.release(scope, expectedId);
+    // Idle time counts from the end of a tab's last operation, not its start.
+    if (released && scope.startsWith('tab:')) tabs.touchTab?.(scope.slice('tab:'.length));
+    return released;
+  };
+
+  // A hidden provider window keeps rendering at the display's refresh rate
+  // whether or not background throttling is on, so an unused tab costs GPU
+  // time until it is closed. The key's conversation URL is persisted, and the
+  // next request for that key opens a new tab on the same conversation.
+  const closeIdleTabs = async () => {
+    for (const tabId of tabs.idleTabIds?.({ idleMs: idleTabCloseMs }) || []) {
+      if (tabId === defaultTabId || activeQueries.has(tabId)) continue;
+      // A request may have used this tab while an earlier close was awaited.
+      if (!tabs.idleTabIds({ idleMs: idleTabCloseMs }).includes(tabId)) continue;
+      const operation = { id: `idle-tab-close:${tabId}`, kind: 'idle_tab_close', tabId, startedAt: Date.now() };
+      const heldScopes = new Set();
+      try {
+        reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation, tabId });
+        await tabs.closeTab(tabId);
+      } catch {
+        // Busy or already closed; the next sweep looks again.
+      } finally {
+        releaseOperationScopes(heldScopes, operation.id);
+      }
+    }
   };
 
   const patchActiveQuery = (tabId, patch) => {
@@ -5298,6 +5325,17 @@ export function startHttpApi({
       runtime: runtimeSnapshot()
     };
   };
+
+  let idleSweepRunning = false;
+  const idleTabSweep = idleTabSweepMs > 0
+    ? setInterval(() => {
+        if (idleSweepRunning) return;
+        idleSweepRunning = true;
+        closeIdleTabs().catch(() => {}).finally(() => { idleSweepRunning = false; });
+      }, idleTabSweepMs)
+    : null;
+  idleTabSweep?.unref?.();
+  server.once('close', () => clearInterval(idleTabSweep));
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);

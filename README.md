@@ -306,6 +306,8 @@ It tells you, at a glance:
 }
 ```
 
+A tab nobody has used for 15 minutes is closed, because a hidden window keeps rendering until it is. The key keeps its conversation: the next call with it opens a new tab on the same thread. A `tabId` from an earlier result stops resolving once its tab closes, so address follow-ups by `key`.
+
 That proves the codebase loop:
 - point Agentify at a folder
 - let it inline text files and auto-attach binaries/images
