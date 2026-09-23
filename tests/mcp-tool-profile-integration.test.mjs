@@ -896,6 +896,74 @@ test('mcp query states truncated files and capped limits in a text block', async
   assert.equal(asyncResult.content[1].text, notice);
 });
 
+test('mcp query and wait_run state an incomplete prompt delivery in text', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-prompt-delivery-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const token = 'mcp-prompt-delivery-token';
+  const serverId = 'mcp-prompt-delivery-server';
+  const promptDelivery = { checked: true, complete: false, missingLineCount: 1, firstMissingLine: '- verifiable judgment: a decision' };
+  const receipt = {
+    version: 1,
+    kind: 'assistant-response',
+    responsePath: '/tmp/agentify/runs/run-delivery/response.md',
+    responseSha256: 'b'.repeat(64),
+    capturedAt: 1_700_000_000_000
+  };
+  const run = {
+    id: 'run-delivery',
+    kind: 'query',
+    status: 'success',
+    phase: 'completed',
+    revision: 3,
+    completionReceipt: receipt,
+    outputManifest: { responsePath: receipt.responsePath },
+    promptDelivery
+  };
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/query') {
+      await readJsonBody(req);
+      return sendJson(res, { ok: true, tabId: 'tab-delivery', runId: 'run-delivery', result: { text: 'answer', meta: { promptDelivery }, recovery: null } });
+    }
+    if (req.url === '/runs/wait') {
+      await readJsonBody(req);
+      return sendJson(res, { ok: true, run, outputText: 'answer', outputTruncated: false, maxOutputChars: 2_000, outputPath: receipt.responsePath });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-prompt-delivery-test', version: '1.0.0' }, { capabilities: {} });
+
+  let queryResult;
+  let waitResult;
+  try {
+    await client.connect(transport);
+    queryResult = await client.callTool({ name: 'agentify_query', arguments: { key: 'delivery', prompt: 'P' } });
+    waitResult = await client.callTool({ name: 'agentify_wait_run', arguments: { runId: 'run-delivery' } });
+  } finally {
+    await client.close();
+  }
+
+  const notice = 'prompt_delivery_incomplete missing_lines=1 first_missing_line="- verifiable judgment: a decision"';
+  assert.equal(queryResult.content[0].text, 'answer');
+  assert.equal(queryResult.content.at(-1).text, notice);
+  assert.equal(waitResult.isError || false, false);
+  assert.ok(waitResult.content[0].text.split('\n').includes(notice));
+});
+
 test('mcp query surfaces the stable live-continuation guard error through real stdio', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-live-continuation-error-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));

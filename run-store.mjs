@@ -151,6 +151,7 @@ function normalizeRun(input = {}) {
     researchMeta: normalizeObject(input.researchMeta),
     completionReceipt: validateCompletionReceipt(input.completionReceipt),
     completionVerification: validateCompletionVerification(input.completionVerification),
+    promptDelivery: normalizeObject(input.promptDelivery),
     revision: Math.max(0, Number(input.revision) || 0)
   };
 }

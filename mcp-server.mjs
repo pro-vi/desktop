@@ -106,6 +106,13 @@ function packedContextNotice(summary) {
   return lines.join('\n');
 }
 
+// ChatGPT has received prompts with a line missing; the answer then rests on
+// a partial prompt, which the caller must see without opening the run record.
+function promptDeliveryNotice(delivery) {
+  if (delivery?.checked !== true || delivery.complete !== false) return '';
+  return `prompt_delivery_incomplete missing_lines=${delivery.missingLineCount} first_missing_line=${JSON.stringify(delivery.firstMissingLine || '')}`;
+}
+
 function runOutputPath(run = {}, data = {}) {
   return (
     data.outputPath ||
@@ -127,6 +134,8 @@ function runStatusText(run = {}, data = {}) {
   const lines = [bits.join(' ')];
   if (run.label) lines.push(`label=${run.label}`);
   if (run.detail) lines.push(`detail=${run.detail}`);
+  const deliveryNotice = promptDeliveryNotice(run.promptDelivery);
+  if (deliveryNotice) lines.push(deliveryNotice);
   // Diagnostics ride only non-success results; on success they stay in the
   // persisted run record (and structuredContent.run) instead of the text.
   if (run.responseDebug && run.status !== 'success') lines.push(`responseDebug=${JSON.stringify(run.responseDebug)}`);
@@ -949,6 +958,8 @@ registerTool(
     }
     const contextNotice = packedContextNotice(structuredContent.packedContextSummary);
     if (contextNotice) contentBlocks.push({ type: 'text', text: contextNotice });
+    const deliveryNotice = promptDeliveryNotice(data.result?.meta?.promptDelivery);
+    if (deliveryNotice) contentBlocks.push({ type: 'text', text: deliveryNotice });
     return {
       content: contentBlocks,
       structuredContent: {

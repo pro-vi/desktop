@@ -9316,3 +9316,96 @@ test('chatgpt-controller: research export uses native download hook for markdown
     Date.now = realNow;
   }
 });
+
+// Over 500 chars, so #typeHuman inserts it line by line as it does for briefs.
+const BRIEF_WITH_PLACEHOLDERS = [
+  'H1. Every need decomposes into kinds, each resolvable before the first edit:',
+  '  - consent: permission for an action. Resolved by asking all consent items in one batch question before the first edit.',
+  '  - content: a real thing only the human can produce. If no stand-in exists, evidence is declared "unverified — needs <content>" upfront.',
+  '  - verifiable judgment: a decision whose pass shape can be written in advance. Resolved by `gate — <exercise> → if <shape A> continue; if <shape B> <named re-plan>; else stop`.',
+  '  - taste judgment: a verdict that only arises when the human sees a concrete, refutable artifact.',
+  'H2. Therefore `pause` can be removed.'
+].join('\n');
+
+async function queryWithRecordedUserTurn(userTurn) {
+  const realNow = Date.now;
+  let fakeNow = 3_500_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes('already_generating')) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+        if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+        if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+        if (js.includes('fallbackMainText')) {
+          return {
+            stop: false,
+            stopCount: 0,
+            sendEnabled: true,
+            sendFound: true,
+            txt: 'Final answer with enough substance to be the response.',
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            imageCandidateCount: 0,
+            pageText: 'Final answer with enough substance to be the response.',
+            currentUrl: 'https://chatgpt.com/c/delivery-check'
+          };
+        }
+        if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
+        if (js.includes('[data-message-author-role="user"]')) return await userTurn();
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() { return 'https://chatgpt.com/c/delivery-check'; },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+    return await controller.query({ prompt: BRIEF_WITH_PLACEHOLDERS, timeoutMs: 20_000 });
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+test('chatgpt-controller: a line missing from the user turn ChatGPT recorded is reported on the result', async () => {
+  const recorded = BRIEF_WITH_PLACEHOLDERS.split('\n').filter((line) => !line.includes('verifiable judgment')).join(' ');
+  const result = await queryWithRecordedUserTurn(async () => recorded);
+  assert.equal(result.text, 'Final answer with enough substance to be the response.');
+  assert.equal(result.meta.promptDelivery.checked, true);
+  assert.equal(result.meta.promptDelivery.complete, false);
+  assert.equal(result.meta.promptDelivery.missingLineCount, 1);
+  assert.match(result.meta.promptDelivery.firstMissingLine, /^- verifiable judgment:/);
+});
+
+test('chatgpt-controller: markdown rendering and page labels in the recorded user turn are not missing lines', async () => {
+  const rendered = BRIEF_WITH_PLACEHOLDERS.replace(/`/g, '').replace(/^\s*- /gm, '• ').replace('H2.', 'Copy code H2.');
+  const result = await queryWithRecordedUserTurn(async () => rendered);
+  assert.deepEqual(result.meta.promptDelivery, { checked: true, complete: true, missingLineCount: 0, firstMissingLine: null });
+});
+
+test('chatgpt-controller: a user turn that cannot be read leaves delivery unchecked without blocking the result', async () => {
+  const result = await queryWithRecordedUserTurn(() => new Promise(() => {}));
+  assert.equal(result.text, 'Final answer with enough substance to be the response.');
+  assert.deepEqual(result.meta.promptDelivery, { checked: false });
+});

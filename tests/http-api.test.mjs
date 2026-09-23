@@ -9563,3 +9563,38 @@ test('http-api: a finished query marks its tab used, so idle time starts when th
   assert.equal(r.res.status, 200);
   assert.ok(touched.includes('t0'));
 });
+
+test('http-api: a query result that reports a missing prompt line keeps it on the run record', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-prompt-delivery-'));
+  const promptDelivery = { checked: true, complete: false, missingLineCount: 1, firstMissingLine: '- verifiable judgment: …' };
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => ({ text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 }, promptDelivery } })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
+    idleTabIds: () => [],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir: dir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const r = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'line one\nline two' } });
+  assert.equal(r.res.status, 200);
+  assert.deepEqual(r.data.result.meta.promptDelivery, promptDelivery);
+  const got = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: r.data.runId } });
+  assert.deepEqual((got.data.run || got.data).promptDelivery, promptDelivery);
+});

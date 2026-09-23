@@ -1924,6 +1924,14 @@
     "dependency": "mode-power-track",
     "reason": "the provider-visible transient compact picker exposes the clickable power track only after the anchored mode menu opens",
     "selector": "[data-model-reasoning-effort-slider] > [data-orientation=\"horizontal\"]"
+  },
+  {
+    "id": "controller-dom-051",
+    "capabilityId": "submit",
+    "kind": "dependency",
+    "dependency": "prompt-delivery-user-turn",
+    "reason": "the provider-visible user turn is read after send to confirm every prompt line was delivered",
+    "selector": "[data-message-author-role=\"user\"]"
   }
 ]
 }

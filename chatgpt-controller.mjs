@@ -34,6 +34,7 @@ function sleep(ms) {
 }
 
 const EVALUATION_TERMINATION_TIMEOUT_MS = 5_000;
+const PROMPT_DELIVERY_READ_TIMEOUT_MS = 2_000;
 const RESPONSE_BACKSTOP_MARGIN_MS = 10_000;
 const DEEP_RESEARCH_OBSERVATION_INTERVAL_MS = 5_000;
 
@@ -50,6 +51,12 @@ function jitter(minMs, maxMs) {
   const min = Math.max(0, Number(minMs) || 0);
   const max = Math.max(min, Number(maxMs) || 0);
   return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+// Letters and digits only, so markdown rendering, list bullets and line
+// breaks in the recorded user turn do not count as differences.
+function letterCore(text) {
+  return String(text || '').replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
 function clipText(value, max = 240) {
@@ -5064,6 +5071,35 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
+  // ChatGPT has received a prompt with one line missing while its composer
+  // showed the line (probe 2026-09-23), so delivery is judged from the user
+  // turn ChatGPT recorded. Each prompt line is checked on its own, so text the
+  // page adds inside the turn, such as a code block's copy label, is ignored.
+  async #readPromptDelivery(prompt) {
+    let timeoutId = null;
+    const recorded = await Promise.race([
+      this.#eval(`(() => {
+        const turns = document.querySelectorAll('[data-message-author-role="user"]');
+        const last = turns[turns.length - 1];
+        return last ? String(last.textContent || '') : null;
+      })()`).catch(() => null),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve(null), PROMPT_DELIVERY_READ_TIMEOUT_MS);
+      })
+    ]).finally(() => clearTimeout(timeoutId));
+    if (typeof recorded !== 'string') return { checked: false };
+    const core = letterCore(recorded);
+    const missing = String(prompt || '')
+      .split('\n')
+      .filter((line) => letterCore(line) && !core.includes(letterCore(line)));
+    return {
+      checked: true,
+      complete: missing.length === 0,
+      missingLineCount: missing.length,
+      firstMissingLine: missing.length ? clipText(missing[0], 160) : null
+    };
+  }
+
   async #typePromptAfterInlineResearchSelection(prompt) {
     await this.#emitProgress({ phase: 'typing_prompt' });
     const promptSel = JSON.stringify(this.selectors.promptTextarea || '');
@@ -6728,6 +6764,9 @@ export class ChatGPTController {
         backstopSlackMs,
         structuredAssistantBaseline
       });
+      if (result && typeof result === 'object') {
+        result.meta = { ...(result.meta || {}), promptDelivery: await this.#readPromptDelivery(prompt) };
+      }
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
       const modeUsed = normalizeChatGptModeIntent(result?.meta?.modeUsed || result?.meta?.actualModeIntent, { fallback: null });
       const actualModeSource = String(result?.meta?.actualModeSource || '');

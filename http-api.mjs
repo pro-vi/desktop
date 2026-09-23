@@ -2064,6 +2064,7 @@ export function startHttpApi({
       degradedFrom: outcome.degradedFrom || null,
       outputManifest: outcome.outputManifest || null,
       completionReceipt: outcome.completionReceipt || null,
+      ...(outcome.promptDelivery ? { promptDelivery: outcome.promptDelivery } : {}),
       ...(outcome.responseDebug ? { responseDebug: outcome.responseDebug } : {}),
       ...(outcome.recovery ? { recovery: outcome.recovery } : {}),
       ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
@@ -2478,7 +2479,8 @@ export function startHttpApi({
       degradedFrom: outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
       recovery: parseResponseRecovery(result?.recovery),
       outputManifest: outputManifest || null,
-      completionReceipt
+      completionReceipt,
+      promptDelivery: meta.promptDelivery && typeof meta.promptDelivery === 'object' ? meta.promptDelivery : null
     };
   };
 
