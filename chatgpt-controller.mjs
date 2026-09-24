@@ -104,6 +104,7 @@ function extractChatGptTranscriptMessageText(node) {
       current.hidden === true ||
       current.getAttribute?.('aria-hidden') === 'true'
     ) return;
+    let whiteSpace = '';
     try {
       const style = typeof getComputedStyle === 'function' ? getComputedStyle(current) : null;
       if (
@@ -112,6 +113,7 @@ function extractChatGptTranscriptMessageText(node) {
         style?.visibility === 'collapse' ||
         style?.contentVisibility === 'hidden'
       ) return;
+      whiteSpace = String(style?.whiteSpace || '');
     } catch {}
     if (tagName === 'BR') {
       boundary();
@@ -124,7 +126,9 @@ function extractChatGptTranscriptMessageText(node) {
     }
     const isBlock = blockTags.has(tagName);
     if (isBlock) boundary();
-    const preserve = preserveWhitespace || tagName === 'PRE';
+    // A user turn is raw text in a container styled to keep its line breaks;
+    // collapsing them like ordinary markup flattened every prompt to one line.
+    const preserve = preserveWhitespace || tagName === 'PRE' || /^(pre|pre-wrap|pre-line|break-spaces)$/.test(whiteSpace);
     for (const child of Array.from(current.childNodes || [])) walk(child, preserve);
     if (tagName === 'TD' || tagName === 'TH') append('\t');
     if (isBlock) boundary();

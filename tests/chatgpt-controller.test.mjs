@@ -9409,3 +9409,34 @@ test('chatgpt-controller: a user turn that cannot be read leaves delivery unchec
   assert.equal(result.text, 'Final answer with enough substance to be the response.');
   assert.deepEqual(result.meta.promptDelivery, { checked: false });
 });
+
+test('chatgpt-controller: transcript keeps the line breaks of a user turn shown in a pre-wrap container', async () => {
+  const textNode = (value) => ({ nodeType: 3, nodeValue: value });
+  const element = (tagName, childNodes, { whiteSpace = 'normal' } = {}) => ({
+    nodeType: 1,
+    tagName,
+    childNodes,
+    whiteSpace,
+    hidden: false,
+    getAttribute() { return null; }
+  });
+  const prompt = 'H1. Four kinds:\n  - consent: ask first\n  - content: name a stand-in\n\nH2. Remove pause.';
+  const page = slidingConversationPage([
+    { role: 'user', text: prompt },
+    { role: 'assistant', text: 'Reply' }
+  ], {
+    windowSize: 2,
+    initialStart: 0,
+    childNodesForMessage: (_message, index) => index === 0
+      ? [element('DIV', [textNode(prompt)], { whiteSpace: 'pre-wrap' })]
+      : [element('P', [textNode('A reply whose source\nnewline is ordinary markup whitespace')])],
+    computedStyleForNode: (node) => ({ display: 'block', visibility: 'visible', whiteSpace: node?.whiteSpace || 'normal' })
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'complete');
+  assert.equal(capture.rawTurns[0].text, 'H1. Four kinds:\n- consent: ask first\n- content: name a stand-in\n\nH2. Remove pause.');
+  assert.equal(capture.rawTurns[1].text, 'A reply whose source newline is ordinary markup whitespace');
+});
