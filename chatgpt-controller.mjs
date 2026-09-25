@@ -3124,19 +3124,56 @@ export class ChatGPTController {
       const pageText = (mainText || bodyText).trim();
       // Attribute names only, never text: the sample fingerprints the DOM
       // shape that replaced the message markers without copying conversation
-      // content into logs or run records.
-      const structureSample = Array.from(
+      // content into logs or run records. The head sample usually lands in
+      // app-shell chrome, so the tail sample (composer and last message) and
+      // a role-label-anchored ancestry walk carry the thread structure.
+      const describe = (el) => {
+        const attrs = Array.from(el.attributes || []).map((a) => a.name);
+        const testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '';
+        return el.tagName.toLowerCase() + (testid ? '[' + testid + ']' : '') + '{' + attrs.join(',') + '}';
+      };
+      const marked = (el) => el.attributes && el.attributes.length && (
+        Array.from(el.attributes).some((a) => /^data-|^aria-/i.test(a.name)) || /^(article|section)$/i.test(el.tagName)
+      );
+      const underMain = Array.from(
         (document.querySelector('main') || document.body)?.querySelectorAll('*') || []
-      )
-        .filter((el) => el.attributes && el.attributes.length && (
-          Array.from(el.attributes).some((a) => /^data-|^aria-/i.test(a.name)) || /^(article|section)$/i.test(el.tagName)
-        ))
-        .slice(0, 40)
-        .map((el) => {
-          const attrs = Array.from(el.attributes).map((a) => a.name);
-          const testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '';
-          return el.tagName.toLowerCase() + (testid ? '[' + testid + ']' : '') + '{' + attrs.join(',') + '}';
-        });
+      );
+      const structureSample = underMain.filter(marked).slice(0, 40).map(describe);
+      const tailSample = underMain.filter(marked).slice(-40).map(describe);
+      let turnAncestry = null;
+      try {
+        const walker = document.createTreeWalker(
+          document.querySelector('main') || document.body,
+          NodeFilter.SHOW_TEXT
+        );
+        let node;
+        while ((node = walker.nextNode())) {
+          if (/You said/i.test(String(node.textContent || ''))) {
+            const chain = [];
+            let el = node.parentElement;
+            while (el && chain.length < 8) {
+              chain.push(describe(el));
+              if (/^main$/i.test(el.tagName) || el.getAttribute?.('role') === 'main') break;
+              el = el.parentElement;
+            }
+            turnAncestry = chain;
+            break;
+          }
+        }
+      } catch {}
+      // Turn identity and role labels are page structure, not conversation
+      // content: keys, label text, child shapes, and text length only.
+      const turnSel = '[data-turn-key]';
+      const headingSel = 'h1,h2,h3,h4,h5,h6';
+      let turnProbe = null;
+      try {
+        turnProbe = Array.from(document.querySelectorAll(turnSel)).slice(0, 12).map((el) => ({
+          turnKey: el.getAttribute('data-turn-key'),
+          label: String(el.querySelector(headingSel)?.textContent || '').trim().slice(0, 40),
+          textChars: String(el.innerText || '').trim().length,
+          childShapes: Array.from(el.children).slice(0, 4).map(describe)
+        }));
+      } catch {}
       return {
         pageTextChars: pageText.length,
         blocked: {
@@ -3154,9 +3191,14 @@ export class ChatGPTController {
           article: count('article'),
           dataTestidAnswer: count('[data-testid*="answer" i]'),
           chatMessage: count('[data-testid="chat-message"]'),
-          dataIsAssistant: count('[data-is-assistant="true"]')
+          dataIsAssistant: count('[data-is-assistant="true"]'),
+          turnKey: count('[data-turn-key]'),
+          contentSearchTurnKey: count('[data-content-search-turn-key]')
         },
-        structureSample
+        structureSample,
+        tailSample,
+        turnAncestry,
+        turnProbe
       };
     })()`);
   }
