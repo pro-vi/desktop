@@ -132,10 +132,12 @@ function runStatusText(run = {}, data = {}) {
     run.kind ? `kind=${run.kind}` : null
   ].filter(Boolean);
   const lines = [bits.join(' ')];
-  if (run.label) lines.push(`label=${run.label}`);
-  if (run.detail) lines.push(`detail=${run.detail}`);
+  // An incomplete delivery rides above label/detail: a caller skimming the
+  // first lines must not read the run as clean (the label also carries it).
   const deliveryNotice = promptDeliveryNotice(run.promptDelivery);
   if (deliveryNotice) lines.push(deliveryNotice);
+  if (run.label) lines.push(`label=${run.label}`);
+  if (run.detail) lines.push(`detail=${run.detail}`);
   // Diagnostics ride only non-success results; on success they stay in the
   // persisted run record (and structuredContent.run) instead of the text.
   if (run.responseDebug && run.status !== 'success') lines.push(`responseDebug=${JSON.stringify(run.responseDebug)}`);
@@ -167,6 +169,12 @@ function conversationReadText(data = {}) {
     data.captureReason ? `captureReason=${data.captureReason}` : null,
     data.previewTruncated ? 'previewTruncated=true' : null
   ].filter(Boolean);
+  const diag = data.captureDiagnostics;
+  if (diag && typeof diag === 'object') {
+    if (Number.isFinite(Number(diag.pageTextChars))) lines.push(`pageTextChars=${Number(diag.pageTextChars)}`);
+    if (diag.blocked && typeof diag.blocked === 'object') lines.push(`blockedIndicators=${JSON.stringify(diag.blocked)}`);
+    if (diag.selectorCounts && typeof diag.selectorCounts === 'object') lines.push(`selectorCounts=${JSON.stringify(diag.selectorCounts)}`);
+  }
   const preview = String(data.preview ?? data.text ?? '');
   if (preview) lines.push(`preview:\n${preview}`);
   return lines.join('\n');
@@ -1035,8 +1043,10 @@ registerTool(
       body: { model, tabId, key, maxChars: maxChars || 20_000 }
     });
     // Keep the plain text block for compatibility and forward the complete
-    // HTTP read result — including resolved tab identity and servedUrl — as
-    // structured content so callers can prove which page supplied the text.
+    // HTTP read result — including resolved tab identity, servedUrl, and the
+    // same bounded text — as structured content so callers can prove which
+    // page supplied the text. A structured-only client otherwise sees a
+    // totalChars length with no text anywhere, which reads as success.
     return {
       content: [{ type: 'text', text: data.text || '' }],
       structuredContent: {
@@ -1045,7 +1055,8 @@ registerTool(
         key: data.key,
         servedUrl: data.servedUrl,
         truncated: data.truncated ?? null,
-        totalChars: data.totalChars ?? null
+        totalChars: data.totalChars ?? null,
+        text: typeof data.text === 'string' ? data.text : ''
       }
     };
   }

@@ -6431,12 +6431,33 @@ test('chatgpt-controller: a hydrating conversation read waits for the first mess
 
 test('chatgpt-controller: a conversation whose messages never mount still reports not-found after the wait', async () => {
   let probeCalls = 0;
+  let diagnosticCalls = 0;
   const page = {
     async navigate() {},
     async evaluate(js) {
       if (js.includes('first-message probe')) {
         probeCalls += 1;
         return { count: 0 };
+      }
+      if (js.includes('capture-read-diagnostics')) {
+        diagnosticCalls += 1;
+        return {
+          pageTextChars: 46003,
+          blocked: { looks403: false, loginLike: false, promptVisible: true },
+          selectorCounts: {
+            messageSelector: 0,
+            assistantMessage: 0,
+            dataMessageAuthorRole: 0,
+            dataMessageId: 0,
+            conversationTurn: 0,
+            modelResponse: 0,
+            article: 0,
+            dataTestidAnswer: 0,
+            chatMessage: 0,
+            dataIsAssistant: 0
+          },
+          structureSample: ['div[data-message-author-role]{class,data-message-author-role}']
+        };
       }
       return {
         status: 'partial',
@@ -6478,6 +6499,13 @@ test('chatgpt-controller: a conversation whose messages never mount still report
   assert.equal(Date.now() - startedAt >= 60, true);
   assert.equal(result.complete, false);
   assert.equal(result.captureReason, 'conversation_messages_not_found');
+  // The empty capture says what the page held, so drift and blocked pages are
+  // distinguishable from a read that found nothing at all.
+  assert.equal(diagnosticCalls, 1);
+  assert.equal(result.captureDiagnostics.pageTextChars, 46003);
+  assert.equal(result.captureDiagnostics.blocked.looks403, false);
+  assert.equal(result.captureDiagnostics.selectorCounts.dataMessageAuthorRole, 0);
+  assert.equal(Array.isArray(result.captureDiagnostics.structureSample), true);
 });
 
 test('chatgpt-controller: a non-conversation read does not wait for messages', async () => {
@@ -9887,12 +9915,13 @@ test('chatgpt-controller: a line missing from the user turn ChatGPT recorded is 
   assert.equal(result.meta.promptDelivery.complete, false);
   assert.equal(result.meta.promptDelivery.missingLineCount, 1);
   assert.match(result.meta.promptDelivery.firstMissingLine, /^- verifiable judgment:/);
+  assert.deepEqual(result.meta.promptDelivery.missingLines, [result.meta.promptDelivery.firstMissingLine]);
 });
 
 test('chatgpt-controller: markdown rendering and page labels in the recorded user turn are not missing lines', async () => {
   const rendered = BRIEF_WITH_PLACEHOLDERS.replace(/`/g, '').replace(/^\s*- /gm, '• ').replace('H2.', 'Copy code H2.');
   const result = await queryWithRecordedUserTurn(async () => rendered);
-  assert.deepEqual(result.meta.promptDelivery, { checked: true, complete: true, missingLineCount: 0, firstMissingLine: null });
+  assert.deepEqual(result.meta.promptDelivery, { checked: true, complete: true, missingLineCount: 0, firstMissingLine: null, missingLines: [] });
 });
 
 test('chatgpt-controller: a user turn that cannot be read leaves delivery unchecked without blocking the result', async () => {

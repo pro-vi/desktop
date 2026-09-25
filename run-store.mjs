@@ -74,6 +74,8 @@ export function parseResponseDebug(value) {
     hasContinue: booleanOrNull(value.hasContinue),
     hasError: booleanOrNull(value.hasError),
     pageTextChanged: booleanOrNull(value.pageTextChanged),
+    preSendPageTextChars: numberOrNull(value.preSendPageTextChars),
+    pageTextChars: numberOrNull(value.pageTextChars),
     providerMessageId: stringOrNull(value.providerMessageId),
     preSendProviderMessageId: stringOrNull(value.preSendProviderMessageId),
     nodeBasis: stringOrNull(value.nodeBasis)

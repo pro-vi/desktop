@@ -185,7 +185,9 @@ test('run-store: response diagnostics persist as an exact content-free summary',
       count: 0,
       stop: true,
       sendFound: false,
-      pageTextChanged: false,
+      pageTextChanged: true,
+      preSendPageTextChars: 46_000,
+      pageTextChars: 69_682,
       textPreview: 'PRIVATE RESPONSE TEXT',
       currentUrl: 'https://chatgpt.com/c/private'
     }
@@ -198,6 +200,8 @@ test('run-store: response diagnostics persist as an exact content-free summary',
   assert.equal(summary.responseDebug.version, 1);
   assert.equal(summary.responseDebug.hardDeadlineMs, 1_500);
   assert.equal(summary.responseDebug.stop, true);
+  assert.equal(summary.responseDebug.preSendPageTextChars, 46_000);
+  assert.equal(summary.responseDebug.pageTextChars, 69_682);
   assert.equal('textPreview' in summary.responseDebug, false);
   assert.equal('currentUrl' in summary.responseDebug, false);
   assert.equal(JSON.stringify(summary).includes('PRIVATE RESPONSE TEXT'), false);
@@ -212,6 +216,8 @@ test('run-store: response diagnostics never coerce malformed boundary values', (
     stopCount: false,
     hardDeadlineMs: 20,
     stop: true,
+    pageTextChars: 'many',
+    preSendPageTextChars: -5,
     providerMessageId: 42,
     preSendProviderMessageId: ''
   });
@@ -220,6 +226,8 @@ test('run-store: response diagnostics never coerce malformed boundary values', (
   assert.equal(parsed.stopCount, null);
   assert.equal(parsed.hardDeadlineMs, 20);
   assert.equal(parsed.stop, true);
+  assert.equal(parsed.pageTextChars, null);
+  assert.equal(parsed.preSendPageTextChars, null);
   assert.equal(parsed.providerMessageId, null);
   assert.equal(parsed.preSendProviderMessageId, null);
   const withIds = parseResponseDebug({

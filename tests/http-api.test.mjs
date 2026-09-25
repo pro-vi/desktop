@@ -2636,6 +2636,8 @@ test('http-api: reconciliation timeout persists diagnostics and releases its pro
   assert.equal(terminal.label, 'Response reconciliation timed out');
   assert.equal(terminal.providerSlot.status, 'released');
   assert.equal(terminal.responseDebug.count, 0);
+  // An unchanged page keeps the plain deadline wording.
+  assert.equal(terminal.detail, 'No complete new assistant turn was available before the service hard deadline.');
   assert.deepEqual(terminal.recovery, {
     status: 'partial',
     reason: 'conversation_generation_active',
@@ -2674,6 +2676,9 @@ test('http-api: synchronous reconciliation timeout is typed and content-free', a
           elapsedMs: 1_500,
           count: 0,
           stop: true,
+          pageTextChanged: true,
+          preSendPageTextChars: 46_000,
+          pageTextChars: 69_682,
           textPreview: 'PRIVATE RESPONSE TEXT',
           currentUrl: 'https://chatgpt.com/c/private-debug-url'
         },
@@ -2713,6 +2718,12 @@ test('http-api: synchronous reconciliation timeout is typed and content-free', a
   assert.equal(res.status, 408);
   assert.equal(data.error, 'response_reconcile_timeout');
   assert.equal(data.data.responseDebug.count, 0);
+  // A page that changed while no assistant turn was recognised says so in the
+  // detail: the caller can tell an unrecognised answer from none at all.
+  assert.equal(
+    data.data.detail,
+    'The page text changed after send from 46000 to 69682 chars but no complete assistant turn was recognised before the service hard deadline (assistant nodes: 0).'
+  );
   assert.equal('textPreview' in data.data.responseDebug, false);
   assert.equal('currentUrl' in data.data.responseDebug, false);
   assert.equal(JSON.stringify(data).includes('PRIVATE RESPONSE TEXT'), false);
@@ -9597,4 +9608,5 @@ test('http-api: a query result that reports a missing prompt line keeps it on th
   assert.deepEqual(r.data.result.meta.promptDelivery, promptDelivery);
   const got = await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId: r.data.runId } });
   assert.deepEqual((got.data.run || got.data).promptDelivery, promptDelivery);
+  assert.equal((got.data.run || got.data).label, 'Response received (prompt incomplete)');
 });

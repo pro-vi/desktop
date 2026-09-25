@@ -104,6 +104,19 @@ function authOk(req, token) {
   return hdr.slice('Bearer '.length).trim() === token;
 }
 
+// A reconcile timeout with a changed page means the answer likely rendered but
+// was not recognised; an unchanged page means nothing new arrived. The detail
+// string is the only line most callers read, so it carries that distinction.
+function reconcileTimeoutDetail(debug) {
+  const base = 'No complete new assistant turn was available before the service hard deadline.';
+  if (!debug || debug.pageTextChanged !== true) return base;
+  const before = Number.isFinite(debug.preSendPageTextChars) ? debug.preSendPageTextChars : null;
+  const now = Number.isFinite(debug.pageTextChars) ? debug.pageTextChars : null;
+  const growth = before !== null && now !== null ? ` from ${before} to ${now} chars` : '';
+  const count = Number.isFinite(debug.count) ? debug.count : 'unknown';
+  return `The page text changed after send${growth} but no complete assistant turn was recognised before the service hard deadline (assistant nodes: ${count}).`;
+}
+
 function mapErrorToHttp(error) {
   const msg = String(error?.message || '');
   if (error?.code === 'invalid_conversation_artifact_contract') {
@@ -163,6 +176,8 @@ function mapErrorToHttp(error) {
       body: {
         error: 'response_reconcile_timeout',
         data: {
+          label: 'Response reconciliation timed out',
+          detail: reconcileTimeoutDetail(parseResponseDebug(error?.data?.responseDebug)),
           conversationUrl: String(error?.data?.conversationUrl || '').trim() || null,
           responseDebug: parseResponseDebug(error?.data?.responseDebug),
           recovery
@@ -1654,7 +1669,7 @@ export function startHttpApi({
         ...base,
         status: 'error',
         label: 'Response reconciliation timed out',
-        detail: 'No complete new assistant turn was available before the service hard deadline.',
+        detail: reconcileTimeoutDetail(parseResponseDebug(detail?.responseDebug)),
         conversationUrl: detail?.conversationUrl || null,
         responseDebug: parseResponseDebug(detail?.responseDebug),
         recovery: parseResponseRecovery(detail?.recovery)
@@ -2465,9 +2480,12 @@ export function startHttpApi({
   const successOutcomeForResult = ({ result, op, conversationUrl, outputManifest = null, completionReceipt = null }) => {
     const now = Date.now();
     const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+    // The delivery check reports, never fails the run (ADR 0014); the label is
+    // the one line every read path shows, so it carries the incompleteness.
+    const promptIncomplete = meta.promptDelivery?.checked === true && meta.promptDelivery.complete === false;
     return {
       status: 'success',
-      label: 'Response received',
+      label: promptIncomplete ? 'Response received (prompt incomplete)' : 'Response received',
       detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
       conversationUrl: conversationUrl || null,
       source: op?.source || 'http',

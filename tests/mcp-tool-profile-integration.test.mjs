@@ -440,6 +440,8 @@ test('mcp page read keeps plain text and exposes resolved tab provenance', async
   assert.equal(result.structuredContent.tabId, 'tab-provenance');
   assert.equal(result.structuredContent.key, 'provenance-key');
   assert.equal(result.structuredContent.servedUrl, 'https://chatgpt.com/c/provenance-conversation');
+  // A structured-only client must see the text too, not a bare totalChars length.
+  assert.equal(result.structuredContent.text, 'page text from the resolved tab');
   assert.equal(result.structuredContent.truncated, false);
   assert.equal(result.structuredContent.totalChars, 29);
   assert.equal(result.isError || false, false);
@@ -915,6 +917,7 @@ test('mcp query and wait_run state an incomplete prompt delivery in text', async
     status: 'success',
     phase: 'completed',
     revision: 3,
+    label: 'Response received (prompt incomplete)',
     completionReceipt: receipt,
     outputManifest: { responsePath: receipt.responsePath },
     promptDelivery
@@ -961,7 +964,11 @@ test('mcp query and wait_run state an incomplete prompt delivery in text', async
   assert.equal(queryResult.content[0].text, 'answer');
   assert.equal(queryResult.content.at(-1).text, notice);
   assert.equal(waitResult.isError || false, false);
-  assert.ok(waitResult.content[0].text.split('\n').includes(notice));
+  const waitLines = waitResult.content[0].text.split('\n');
+  assert.ok(waitLines.includes(notice));
+  // The notice rides above the label so a caller skimming the first lines of
+  // the wait result cannot read the run as clean.
+  assert.ok(waitLines.indexOf(notice) < waitLines.indexOf('label=Response received (prompt incomplete)'));
 });
 
 test('mcp query surfaces the stable live-continuation guard error through real stdio', async (t) => {

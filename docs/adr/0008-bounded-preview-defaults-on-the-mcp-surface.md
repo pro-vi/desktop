@@ -28,10 +28,14 @@ Negative:
 - External callers relying on unbounded inline text or on `structuredContent.text` must opt up or read the artifact path; no in-repo consumer did at decision time.
 - `read_page` truncation is silent (pre-existing at 200k, more reachable at 20k) — named as the L4 residual in `docs/token-cost-paths.md`. *(Amended 2026-09-17: the residual is closed — `/read-page` and `agentify_read_page` structuredContent now carry `truncated` and `totalChars`; exact on normal pages, `null`/unknown on the nested deep-research fallback.)*
 
+## Amendments
+
+- *(2026-09-25)* The structured-content revisit trigger fired for `agentify_read_page`: a caller session (inbox note `2026-09-25-pro-answer-unreadable-after-send.md`) read a result as `totalChars=69682` with no text anywhere — the text rode only the content block, which that client does not render. `agentify_read_page` structuredContent now carries `text` (the same `maxChars`-bounded string as the content block), so a structured-only client sees the page text instead of a bare length. The single-copy rule keeps holding for `agentify_query`/`agentify_wait_run`, where no such caller has been observed.
+
 ## Revisit Triggers
 
 - A measured caller pattern needs full text on most waits (raise or drop the preview default).
-- A client is shown to ingest `structuredContent.text` (restore that copy or version the field).
+- A client is shown to ingest `structuredContent.text` (restore that copy or version the field). *(Fired 2026-09-25 for `read_page` — see Amendments.)*
 - `read_page` gains a persisted artifact or truncation flag (then mark cuts the way wait_run does).
 
 ## References

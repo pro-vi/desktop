@@ -3045,11 +3045,13 @@ export class ChatGPTController {
     let captureWindow;
     let artifactInventory = emptyPartialConversationArtifactInventory('artifact_identity_unavailable');
     let legacyDiagnosticReason = null;
+    let canonicalConversation = false;
     try {
       let providerConversationId = null;
       try {
         const target = parseChatGptEntryTarget(await this.getUrl());
         if (target?.kind === 'canonical-conversation') {
+          canonicalConversation = true;
           providerConversationId = providerConversationIdFromOwnedLocation(
             locationFromConversationUrl(target.chatUrl)
           );
@@ -3090,10 +3092,73 @@ export class ChatGPTController {
         legacyDiagnosticReason,
         includeTranscriptText
       });
+    // An empty capture must say what the page held: a page full of text with
+    // zero message nodes is selector drift, a blocked-looking page is a
+    // provider interstitial, and both currently surface as a bare
+    // conversation_messages_not_found. The probe runs only on the failing path
+    // of a canonical conversation page.
+    let captureDiagnostics = null;
+    if (
+      canonicalConversation &&
+      captureWindow?.status === 'partial' &&
+      Number(captureWindow?.evidence?.messageCount) === 0
+    ) {
+      captureDiagnostics = await this.#captureReadDiagnostics().catch(() => null);
+    }
     return {
       ...projection,
+      ...(captureDiagnostics ? { captureDiagnostics } : {}),
       artifactInventory
     };
+  }
+
+  async #captureReadDiagnostics() {
+    const messageSel = this.#transcriptDependencySelector('transcript-message', '[data-message-author-role]');
+    const assistantSel = this.selectors.assistantMessage || '';
+    const promptSelSource = JSON.stringify(String(this.selectors.promptTextarea || ''));
+    return await this.#eval(`(() => {
+      const operation = 'capture-read-diagnostics';
+      const count = (sel) => { try { return document.querySelectorAll(sel).length; } catch { return -1; } };
+      const bodyText = String(document.body?.innerText || '');
+      const mainText = String((document.querySelector('main') || document.body)?.innerText || '');
+      const pageText = (mainText || bodyText).trim();
+      // Attribute names only, never text: the sample fingerprints the DOM
+      // shape that replaced the message markers without copying conversation
+      // content into logs or run records.
+      const structureSample = Array.from(
+        (document.querySelector('main') || document.body)?.querySelectorAll('*') || []
+      )
+        .filter((el) => el.attributes && el.attributes.length && (
+          Array.from(el.attributes).some((a) => /^data-|^aria-/i.test(a.name)) || /^(article|section)$/i.test(el.tagName)
+        ))
+        .slice(0, 40)
+        .map((el) => {
+          const attrs = Array.from(el.attributes).map((a) => a.name);
+          const testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '';
+          return el.tagName.toLowerCase() + (testid ? '[' + testid + ']' : '') + '{' + attrs.join(',') + '}';
+        });
+      return {
+        pageTextChars: pageText.length,
+        blocked: {
+          looks403: /\\b403\\b|access denied|forbidden|unusual traffic|verify/i.test(bodyText) && !/prompt/i.test(bodyText),
+          loginLike: /\\blog ?in\\b|\\bsign ?up\\b/i.test(bodyText) && !/prompt/i.test(bodyText),
+          promptVisible: (() => { const promptSel = ${promptSelSource}; return !!promptSel && !!document.querySelector(promptSel); })()
+        },
+        selectorCounts: {
+          messageSelector: count(${JSON.stringify(messageSel || '')}),
+          assistantMessage: count(${JSON.stringify(assistantSel)}),
+          dataMessageAuthorRole: count('[data-message-author-role]'),
+          dataMessageId: count('[data-message-id]'),
+          conversationTurn: count('[data-testid^="conversation-turn-"]'),
+          modelResponse: count('model-response'),
+          article: count('article'),
+          dataTestidAnswer: count('[data-testid*="answer" i]'),
+          chatMessage: count('[data-testid="chat-message"]'),
+          dataIsAssistant: count('[data-is-assistant="true"]')
+        },
+        structureSample
+      };
+    })()`);
   }
 
   async #locateConversationArtifactTarget(descriptor, { timeoutMs = 20_000 } = {}) {
@@ -5198,7 +5263,10 @@ export class ChatGPTController {
       checked: true,
       complete: missing.length === 0,
       missingLineCount: missing.length,
-      firstMissingLine: missing.length ? clipText(missing[0], 160) : null
+      firstMissingLine: missing.length ? clipText(missing[0], 160) : null,
+      // The full bounded list, so a lost-line pattern is answerable from the
+      // run record alone instead of only the page that was live at the time.
+      missingLines: missing.slice(0, 10).map((line) => clipText(line, 160))
     };
   }
 
@@ -6570,7 +6638,9 @@ export class ChatGPTController {
         hasError: !!snap?.hasError,
         currentUrl: snap?.currentUrl || null,
         textPreview: clipText(txt, 180) || null,
-        pageTextChanged: pageText !== preSendPageText
+        pageTextChanged: pageText !== preSendPageText,
+        preSendPageTextChars: String(preSendPageText || '').length,
+        pageTextChars: pageText.length
       };
       if (Date.now() - lastWaitDebugAt >= 10_000) {
         lastWaitDebugAt = Date.now();
