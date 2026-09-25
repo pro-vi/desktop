@@ -1932,6 +1932,30 @@
     "dependency": "prompt-delivery-user-turn",
     "reason": "the provider-visible user turn is read after send to confirm every prompt line was delivered",
     "selector": "[data-message-author-role=\"user\"]"
+  },
+  {
+    "id": "controller-dom-052",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "mode-power-value-generic",
+    "reason": "the provider-visible mode menu may expose its effort slider under wrappers other than the anchored power control; any in-menu slider carrying the full integer min/max/now triple is located generically and remains gated by the supported power scale",
+    "selector": "[role=\"slider\"][aria-valuenow]"
+  },
+  {
+    "id": "controller-dom-053",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "mode-power-track-generic",
+    "reason": "the provider-visible generic effort slider exposes its clickable horizontal track as the closest data-orientation ancestor of the thumb",
+    "selector": "[data-orientation=\"horizontal\"]"
+  },
+  {
+    "id": "controller-dom-054",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "mode-option-clickable-row",
+    "reason": "the provider-visible mode menu option row carries the click handler for the labeled option text nested inside it",
+    "selector": "button, a, li, label, [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"menuitemcheckbox\"], [role=\"option\"], [role=\"radio\"], [data-radix-collection-item]"
   }
 ]
 }

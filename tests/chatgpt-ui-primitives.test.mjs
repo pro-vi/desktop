@@ -13,6 +13,7 @@ import {
   modeTriggerConfirmsActive,
   modeIntentForLabel,
   modeIntentLabelLooksUsable,
+  modeOptionLooksSelected,
   modePowerIntentForSupportedScale,
   modePowerScaleLooksSupported,
   parseModePowerInteger,
@@ -443,6 +444,22 @@ test('chatgpt-ui-primitives: scores the counted composer mode pill as an activat
   assert.equal(modeTriggerConfirmsActive({ ...pill, menuOpen: false }), true);
 });
 
+test('chatgpt-ui-primitives: recognizes a menu option the surface itself marks selected', () => {
+  assert.equal(modeOptionLooksSelected({ ariaChecked: 'true' }), true);
+  assert.equal(modeOptionLooksSelected({ ariaSelected: 'true' }), true);
+  assert.equal(modeOptionLooksSelected({ ariaPressed: 'true' }), true);
+  assert.equal(modeOptionLooksSelected({ ariaCurrent: 'true' }), true);
+  assert.equal(modeOptionLooksSelected({ ariaCurrent: 'page' }), true);
+  assert.equal(modeOptionLooksSelected({ dataState: 'checked' }), true);
+  assert.equal(modeOptionLooksSelected({ dataState: 'active' }), true);
+  assert.equal(modeOptionLooksSelected({ dataState: 'on' }), true);
+  assert.equal(modeOptionLooksSelected({ ariaChecked: 'false', dataState: 'unchecked' }), false);
+  assert.equal(modeOptionLooksSelected({ ariaCurrent: 'false' }), false);
+  assert.equal(modeOptionLooksSelected({ dataState: 'highlighted' }), false);
+  assert.equal(modeOptionLooksSelected({}), false);
+  assert.equal(modeOptionLooksSelected(), false);
+});
+
 test('chatgpt-ui-primitives: accepts only the observed five-step power scale', () => {
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 0 }), true);
   assert.equal(modePowerScaleLooksSupported({ min: 0, max: 4, current: 4 }), true);
@@ -695,5 +712,6 @@ test('chatgpt-ui-primitives: exposes mode browser evaluator source and pending t
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /scoreModeTriggerCandidate/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modeTriggerConfirmsActive/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modePowerScaleLooksSupported/);
+  assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modeOptionLooksSelected/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /isHighConfidenceModeControlDescriptor/);
 });

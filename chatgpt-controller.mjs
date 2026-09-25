@@ -4291,6 +4291,9 @@ export class ChatGPTController {
     let lastClickAt = 0;
     const blockedTriggerSignatures = new Set();
     let pendingTriggerSignature = null;
+    let ineffectiveOptionKey = null;
+    let ineffectiveOptionClicks = 0;
+    let dismissedMenuAfterIneffectiveClicks = false;
     const attempts = [];
 
     while (Date.now() - start < timeoutMs) {
@@ -4522,15 +4525,33 @@ export class ChatGPTController {
         const powerControl = menuRoots
           .flatMap((root) => Array.from(root.querySelectorAll('[role="menuitem"][aria-label="Power"]')))
           .find(visible) || null;
-        const powerThumb = powerControl?.querySelector('[data-model-reasoning-effort-slider] [role="slider"][aria-valuenow]') || null;
-        const powerTrack = powerControl?.querySelector('[data-model-reasoning-effort-slider] > [data-orientation="horizontal"]') || null;
+        const legacyPowerThumb = powerControl?.querySelector('[data-model-reasoning-effort-slider] [role="slider"][aria-valuenow]') || null;
+        // The effort slider has shipped under more than one wrapper; any in-menu
+        // slider carrying the full integer min/max/now triple is located here and
+        // still has to pass modePowerScaleLooksSupported before it is trusted.
+        const genericPowerThumb = legacyPowerThumb
+          ? null
+          : menuRoots
+              .flatMap((root) => Array.from(root.querySelectorAll('[role="slider"][aria-valuenow]')))
+              .find((n) =>
+                visible(n) &&
+                modePickerPrimitives.parseModePowerInteger(n.getAttribute('aria-valuemin')) !== null &&
+                modePickerPrimitives.parseModePowerInteger(n.getAttribute('aria-valuemax')) !== null &&
+                modePickerPrimitives.parseModePowerInteger(n.getAttribute('aria-valuenow')) !== null
+              ) || null;
+        const powerThumb = legacyPowerThumb || genericPowerThumb;
+        const legacyPowerTrack = powerControl?.querySelector('[data-model-reasoning-effort-slider] > [data-orientation="horizontal"]') || null;
+        const genericPowerTrack = genericPowerThumb
+          ? genericPowerThumb.closest('[data-orientation="horizontal"]') || genericPowerThumb.parentElement || null
+          : null;
+        const powerTrack = legacyPowerTrack || (genericPowerTrack && visible(genericPowerTrack) ? genericPowerTrack : null);
         const powerMin = modePickerPrimitives.parseModePowerInteger(powerThumb?.getAttribute?.('aria-valuemin'));
         const powerMax = modePickerPrimitives.parseModePowerInteger(powerThumb?.getAttribute?.('aria-valuemax'));
         const powerIndex = modePickerPrimitives.parseModePowerInteger(powerThumb?.getAttribute?.('aria-valuenow'));
         const powerLabels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
         const powerIntents = ['instant', 'thinking', null, null, 'extended-pro'];
         if (
-          powerControl &&
+          (powerControl || genericPowerThumb) &&
           powerTrack &&
           visible(powerTrack) &&
           modePickerPrimitives.modePowerScaleLooksSupported({ min: powerMin, max: powerMax, current: powerIndex }) &&
@@ -4599,23 +4620,71 @@ export class ChatGPTController {
             const rect = rectOf(node);
             const area = Math.max(0, rect.w) * Math.max(0, rect.h);
             const optionInsideMenu = menuRoots.some((root) => root === node || root.contains(node));
+            const ariaChecked = String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true';
             const score = modePickerPrimitives.scoreModeOptionCandidate({
               label,
               intent,
               targetIntent,
               optionInsideMenu,
-              ariaChecked: String(node?.getAttribute?.('aria-checked') || '').trim().toLowerCase() === 'true',
+              ariaChecked,
               active: isActive(node),
               area,
               width: rect.w,
               height: rect.h
             });
-            return { node, label, intent, score, rect, optionInsideMenu };
+            const selected = modePickerPrimitives.modeOptionLooksSelected({
+              ariaChecked: node?.getAttribute?.('aria-checked'),
+              ariaSelected: node?.getAttribute?.('aria-selected'),
+              ariaPressed: node?.getAttribute?.('aria-pressed'),
+              ariaCurrent: node?.getAttribute?.('aria-current'),
+              dataState: node?.getAttribute?.('data-state')
+            });
+            return { node, label, intent, score, rect, optionInsideMenu, selected };
           })
           .filter((item) => item.score >= 0 && item.optionInsideMenu)
           .sort((a, b) => b.score - a.score);
         const targetOption = optionCandidates[0] || null;
         if (targetOption && menuRoots.length) {
+          // Click the interactive row rather than a bare text node scored for
+          // its clean label; the row is what carries the click handler.
+          const clickableOf = (n) =>
+            n?.closest('button, a, li, label, [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="radio"], [data-radix-collection-item]') || n;
+          const clickNode = clickableOf(targetOption.node);
+          const clickNodeInsideMenu =
+            clickNode !== targetOption.node && menuRoots.some((root) => root.contains(clickNode));
+          const clickNodeRect = clickNodeInsideMenu ? rectOf(clickNode) : null;
+          const clickRect =
+            clickNodeRect && clickNodeRect.w > 0 && clickNodeRect.w <= 600 && clickNodeRect.h <= 140
+              ? clickNodeRect
+              : targetOption.rect;
+          // A target-intent option that the menu itself marks selected — on the
+          // scored node or on its clickable row — is the live mode while the
+          // popover stays open: the same bet the power slider path makes with
+          // mode_power_active.
+          const rowLooksSelected =
+            targetOption.selected ||
+            (clickNodeInsideMenu &&
+              modePickerPrimitives.modeOptionLooksSelected({
+                ariaChecked: clickNode?.getAttribute?.('aria-checked'),
+                ariaSelected: clickNode?.getAttribute?.('aria-selected'),
+                ariaPressed: clickNode?.getAttribute?.('aria-pressed'),
+                ariaCurrent: clickNode?.getAttribute?.('aria-current'),
+                dataState: clickNode?.getAttribute?.('data-state')
+              }));
+          if (rowLooksSelected) {
+            return {
+              active: true,
+              action: 'none',
+              reason: 'mode_option_marked_selected',
+              targetIntent,
+              activeIntent: targetOption.intent,
+              label: targetOption.label || null,
+              evidenceKind: 'checked_menu_option',
+              menuOpen: true,
+              menuText,
+              optionHints
+            };
+          }
           return {
             active: false,
             action: 'pointer_option',
@@ -4623,7 +4692,7 @@ export class ChatGPTController {
             targetIntent,
             activeIntent: ariaActiveTrigger?.intent || null,
             label: targetOption.label || null,
-            rect: targetOption.rect,
+            rect: clickRect,
             menuOpen: true,
             menuText,
             optionHints
@@ -4687,6 +4756,35 @@ export class ChatGPTController {
         continue;
       }
       if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option' || snap?.action === 'pointer_power') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+        if (snap.action === 'pointer_option') {
+          const optionKey = [
+            Math.round(snap.rect.x),
+            Math.round(snap.rect.y),
+            Math.round(snap.rect.w),
+            Math.round(snap.rect.h),
+            String(snap.label || '')
+          ].join(':');
+          if (optionKey === ineffectiveOptionKey) ineffectiveOptionClicks += 1;
+          else {
+            ineffectiveOptionKey = optionKey;
+            ineffectiveOptionClicks = 1;
+          }
+          // Repeated snapshots proposing the same option mean the click is not
+          // taking effect. Dismiss the menu once so the composer trigger can be
+          // re-read (the only confirmations that work while the menu is open are
+          // the slider and selected-option checks above), then stop clicking and
+          // fail with the observed state instead of spinning to the timeout.
+          if (ineffectiveOptionClicks >= 3 && !dismissedMenuAfterIneffectiveClicks) {
+            dismissedMenuAfterIneffectiveClicks = true;
+            await this.#sendKey('Escape');
+            await sleep(450);
+            continue;
+          }
+          if (ineffectiveOptionClicks >= 4) {
+            last = { ...snap, reason: 'mode_option_click_ineffective' };
+            break;
+          }
+        }
         attempts.push(modeIntentClickAttempt(snap));
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));
         const cy = Math.round(snap.rect.y + Math.max(6, Math.min(snap.rect.h - 6, snap.rect.h / 2)));

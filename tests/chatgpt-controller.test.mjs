@@ -3165,6 +3165,497 @@ test('chatgpt-controller: already-selected supported Pro slider confirms without
   assert.equal(provenance?.targetPowerIndex, 4);
 });
 
+test('chatgpt-controller: mode option clicks that never take effect fail fast after dismissing the menu', async () => {
+  // Observed on chatgpt.com 2026-09-25: the mode menu (renamed Pro option,
+  // usage meter, in-menu slider) stayed open while the option was clicked for
+  // the whole 20s timeout, failing as clicked_mode_option. The loop must stop
+  // clicking, dismiss the menu once, and name the real failure.
+  const realNow = Date.now;
+  let fakeNow = 8_250_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+
+  const keysSent = [];
+  const pointerDown = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        return {
+          active: false,
+          action: 'pointer_option',
+          reason: 'clicked_mode_option',
+          targetIntent: 'extended-pro',
+          activeIntent: null,
+          label: '6 Pro',
+          rect: { x: 40, y: 40, w: 200, h: 48 },
+          menuOpen: true,
+          menuText: '6 Pro Consumes usage limits faster Pro, 5 of 5',
+          optionHints: ['6 pro', 'instant', 'thinking']
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/menu-never-closes';
+    },
+    async sendKey(key) {
+      keysSent.push(key);
+    },
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown(x, y) {
+      pointerDown.push({ x, y });
+    },
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro' }),
+      (error) => {
+        assert.equal(error?.message, 'mode_intent_activation_failed');
+        assert.equal(error?.data?.reason, 'mode_option_click_ineffective');
+        assert.equal(error?.data?.targetIntent, 'extended-pro');
+        assert.equal(error?.data?.attempts.length, 2);
+        assert.equal(error?.data?.attempts.every((item) => item.action === 'pointer_option'), true);
+        return true;
+      }
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.deepEqual(keysSent, ['Escape']);
+  assert.equal(pointerDown.length, 2);
+});
+
+test('chatgpt-controller: escaping the stuck mode menu lets the closed-menu trigger confirm', async () => {
+  const realNow = Date.now;
+  let fakeNow = 8_500_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+
+  const progress = [];
+  const keysSent = [];
+  let modeSnaps = 0;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        modeSnaps += 1;
+        if (modeSnaps <= 3) {
+          return {
+            active: false,
+            action: 'pointer_option',
+            reason: 'clicked_mode_option',
+            targetIntent: 'extended-pro',
+            activeIntent: null,
+            label: '6 Pro',
+            rect: { x: 40, y: 40, w: 200, h: 48 },
+            menuOpen: true,
+            menuText: '6 Pro Consumes usage limits faster Pro, 5 of 5'
+          };
+        }
+        return {
+          active: true,
+          action: 'none',
+          reason: 'mode_visible_trigger_active',
+          targetIntent: 'extended-pro',
+          activeIntent: 'extended-pro',
+          label: '6 Pro'
+        };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Final answer',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'Final answer\n6 Pro\nChatGPT can make mistakes. Check important info.'
+        };
+      }
+      if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/escape-recovers';
+    },
+    async sendKey(key) {
+      keysSent.push(key);
+    },
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 20_000,
+      modeIntent: 'extended-pro',
+      onProgress: (patch) => progress.push(patch)
+    });
+    assert.equal(result.text, 'Final answer');
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(keysSent[0], 'Escape');
+  assert.equal(keysSent.filter((key) => key === 'Escape').length, 1);
+  const provenancePatch = progress.find((patch) => patch?.phase === 'mode_intent_confirmed');
+  assert.equal(provenancePatch?.modeIntentProvenance?.confirmed, true);
+  assert.equal(provenancePatch?.modeIntentProvenance?.label, '6 Pro');
+  assert.equal(provenancePatch?.modeIntentProvenance?.attempts.length, 2);
+});
+
+test('chatgpt-controller: the mode picker browser eval stays parseable', async () => {
+  // The mode loop's DOM logic lives in a template string executed in the page;
+  // the stubbed-suite tests never parse it, so a syntax error there would reach
+  // production unnoticed. Capture the string and parse it.
+  const realNow = Date.now;
+  let fakeNow = 8_750_000;
+  Date.now = () => {
+    fakeNow += 5_000;
+    return fakeNow;
+  };
+
+  let modeEvalJs = null;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        modeEvalJs = js;
+        return {
+          active: false,
+          action: 'none',
+          reason: 'mode_controls_not_found',
+          targetIntent: 'extended-pro',
+          menuOpen: false
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/eval-parse-check';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    await assert.rejects(controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro' }));
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(typeof modeEvalJs, 'string');
+  assert.doesNotThrow(() => {
+    new Function(modeEvalJs);
+  });
+  assert.match(modeEvalJs, /modeOptionLooksSelected/);
+});
+
+let modePickerEvalJsCache = null;
+async function modePickerEvalJs() {
+  if (modePickerEvalJsCache) return modePickerEvalJsCache;
+  const realNow = Date.now;
+  let fakeNow = 8_900_000;
+  Date.now = () => {
+    fakeNow += 10_000;
+    return fakeNow;
+  };
+  let captured = null;
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        captured = js;
+        return {
+          active: false,
+          action: 'none',
+          reason: 'mode_controls_not_found',
+          targetIntent: 'extended-pro',
+          menuOpen: false
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/mode-eval-capture';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      chatModeButton: '[data-testid="mode-trigger"]',
+      chatModeMenu: '[role="menu"]',
+      chatModeOption: '[role="menuitem"]',
+      chatModeActive: '[aria-pressed="true"]'
+    }
+  });
+  try {
+    await assert.rejects(controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro' }));
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(typeof captured, 'string');
+  modePickerEvalJsCache = captured;
+  return modePickerEvalJsCache;
+}
+
+function modePickerPartMatches(node, part) {
+  if (!part) return false;
+  if (/^[a-zA-Z]+$/.test(part)) return node.tagName.toLowerCase() === part.toLowerCase();
+  const attr = /^\[([a-zA-Z-]+)(?:="([^"]*)")?\]$/.exec(part);
+  if (!attr) return false;
+  const value = node.getAttribute(attr[1]);
+  if (value == null) return false;
+  return attr[2] === undefined || value === attr[2];
+}
+
+function makeModePickerNode({ tag = 'div', text = '', attrs = {}, rect = { x: 0, y: 0, w: 0, h: 0 }, tokens = [], parent = null } = {}) {
+  const node = {
+    tagName: tag,
+    textContent: text,
+    innerText: text,
+    className: '',
+    attrs,
+    parent,
+    tokens,
+    isContentEditable: false,
+    disabled: false,
+    readOnly: false,
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, name) ? String(this.attrs[name]) : null;
+    },
+    getBoundingClientRect() {
+      return { x: rect.x, y: rect.y, width: rect.w, height: rect.h };
+    },
+    matches(part) {
+      return modePickerPartMatches(this, String(part).trim());
+    },
+    closest(selectorList) {
+      let current = this;
+      while (current) {
+        for (const part of String(selectorList).split(',')) {
+          if (modePickerPartMatches(current, part.trim())) return current;
+        }
+        current = current.parent || null;
+      }
+      return null;
+    },
+    contains(other) {
+      let current = other || null;
+      while (current) {
+        if (current === this) return true;
+        current = current.parent || null;
+      }
+      return false;
+    },
+    querySelectorAll(selectorList) {
+      const sel = String(selectorList);
+      return modePickerNodes.filter((candidate) => {
+        let current = candidate;
+        let inside = false;
+        while (current) {
+          if (current === this) {
+            inside = true;
+            break;
+          }
+          current = current.parent || null;
+        }
+        return inside && candidate.tokens.some((token) => sel.includes(token));
+      });
+    }
+  };
+  return node;
+}
+
+function buildModePickerDom({ checked = false, slider = false } = {}) {
+  const body = makeModePickerNode({ tag: 'body', rect: { x: 0, y: 0, w: 1280, h: 900 } });
+  const prompt = makeModePickerNode({
+    tag: 'textarea',
+    rect: { x: 400, y: 800, w: 600, h: 48 },
+    tokens: ['#prompt-textarea', 'textarea'],
+    parent: body
+  });
+  // Shaped like the 2026-09-25 surface: a mode popover that shows the Pro
+  // option ("6" is the remaining-run badge), a usage meter, and slider help.
+  const menu = makeModePickerNode({
+    tag: 'div',
+    text: '6 Pro\nConsumes usage limits faster\nPro, 5 of 5',
+    attrs: { role: 'menu' },
+    rect: { x: 380, y: 520, w: 320, h: 300 },
+    tokens: ['[role="menu"]'],
+    parent: body
+  });
+  modePickerNodes.push(body, prompt, menu);
+  if (slider) {
+    const track = makeModePickerNode({
+      tag: 'div',
+      attrs: { 'data-orientation': 'horizontal' },
+      rect: { x: 390, y: 700, w: 300, h: 20 },
+      parent: menu
+    });
+    const thumb = makeModePickerNode({
+      tag: 'div',
+      text: 'Pro',
+      attrs: {
+        role: 'slider',
+        'aria-label': 'Power',
+        'aria-valuemin': '0',
+        'aria-valuemax': '4',
+        'aria-valuenow': '4'
+      },
+      rect: { x: 600, y: 706, w: 12, h: 24 },
+      tokens: ['[role="slider"]', '[aria-valuenow]'],
+      parent: track
+    });
+    modePickerNodes.push(track, thumb);
+  } else {
+    const row = makeModePickerNode({
+      tag: 'div',
+      text: '6 Pro',
+      attrs: { role: 'menuitemradio', 'aria-checked': checked ? 'true' : 'false' },
+      rect: { x: 390, y: 540, w: 300, h: 130 },
+      tokens: ['[role="menuitemradio"]', '[aria-checked]', 'div'],
+      parent: menu
+    });
+    const label = makeModePickerNode({
+      tag: 'span',
+      text: '6 Pro',
+      rect: { x: 398, y: 548, w: 64, h: 18 },
+      tokens: ['span'],
+      parent: row
+    });
+    modePickerNodes.push(row, label);
+  }
+  const document = {
+    body,
+    querySelectorAll(selectorList) {
+      const sel = String(selectorList);
+      return modePickerNodes.filter((node) => node.tokens.some((token) => sel.includes(token)));
+    },
+    querySelector(selectorList) {
+      return this.querySelectorAll(selectorList)[0] || null;
+    }
+  };
+  return {
+    document,
+    window: { getComputedStyle: () => ({}) }
+  };
+}
+
+let modePickerNodes = [];
+
+test('chatgpt-controller: mode picker eval proposes the clickable option row, not its bare label span', async () => {
+  const js = await modePickerEvalJs();
+  modePickerNodes = [];
+  const snap = vm.runInNewContext(js, buildModePickerDom({ checked: false }));
+  assert.equal(snap.action, 'pointer_option');
+  assert.equal(snap.reason, 'clicked_mode_option');
+  assert.equal(snap.label, '6 pro');
+  assert.equal(snap.rect.x, 390);
+  assert.equal(snap.rect.y, 540);
+  assert.equal(snap.rect.w, 300);
+  assert.equal(snap.rect.h, 130);
+  assert.equal(snap.menuOpen, true);
+  assert.equal(snap.active, false);
+});
+
+test('chatgpt-controller: mode picker eval confirms a menu-marked selected option with the menu still open', async () => {
+  const js = await modePickerEvalJs();
+  modePickerNodes = [];
+  const snap = vm.runInNewContext(js, buildModePickerDom({ checked: true }));
+  assert.equal(snap.active, true);
+  assert.equal(snap.reason, 'mode_option_marked_selected');
+  assert.equal(snap.activeIntent, 'extended-pro');
+  assert.equal(snap.label, '6 pro');
+  assert.equal(snap.evidenceKind, 'checked_menu_option');
+  assert.equal(snap.menuOpen, true);
+});
+
+test('chatgpt-controller: mode picker eval confirms the effort slider found without the legacy Power wrapper', async () => {
+  const js = await modePickerEvalJs();
+  modePickerNodes = [];
+  const snap = vm.runInNewContext(js, buildModePickerDom({ slider: true }));
+  assert.equal(snap.active, true);
+  assert.equal(snap.reason, 'mode_power_active');
+  assert.equal(snap.activeIntent, 'extended-pro');
+  assert.equal(snap.evidenceKind, 'supported_power_slider');
+  assert.equal(snap.powerMin, 0);
+  assert.equal(snap.powerMax, 4);
+  assert.equal(snap.powerIndex, 4);
+  assert.equal(snap.targetPowerIndex, 4);
+  assert.equal(snap.menuOpen, true);
+});
+
 test('chatgpt-controller: the composer slider label does not read as a downgraded mode', async () => {
   // Observed on chatgpt.com 2026-09-05: main's text ends with the composer's own
   // "Thinking effort" slider label, after the footer disclaimer. It names a

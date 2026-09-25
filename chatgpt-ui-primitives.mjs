@@ -85,6 +85,21 @@ export function modeIntentLabelLooksUsable(label, targetIntent) {
   return false;
 }
 
+export function modeOptionLooksSelected({ ariaChecked, ariaSelected, ariaPressed, ariaCurrent, dataState } = {}) {
+  const truthy = (value) => String(value ?? '').trim().toLowerCase() === 'true';
+  const current = String(ariaCurrent ?? '').trim().toLowerCase();
+  const state = String(dataState ?? '').trim().toLowerCase();
+  return (
+    truthy(ariaChecked) ||
+    truthy(ariaSelected) ||
+    truthy(ariaPressed) ||
+    (current.length > 0 && current !== 'false') ||
+    state === 'checked' ||
+    state === 'active' ||
+    state === 'on'
+  );
+}
+
 export function modePowerScaleLooksSupported({ min, max, current } = {}) {
   return (
     Number.isInteger(min) &&
@@ -440,6 +455,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${normalizeModeIntentToken.toString()}
     ${modeIntentForLabel.toString()}
     ${modeIntentLabelLooksUsable.toString()}
+    ${modeOptionLooksSelected.toString()}
     ${parseModePowerInteger.toString()}
     ${modePowerScaleLooksSupported.toString()}
     ${modePowerIntentForSupportedScale.toString()}
@@ -451,6 +467,7 @@ export const CHATGPT_MODE_PICKER_PRIMITIVES_JS = String.raw`
     ${modeTriggerConfirmsActive.toString()}
     return {
       modeIntentForLabel,
+      modeOptionLooksSelected,
       parseModePowerInteger,
       modePowerScaleLooksSupported,
       modePowerIntentForSupportedScale,
