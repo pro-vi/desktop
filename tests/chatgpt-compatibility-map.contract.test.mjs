@@ -171,7 +171,9 @@ test('chatgpt compatibility map: transcript capture dependencies are exact and m
       { dependency: 'conversation-artifact-download-button', selector: 'button[aria-label="Download file"]' },
       { dependency: 'conversation-artifact-named-button', selector: 'button[aria-label]' },
       { dependency: 'transcript-message-unit', selector: '[data-chatgpt-search-unit-key]' },
-      { dependency: 'transcript-older-history-loading', selector: '[role="status"]' }
+      { dependency: 'transcript-older-history-loading', selector: '[role="status"]' },
+      { dependency: 'transcript-message-ids-container', selector: '[data-chatgpt-search-message-ids]' },
+      { dependency: 'conversation-artifact-name-title', selector: '[title]' }
     ]
   );
 });

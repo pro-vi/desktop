@@ -3073,7 +3073,15 @@ test('chatgpt-controller: query selects Pro through the compact power picker', a
   }
 });
 
-function freshTabPowerPage({ escapeRoute }) {
+function freshTabPowerPage({
+  escapeRoute,
+  targetIntent = 'extended-pro',
+  startIntent = 'instant',
+  startLabel = 'Instant',
+  startIndex = 0,
+  targetLabel = 'Pro',
+  targetIndex = 4
+}) {
   // Fresh tab: trigger opens the menu, the power slider sits on Instant
   // (index 0) and only the chosen escape route moves it to Pro.
   const progress = [];
@@ -3086,25 +3094,25 @@ function freshTabPowerPage({ escapeRoute }) {
     active: false,
     action: 'pointer_power',
     reason: 'clicked_mode_power',
-    targetIntent: 'extended-pro',
-    activeIntent: 'instant',
-    label: 'Instant',
+    targetIntent,
+    activeIntent: startIntent,
+    label: startLabel,
     rect: { x: 174, y: 74, w: 12, h: 12 },
     thumbRect: { x: 90, y: 74, w: 12, h: 12 },
     trackRect: { x: 60, y: 74, w: 240, h: 12 },
     menuOpen: true,
-    powerIndex: 0,
+    powerIndex: startIndex,
     powerMin: 0,
     powerMax: 4,
-    targetPowerIndex: 4
+    targetPowerIndex: targetIndex
   });
   const optionSnap = {
     active: false,
     action: 'pointer_option',
     reason: 'clicked_mode_option',
-    targetIntent: 'extended-pro',
+    targetIntent,
     activeIntent: null,
-    label: 'Pro',
+    label: targetLabel,
     rect: { x: 200, y: 140, w: 120, h: 32 },
     menuOpen: true
   };
@@ -3112,12 +3120,12 @@ function freshTabPowerPage({ escapeRoute }) {
     active: true,
     action: 'none',
     reason: 'mode_power_active',
-    targetIntent: 'extended-pro',
-    activeIntent: 'extended-pro',
-    label: 'Pro',
+    targetIntent,
+    activeIntent: targetIntent,
+    label: targetLabel,
     evidenceKind: 'supported_power_slider',
     menuOpen: true,
-    powerIndex: 4
+    powerIndex: targetIndex
   };
   const page = {
     async navigate() {},
@@ -3129,9 +3137,9 @@ function freshTabPowerPage({ escapeRoute }) {
             active: false,
             action: 'pointer_trigger',
             reason: 'clicked_mode_trigger',
-            targetIntent: 'extended-pro',
-            activeIntent: 'instant',
-            label: 'Instant',
+            targetIntent,
+            activeIntent: startIntent,
+            label: startLabel,
             rect: { x: 40, y: 40, w: 100, h: 28 },
             signature: '40:40:100:28:instant',
             menuOpen: false
@@ -3163,7 +3171,7 @@ function freshTabPowerPage({ escapeRoute }) {
           hasError: false,
           hasContinue: false,
           isThinking: false,
-          pageText: 'Final answer\nPro\nChatGPT can make mistakes. Check important info.'
+          pageText: `Final answer\n${targetLabel}\nChatGPT can make mistakes. Check important info.`
         };
       }
       if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
@@ -3277,6 +3285,50 @@ test('chatgpt-controller: a power slider immune to pointer input is set by keybo
       provenancePatch?.modeIntentProvenance?.attempts?.map((item) => item.action),
       ['pointer_power', 'pointer_power', 'pointer_power']
     );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a power slider at Pro is moved down to Medium by keyboard', async () => {
+  // Live 2026-09-26: an image request needing Thinking found the slider on
+  // Pro; the keyboard step only ever pressed keys toward the right.
+  const realNow = Date.now;
+  let fakeNow = 6_375_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+  const harness = freshTabPowerPage({
+    escapeRoute: 'keyboard',
+    targetIntent: 'thinking',
+    startIntent: 'extended-pro',
+    startLabel: 'Pro',
+    startIndex: 4,
+    targetLabel: 'Medium',
+    targetIndex: 1
+  });
+  harness.setPickerPhase('instant');
+  let lefts = 0;
+  harness.setSendKeyHandler(async (key) => {
+    harness.keys.push(key);
+    if (key === 'ArrowLeft') lefts += 1;
+    if (lefts === 3) harness.setPickerPhase('pro');
+  });
+  const controller = new ChatGPTController({
+    page: harness.page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({ prompt: 'agentify', timeoutMs: 60_000, modeIntent: 'thinking' });
+    assert.equal(result.text, 'Final answer');
+    assert.deepEqual(harness.keys.filter((key) => /^Arrow|^Home$|^End$/.test(key)), ['ArrowLeft', 'ArrowLeft', 'ArrowLeft']);
   } finally {
     Date.now = realNow;
   }
@@ -6139,6 +6191,161 @@ test('chatgpt-controller: a changed deep research planning panel without the nat
       (error) => {
         assert.equal(error?.message, 'response_reconcile_timeout');
         // The changed planning frame never satisfied the report path.
+        assert.equal(error?.data?.responseDebug?.deepResearchReport, false);
+        return true;
+      }
+    );
+    assert.equal(deepResearchReads >= 2, true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a Deep Research acknowledgement reply does not finish the run while its report frame is incomplete', async () => {
+  const realNow = Date.now;
+  let fakeNow = 8_100_000;
+  let clockMode = 'default';
+  Date.now = () => {
+    fakeNow += clockMode === 'wait' ? 10 * 60_000 : 100;
+    return fakeNow;
+  };
+
+  // ChatGPT acknowledges a Deep Research request with an ordinary assistant
+  // reply while the report builds in its app frame (live 2026-09-26). The
+  // reply is stable and role-qualified, but until the frame shows its
+  // "Research completed in" marker it is not the output: the observation must
+  // keep waiting, here into the reconciliation timeout.
+  let waitChecks = 0;
+  let deepResearchReads = 0;
+  const progress = [];
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('clicked_deep_research_option')) {
+        return { action: 'click_item', reason: 'clicked_deep_research_option', label: 'deep research' };
+      }
+      if (js.includes('research_activation_pending')) {
+        return {
+          active: true,
+          action: 'none',
+          reason: 'latched_after_click',
+          menuOpen: false,
+          composerHints: ['deep research'],
+          promptHints: [],
+          inlinePromptSelection: true
+        };
+      }
+      if (js.includes('research_inline_selection_missing')) {
+        return { ok: true, inlinePromptSelection: true };
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes('return { count: nodes.length')) {
+        return { count: 1, lastText: 'prior research answer', pageText: 'prior research answer', providerMessageId: 'prior-research-answer' };
+      }
+      if (js.includes("already_generating")) return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('publishedCaptureWindow')) {
+        return {
+          captureWindow: {
+            status: 'partial',
+            reason: 'conversation_capture_timeout',
+            rawTurns: [],
+            evidence: {
+              topBoundary: false,
+              bottomBoundary: false,
+              orderedWindowStitching: true,
+              scrollPasses: 0,
+              windowCount: 1,
+              messageCount: 0,
+              providerIdCount: 0,
+              byteCount: 0
+            }
+          },
+          artifactInventory: { status: 'partial', reason: 'conversation_capture_timeout', items: [] }
+        };
+      }
+      if (js.includes('fallbackMainText')) {
+        clockMode = 'wait';
+        waitChecks += 1;
+        if (waitChecks === 1) {
+          return {
+            stop: true,
+            stopCount: 1,
+            sendEnabled: false,
+            sendFound: true,
+            txt: '',
+            count: 0,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: true,
+            pageText: ''
+          };
+        }
+        return {
+          stop: false,
+          stopCount: 0,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Deep Research has started working on your question.',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          hasRegenerate: false,
+          isThinking: false,
+          pageText: 'Deep Research has started working on your question.',
+          providerMessageId: 'research-ack',
+          qualifiedCount: 1,
+          qualifiedTxt: 'Deep Research has started working on your question.',
+          qualifiedProviderMessageId: 'research-ack',
+          deepResearchFramePresent: true,
+          currentUrl: 'https://chatgpt.com/c/research-planning-timeout'
+        };
+      }
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/research-planning-timeout'; },
+    async evaluateDeepResearch() {
+      deepResearchReads += 1;
+      return deepResearchReads === 1
+        ? ''
+        : 'Searching the web\nPlanning: compare primary sources before drafting.';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]',
+      researchModeButton: '[data-testid="research-button"]',
+      researchModeMenu: '[role="menu"]',
+      researchModeOption: '[role="menuitem"]',
+      researchModeActive: '[aria-pressed="true"]'
+    }
+  });
+
+  try {
+    await assert.rejects(
+      controller.research({
+        prompt: 'Investigate this.',
+        timeoutMs: 10_000,
+        outDir: os.tmpdir(),
+        onProgress: (patch) => progress.push(patch)
+      }),
+      (error) => {
+        assert.equal(error?.message, 'response_reconcile_timeout');
+        // The acknowledgement never became the report.
         assert.equal(error?.data?.responseDebug?.deepResearchReport, false);
         return true;
       }
@@ -10271,6 +10478,15 @@ test('controller: message readers take role and id from the search-unit markup',
   assert.equal(chatgptMessageId(markupNode({}, reloadedUnit), null), '27eec943-aaaa');
 });
 
+test('controller: message readers read an image reply from the heading before its id container', () => {
+  const heading = markupNode({ 'data-conversation-role': 'assistant' });
+  const container = markupNode({ 'data-chatgpt-search-message-ids': '0933a229-8900-44e0-a373-ad6ce030a275' });
+  container.previousElementSibling = heading;
+  const gallery = markupNode({ 'data-testid': 'generated-image-gallery' }, container);
+  assert.equal(chatgptMessageRole(gallery), 'assistant');
+  assert.equal(chatgptMessageId(gallery, '[data-message-id]'), '0933a229-8900-44e0-a373-ad6ce030a275');
+});
+
 test('controller: message readers still read the role-attribute markup', () => {
   const owner = markupNode({ 'data-message-id': 'msg-owner' });
   const node = markupNode({ 'data-message-author-role': 'assistant' }, owner);
@@ -10370,7 +10586,8 @@ function searchUnitConversationPage(messages, {
       },
       hasAttribute: () => false,
       closest(selector) {
-        return selector === '[data-chatgpt-search-unit-key]' ? (message.role === 'user' ? node : unit) : null;
+        if (selector !== '[data-chatgpt-search-unit-key]' && selector !== '[data-chatgpt-search-message-ids]') return null;
+        return message.role === 'user' ? node : unit;
       },
       checkVisibility: () => true,
       getClientRects: () => [{}],

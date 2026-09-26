@@ -66,8 +66,11 @@ export function normalizeModeIntentToken(value) {
   return null;
 }
 
+// "Select ChatGPT model thinking effort" names the mode control itself, and
+// the selected level follows it ("...thinking effortPro"), so the phrase is
+// removed before a label is read as a mode.
 export function modeIntentForLabel(label) {
-  const text = normalizeUiText(label);
+  const text = normalizeUiText(label).replace(/\bthinking\s*effort/g, ' ').trim();
   if (!text || text.length > 180 || isBlockedUiLabel(text)) return null;
   if (/\bthinking\b|\breasoning\b|\bmedium\b/.test(text)) return 'thinking';
   if (/\binstant\b|\bfast\b/.test(text)) return 'instant';
@@ -76,7 +79,7 @@ export function modeIntentForLabel(label) {
 }
 
 export function modeIntentLabelLooksUsable(label, targetIntent) {
-  const text = normalizeUiText(label);
+  const text = normalizeUiText(label).replace(/\bthinking\s*effort/g, ' ').trim();
   const target = normalizeModeIntentToken(targetIntent);
   if (!text || !target || text.length > 180 || isBlockedUiLabel(text)) return false;
   if (target === 'extended-pro') return /\bextended\s*pro\b|\bpro\s*extended\b|^\d{0,3}\s*pro\b(?!\s+standard\b)/.test(text);

@@ -288,3 +288,25 @@ test('compatibility policy sentinel: operator contract rejects globally-latest a
   assert.match(readmeSource, /Restart both Agentify Desktop and the MCP server/i);
   assert.match(readmeSource, /automatically or programmatically extracting data or output/i);
 });
+
+test('compatibility policy: an anchor the operation produces is resolved after the operation', async () => {
+  // A new conversation has no assistant reply until the response observation
+  // has run; resolving before it recorded every response as anchor-absent.
+  const absentRaw = {
+    type: 'chatgpt-anchor-resolution', schemaVersion: 1, ok: true,
+    anchorId: 'assistant-message', branchId: null, branchKind: null, branchSource: null,
+    selectorHash: null, rolloutSignature: 'c'.repeat(64), matchCount: 0,
+    descriptor: null, postcondition: { status: 'fail', reasonCode: 'anchor-absent' }
+  };
+  const observations = [];
+  const { controller, page } = makeController({ raw: absentRaw, observations });
+  const result = await controller.runCompatibilityCapability('response', async () => {
+    page.evaluate = async () => resolvedRaw('assistant-message');
+    return { produced: true };
+  }, { anchorId: 'assistant-message', resolveAnchorAfterOperation: true });
+
+  assert.deepEqual(result, { produced: true });
+  const capability = observations.find(({ kind }) => kind === 'capability');
+  assert.equal(capability.status, 'ok');
+  assert.equal(capability.reasonCode, 'postcondition-satisfied');
+});

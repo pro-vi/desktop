@@ -36,7 +36,7 @@ Negative:
 
 - Contiguity of a rendered window is an assumption about ChatGPT's virtualizer, not something the page proves. A virtualizer that skipped messages inside one window would go unnoticed.
 - A reply and the Deep Research report after it render as one unit with one content element; the capture keeps them as one turn under the unit's first id. Transcripts taken on the earlier markup split them.
-- Conversation file artifacts still need positions, so on this markup an artifact inventory with file cards is `partial`.
+- A file card has no provider position on this markup; its descriptor takes the message's place in the finished transcript, so the position is only as good as the capture's completeness.
 - The top boundary rests on the status spinner; a load that fails without one would end early.
 
 ## Revisit Triggers

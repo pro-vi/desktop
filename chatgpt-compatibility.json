@@ -141,6 +141,12 @@
           "id": "prompt-textarea-canonical",
           "kind": "canonical",
           "source": "contract",
+          "selector": "div[contenteditable=\"true\"][role=\"textbox\"][data-composer-markdown]"
+        },
+        {
+          "id": "prompt-textarea-legacy-id",
+          "kind": "legacy",
+          "source": "contract",
           "selector": "#prompt-textarea"
         },
         {
@@ -241,6 +247,12 @@
         {
           "id": "send-button-canonical",
           "kind": "canonical",
+          "source": "contract",
+          "selector": "form[data-chatgpt-composer] button[type=\"submit\"]"
+        },
+        {
+          "id": "send-button-legacy-testid",
+          "kind": "legacy",
           "source": "contract",
           "selector": "button[data-testid=\"send-button\"]"
         },
@@ -385,6 +397,12 @@
           "kind": "canonical",
           "source": "contract",
           "selector": "[data-chatgpt-search-unit-key$=\":assistant\"] [data-chatgpt-selection-conversation-id]"
+        },
+        {
+          "id": "assistant-message-image-reply",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-conversation-role=\"assistant\"] + [data-chatgpt-search-message-ids]"
         },
         {
           "id": "assistant-message-legacy-role-attribute",
@@ -604,6 +622,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": ".popover[aria-busy=\"false\"]"
+        },
+        {
+          "id": "composer-menu-floating-overlay",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-composer-overlay-floating-ui]"
         }
       ]
     },
@@ -645,6 +669,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": "[data-fill][tabindex=\"0\"]"
+        },
+        {
+          "id": "composer-menu-item-list-navigation",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-list-navigation-item]"
         }
       ]
     },
@@ -666,6 +696,12 @@
         {
           "id": "chat-mode-button-canonical",
           "kind": "canonical",
+          "source": "contract",
+          "selector": "button[data-codex-intelligence-trigger]"
+        },
+        {
+          "id": "chat-mode-button-legacy-thinking-label",
+          "kind": "legacy",
           "source": "contract",
           "selector": "button[aria-label*=\"thinking\" i]"
         },
@@ -1215,6 +1251,12 @@
           "kind": "legacy",
           "source": "contract",
           "selector": ".popover[aria-busy=\"false\"]"
+        },
+        {
+          "id": "research-mode-menu-floating-overlay",
+          "kind": "legacy",
+          "source": "contract",
+          "selector": "[data-composer-overlay-floating-ui]"
         }
       ]
     },
@@ -1289,6 +1331,12 @@
         {
           "id": "research-mode-active-canonical",
           "kind": "canonical",
+          "source": "contract",
+          "selector": "[data-prompt-link-href=\"app://connector_openai_deep_research\"]"
+        },
+        {
+          "id": "research-mode-active-legacy-aria-pressed",
+          "kind": "legacy",
           "source": "contract",
           "selector": "[aria-pressed=\"true\"][aria-label*=\"deep research\" i]"
         },
@@ -1978,6 +2026,22 @@
     "dependency": "transcript-older-history-loading",
     "reason": "the provider-visible message area shows a status spinner above the first served message while older history is still loading, so the top of what is loaded is not yet the top of the conversation",
     "selector": "[role=\"status\"]"
+  },
+  {
+    "id": "controller-dom-057",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "transcript-message-ids-container",
+    "reason": "the provider-visible search-unit markup lists a message's provider ids on its container, a search unit for text and a bare container after the role heading for an image reply",
+    "selector": "[data-chatgpt-search-message-ids]"
+  },
+  {
+    "id": "controller-dom-058",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "conversation-artifact-name-title",
+    "reason": "the provider-visible file card labels its preview button with a phrase ending in the file name and carries the bare file name as a title attribute",
+    "selector": "[title]"
   }
 ]
 }

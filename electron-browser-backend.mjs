@@ -220,6 +220,9 @@ class ElectronPageAdapter {
 
   async sendKey(key, { modifiers = [] } = {}) {
     const wc = this.win.webContents;
+    // Callers use DOM key names; sendInputEvent takes accelerator names, which
+    // spell the arrow keys Up/Down/Left/Right (Home and End are the same).
+    key = ELECTRON_KEY_NAMES[key] || key;
     wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
     const hasCommandModifier = Array.isArray(modifiers) && modifiers.some((m) => m === 'control' || m === 'meta' || m === 'alt');
     if (typeof key === 'string' && key.length === 1 && !hasCommandModifier) {
@@ -594,6 +597,8 @@ class ElectronPresenter {
     if (!this.isClosed()) this.win.close();
   }
 }
+
+const ELECTRON_KEY_NAMES = Object.freeze({ ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right' });
 
 export class ElectronBrowserBackend {
   constructor({ windowDefaults, userAgent, popupPolicy, onChanged, BrowserWindowClass = BrowserWindow } = {}) {

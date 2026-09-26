@@ -55,7 +55,7 @@ for (const name of ['current', 'legacy', 'ambiguous', 'hidden', 'wrong-node', 'a
 
 test('resolver fixture sentinel: deleting the canonical node selects legacy and is visibly degraded', async () => {
   const fixture = await readFixture('ambiguous');
-  fixture.nodes = fixture.nodes.filter((node) => !node.selectors.includes('#prompt-textarea'));
+  fixture.nodes = fixture.nodes.filter((node) => !node.selectors.includes('div[contenteditable="true"][role="textbox"][data-composer-markdown]'));
   const raw = vm.runInNewContext(
     compileChatGptAnchorEvaluator({ profile, anchorId: fixture.anchorId }),
     { document: fixtureDocument(fixture) }

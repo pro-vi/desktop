@@ -56,6 +56,10 @@ Counts start from the instance's first run on a build that has the counter (2026
 
 Optional local pre-push convenience (documented, never auto-installed): `npm test && git push`. The workflow has no `pull_request` trigger on purpose (a fork PR would run untrusted code on the shared household runner) and no concurrency group on purpose (nothing to supersede without PRs; every SHA keeps its own run).
 
+## Feature checklist
+
+`docs/mcp-method-happy-paths.md` is the maintained list of every MCP method, its journey and pass condition, and its last verified status with evidence. Every row stays ✅: a change to a method's code path, or a ChatGPT page change that breaks one, re-runs that row's journey and updates its status column; a failing row is recorded as ❌ with the run, never dropped. The local rows run through `scripts/e2e-*.mjs` (no provider sends); the live rows need consent under "Live provider probes" below.
+
 ## Live provider probes
 
 Probes against the real ChatGPT surface need explicit scoped consent from the user for that probe before anything is sent. Follow the exemplar skeleton under `docs/probes/` (respawn via `agentify_shutdown` → exercise one bounded behavior → verify against the run record → record under `docs/probes/YYYY-MM-DD-<name>.md` → close the tab). A reusable consent-gated probe runner is deferred in `BACKLOG.md` with a reopen trigger, not silently dropped.

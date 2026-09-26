@@ -5,6 +5,7 @@ import { CHATGPT_MODEL_INTENTS, normalizeChatGptModeIntent, normalizeChatGptMode
 import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-location.mjs';
 import { providerConversationIdFromOwnedLocation } from './conversation-identity.mjs';
 import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
+import { DEEP_RESEARCH_IFRAME_SELECTOR } from './deep-research-target.mjs';
 import {
   TRANSCRIPT_TURN_MAX_TEXT_CHARS,
   parseConversationCapture,
@@ -37,6 +38,15 @@ const EVALUATION_TERMINATION_TIMEOUT_MS = 5_000;
 const PROMPT_DELIVERY_READ_TIMEOUT_MS = 2_000;
 const RESPONSE_BACKSTOP_MARGIN_MS = 10_000;
 const DEEP_RESEARCH_OBSERVATION_INTERVAL_MS = 5_000;
+// Deep Research selected in the composer shows inside the prompt editor: as
+// an inline pill or system hint earlier, and as an app-mention token linking
+// app://connector_openai_deep_research now (observed 2026-09-26). The prompt
+// is typed after it, since clearing the editor would drop the selection.
+const DEEP_RESEARCH_INLINE_SELECTION_SELECTOR = [
+  '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"]',
+  '[data-system-hint-type="plugin:connector_openai_deep_research"]',
+  '[data-prompt-link-href="app://connector_openai_deep_research"]'
+].join(', ');
 // Pro can think for many minutes, and an answer that lands after the hard
 // deadline is never attached to its run, so the default grace stretches the
 // hard deadline (soft deadline + grace) to at least this long.
@@ -78,18 +88,21 @@ function clipText(value, max = 240) {
 // Page-side readers, injected into evaluated scripts with toString(), so a
 // script asks for a message's role and id the same way on either markup.
 // ChatGPT's earlier markup put data-message-author-role and data-message-id
-// on each message. Its current markup (observed live 2026-09-25) makes each
-// message a search unit whose key ends in its role
-// (`fallback-turn-0:2:assistant`); a user unit lists its id in
-// data-chatgpt-search-message-ids, and an assistant unit's content element
-// gains data-chatgpt-selection-message-id only once the answer is final, so
-// an assistant message still streaming has no id yet.
+// on each message. Its current markup (observed live 2026-09-25) lists a
+// message's ids in data-chatgpt-search-message-ids on its container: a text
+// message's container is a search unit whose key ends in its role
+// (`fallback-turn-0:2:assistant`); an image reply's container is bare and
+// follows its role heading (h4[data-conversation-role]). An assistant text's
+// content element gains data-chatgpt-selection-message-id only once the answer
+// is final, and the unit's id list can stay empty until a reload.
 export function chatgptMessageRole(node) {
   const legacy = String(node?.getAttribute?.('data-message-author-role') || '').trim();
   if (legacy) return legacy;
   const unit = node?.closest?.('[data-chatgpt-search-unit-key]');
   const matched = /:([A-Za-z]+)$/.exec(String(unit?.getAttribute?.('data-chatgpt-search-unit-key') || ''));
-  return matched ? matched[1] : '';
+  if (matched) return matched[1];
+  const container = node?.closest?.('[data-chatgpt-search-message-ids]');
+  return String(container?.previousElementSibling?.getAttribute?.('data-conversation-role') || '').trim();
 }
 
 export function chatgptMessageId(node, ownerSelector) {
@@ -98,9 +111,57 @@ export function chatgptMessageId(node, ownerSelector) {
   if (legacy) return String(legacy);
   const selection = String(node?.getAttribute?.('data-chatgpt-selection-message-id') || '').trim();
   if (selection) return selection;
-  const unit = node?.closest?.('[data-chatgpt-search-unit-key]');
-  const ids = String(unit?.getAttribute?.('data-chatgpt-search-message-ids') || '').trim();
+  const container = node?.closest?.('[data-chatgpt-search-message-ids]');
+  const ids = String(container?.getAttribute?.('data-chatgpt-search-message-ids') || '').trim();
   return ids ? ids.split(/\s+/)[0] : '';
+}
+
+// The scrollable ancestor holding every served message node; a box inside
+// one message (a wide table, a collapsed long prompt) can scroll too.
+export function chatgptMessageArea(nodes) {
+  const last = nodes[nodes.length - 1];
+  for (let area = nodes[0]?.parentElement || null; area && area !== document.documentElement; area = area.parentElement) {
+    if (!area.contains(last)) continue;
+    const overflowY = String(getComputedStyle(area).overflowY || '');
+    if (/auto|scroll|overlay/.test(overflowY) && area.scrollHeight > area.clientHeight + 1) return area;
+  }
+  return null;
+}
+
+// Moves the message area so the given message stays 40px inside the edge it
+// is moving away from: that message stays served, so the next window overlaps
+// this one. Lowering scrollTop moves toward the top in both normal and
+// column-reverse containers. Returns whether the area moved.
+export function chatgptStepMessageArea(area, message, direction) {
+  if (!area || !message) return false;
+  const areaRectangle = area.getBoundingClientRect();
+  const messageRectangle = message.getBoundingClientRect();
+  const delta = direction === 'up'
+    ? (areaRectangle.bottom - 40) - messageRectangle.top
+    : messageRectangle.bottom - (areaRectangle.top + 40);
+  const before = area.scrollTop;
+  area.scrollTop = before + (direction === 'up' ? -1 : 1) * Math.max(1, delta);
+  return Math.abs(area.scrollTop - before) > 0.5;
+}
+
+// While older history is still loading, ChatGPT serves a role=status spinner
+// above the first message; the area then cannot move up yet, but that is not
+// the top of the conversation.
+export function chatgptOlderHistoryLoading(area, first) {
+  if (!first || !area) return false;
+  return Array.from(area.querySelectorAll('[role="status"]'))
+    .some((status) => (status.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+}
+
+// A file card's name. The earlier card labelled its named button with the
+// bare file name; the current card labels it "Open preview of <file>" and
+// carries the bare name as a title attribute inside the same card.
+export function chatgptFileCardName(label, card) {
+  const text = String(label || '').trim();
+  const titles = Array.from(card?.querySelectorAll?.('[title]') || [])
+    .map((element) => String(element.getAttribute?.('title') || '').trim())
+    .filter((title) => title && title !== text && text.endsWith(title));
+  return titles.length === 1 ? titles[0] : text;
 }
 
 function extractChatGptTranscriptMessageText(node) {
@@ -606,7 +667,10 @@ export class ChatGPTController {
     anchorId = null,
     postcondition = () => true,
     authoritativeTerminal = false,
-    mapResult = null
+    mapResult = null,
+    // An anchor that only exists once the operation has produced it (the reply
+    // a response observation waits for) is resolved after the operation.
+    resolveAnchorAfterOperation = false
   } = {}) {
     if (typeof operation !== 'function') throw new Error('compatibility_operation_required');
     const contract = this.uiContract;
@@ -630,11 +694,12 @@ export class ChatGPTController {
       vendorId: 'chatgpt',
       backend: this.compatibilityBackend
     });
-    const resolution = await evaluateChatGptAnchor({
+    const resolveAnchor = async () => await evaluateChatGptAnchor({
       page: this.page,
       uiContract: contract,
       anchorId: selectedAnchorId
     });
+    let resolution = resolveAnchorAfterOperation ? null : await resolveAnchor();
     const emitResolution = async () => {
       if (resolution.kind === 'apparatus') {
         return await this.recordCompatibilityObservation({
@@ -682,6 +747,7 @@ export class ChatGPTController {
 
     try {
       const operationResult = await operation();
+      if (!resolution) resolution = await resolveAnchor();
       const result = typeof mapResult === 'function'
         ? await mapResult(operationResult, resolution)
         : operationResult;
@@ -703,6 +769,7 @@ export class ChatGPTController {
       }
       return result;
     } catch (error) {
+      if (!resolution) resolution = await resolveAnchor();
       if (resolution.kind !== 'apparatus') await emitResolution();
       await emitCapability('fail', 'operation-failed');
       if (resolution.kind === 'apparatus') await emitResolution();
@@ -1310,6 +1377,7 @@ export class ChatGPTController {
       const transcriptTextForNode = ${extractChatGptTranscriptMessageText.toString()};
       const messageRole = ${chatgptMessageRole.toString()};
       const messageId = ${chatgptMessageId.toString()};
+      const cardName = ${chatgptFileCardName.toString()};
       // The search-unit markup has no turn-ordinal owners: messages carry ids
       // but no position, so windows stitch by overlapping ids alone.
       const searchUnitMarkup = document.querySelector?.('[data-chatgpt-search-unit-key]') != null &&
@@ -1557,7 +1625,10 @@ export class ChatGPTController {
             artifactInputInvalid = true;
             continue;
           }
-          if (!providerMessageId || !Number.isSafeInteger(providerTurnIndex)) {
+          // On the search-unit markup a message has no position while it is
+          // read; the card takes the message's place in the finished
+          // transcript once the capture ends.
+          if (!providerMessageId || (!searchUnitMarkup && !Number.isSafeInteger(providerTurnIndex))) {
             artifactInputInvalid = true;
             continue;
           }
@@ -1575,7 +1646,7 @@ export class ChatGPTController {
               break;
             }
             if (candidates.length === 1) {
-              name = String(candidates[0].getAttribute?.('aria-label') || '').trim();
+              name = cardName(candidates[0].getAttribute?.('aria-label'), container);
               break;
             }
             if (candidates.length > 1) {
@@ -2420,34 +2491,11 @@ export class ChatGPTController {
       // which treats scrollTop 0 as the top, cannot drive it. It takes the
       // message-anchored walk instead, stepping the message area itself.
       const scroller = searchUnitMarkup ? null : findScroller();
-      // The scrollable ancestor holding every served message; a box inside
-      // one message (a wide table, a collapsed long prompt) can scroll too.
-      const messageArea = () => {
-        const nodes = messageNodes();
-        const last = nodes[nodes.length - 1];
-        for (let area = nodes[0]?.parentElement || null; area && area !== document.documentElement; area = area.parentElement) {
-          if (!area.contains(last)) continue;
-          const overflowY = String(getComputedStyle(area).overflowY || '');
-          if (/auto|scroll|overlay/.test(overflowY) && area.scrollHeight > area.clientHeight + 1) return area;
-        }
-        return null;
-      };
-      // Moves the message area so the given message stays 40px inside the
-      // edge it is moving away from: that message stays served, so the next
-      // window overlaps this one. Lowering scrollTop moves toward the top in
-      // both normal and column-reverse containers. Returns whether it moved.
-      const stepMessageArea = (message, direction) => {
-        const area = messageArea();
-        if (!area || !message) return false;
-        const areaRectangle = area.getBoundingClientRect();
-        const messageRectangle = message.getBoundingClientRect();
-        const delta = direction === 'up'
-          ? (areaRectangle.bottom - 40) - messageRectangle.top
-          : messageRectangle.bottom - (areaRectangle.top + 40);
-        const before = area.scrollTop;
-        area.scrollTop = before + (direction === 'up' ? -1 : 1) * Math.max(1, delta);
-        return Math.abs(area.scrollTop - before) > 0.5;
-      };
+      const messageAreaFor = ${chatgptMessageArea.toString()};
+      const stepArea = ${chatgptStepMessageArea.toString()};
+      const olderHistoryLoadingIn = ${chatgptOlderHistoryLoading.toString()};
+      const messageArea = () => messageAreaFor(messageNodes());
+      const stepMessageArea = (message, direction) => stepArea(messageArea(), message, direction);
       // The step anchors on the transcript's own edge message, not on the
       // first or last one served: a chunk of older history can render above
       // the edge between passes, and stepping past that unread chunk would
@@ -2458,16 +2506,7 @@ export class ChatGPTController {
         const nodes = messageNodes();
         return anchored || (direction === 'up' ? nodes[0] : nodes[nodes.length - 1]) || null;
       };
-      // While older history is still loading, ChatGPT serves a role=status
-      // spinner above the first message; the area then cannot move up yet,
-      // but that is not the top of the conversation.
-      const olderHistoryLoading = () => {
-        const first = messageNodes()[0];
-        const area = messageArea();
-        if (!first || !area) return false;
-        return Array.from(area.querySelectorAll('[role="status"]'))
-          .some((status) => (status.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-      };
+      const olderHistoryLoading = () => olderHistoryLoadingIn(messageArea(), messageNodes()[0]);
       const maxEdgePasses = searchUnitMarkup ? 400 : 100;
       let scrollPasses = 0;
       let topBoundary = false;
@@ -3139,6 +3178,13 @@ export class ChatGPTController {
         'conversation_scroll_stalled',
         'conversation_top_not_reached'
       ].includes(reason);
+      if (searchUnitMarkup) {
+        for (const item of conversationArtifacts.values()) {
+          const position = transcript.findIndex((turn) => turn.providerMessageId === item.providerMessageId) + 1;
+          if (position < 1) artifactInputInvalid = true;
+          item.providerTurnIndex = position;
+        }
+      }
       const artifactReason = artifactInputInvalid
         ? 'compatibility_drift'
         : generationActiveBefore || generationActiveAfter
@@ -3417,6 +3463,17 @@ export class ChatGPTController {
       const artifactNamedButtonSelector = ${JSON.stringify(artifactNamedButtonSelector)};
       const deadline = performance.now() + ${cap};
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const messageRole = ${chatgptMessageRole.toString()};
+      const providerMessageId = ${chatgptMessageId.toString()};
+      const cardName = ${chatgptFileCardName.toString()};
+      const messageAreaFor = ${chatgptMessageArea.toString()};
+      const stepArea = ${chatgptStepMessageArea.toString()};
+      const olderHistoryLoadingIn = ${chatgptOlderHistoryLoading.toString()};
+      // The search-unit markup has no turn ordinals: a card is found by its
+      // message id, and the column-reverse message area is stepped, not
+      // scrolled from a top at scrollTop 0.
+      const searchUnitMarkup = document.querySelector?.('[data-chatgpt-search-unit-key]') != null &&
+        document.querySelector?.(turnOrdinalSelector) == null;
       const served = (node) => {
         if (!node || node.isConnected === false || node.hidden === true) return false;
         if (node.getAttribute?.('aria-hidden') === 'true' || node.hasAttribute?.('inert')) return false;
@@ -3433,8 +3490,8 @@ export class ChatGPTController {
         const matched = /^conversation-turn-(\d+)$/.exec(owner?.getAttribute?.('data-testid') || '');
         return matched ? Number(matched[1]) : null;
       };
-      const messageId = (node) => node?.getAttribute?.('data-message-id') ||
-        node?.closest?.(ownerSelector)?.getAttribute?.('data-message-id') || null;
+      const messageId = (node) => providerMessageId(node, ownerSelector) || null;
+      const isAssistant = (node) => String(messageRole(node) || '').trim().toLowerCase() === 'assistant';
       const messagesIn = (owner) => {
         const nodes = Array.from(owner?.querySelectorAll?.(messageSelector) || []);
         if (owner?.matches?.(messageSelector)) nodes.unshift(owner);
@@ -3447,7 +3504,7 @@ export class ChatGPTController {
           const candidates = Array.from(container.querySelectorAll?.(artifactNamedButtonSelector) || [])
             .filter((candidate) => candidate !== downloadButton && served(candidate))
             .filter((candidate) => String(candidate.getAttribute?.('aria-label') || '').trim() !== 'Download file');
-          if (candidates.length === 1) return String(candidates[0].getAttribute?.('aria-label') || '').trim();
+          if (candidates.length === 1) return cardName(candidates[0].getAttribute?.('aria-label'), container);
           if (candidates.length > 1) return null;
           container = container.parentElement;
           depth += 1;
@@ -3468,19 +3525,21 @@ export class ChatGPTController {
         return document.scrollingElement || document.documentElement;
       };
       let quietPasses = 0;
+      let searchDirection = 'up';
       while (performance.now() < deadline) {
         const owners = Array.from(document.querySelectorAll(turnOrdinalSelector)).filter(served);
         const exactMessages = Array.from(document.querySelectorAll(messageSelector))
           .filter(served)
-          .filter((node) => String(node.getAttribute?.('data-message-author-role') || '').trim().toLowerCase() === 'assistant')
+          .filter(isAssistant)
           .filter((node) => messageId(node) === target.providerMessageId);
         if (exactMessages.length > 1) return { status: 'capture_unavailable' };
-        const exactOwner = exactMessages[0]?.closest?.(turnOrdinalSelector) ||
+        const exactOwner = (searchUnitMarkup ? exactMessages[0] : null) ||
+          exactMessages[0]?.closest?.(turnOrdinalSelector) ||
           owners.find((owner) => turnOrdinal(owner) === target.providerTurnIndex) || null;
         if (exactOwner) {
           const matchingMessages = (exactMessages.length ? exactMessages : messagesIn(exactOwner))
             .filter(served)
-            .filter((node) => String(node.getAttribute?.('data-message-author-role') || '').trim().toLowerCase() === 'assistant')
+            .filter(isAssistant)
             .filter((node) => messageId(node) === target.providerMessageId);
           if (matchingMessages.length !== 1) return { status: 'capture_unavailable' };
           const downloads = Array.from(exactOwner.querySelectorAll?.(artifactDownloadSelector) || []).filter(served);
@@ -3501,6 +3560,30 @@ export class ChatGPTController {
               y: rectangle.top + rectangle.height / 2
             };
           }
+        }
+        if (searchUnitMarkup) {
+          // Search every served window: up to the top, then down to the bottom.
+          const nodes = Array.from(document.querySelectorAll(messageSelector));
+          const area = messageAreaFor(nodes);
+          const edge = searchDirection === 'up' ? nodes[0] : nodes[nodes.length - 1];
+          const moved = stepArea(area, edge, searchDirection);
+          await wait(200);
+          if (moved) {
+            quietPasses = 0;
+            continue;
+          }
+          if (searchDirection === 'up' && olderHistoryLoadingIn(area, nodes[0])) {
+            quietPasses = 0;
+            await wait(300);
+            continue;
+          }
+          quietPasses += 1;
+          if (quietPasses >= 3) {
+            if (searchDirection === 'down') return { status: 'not_found' };
+            searchDirection = 'down';
+            quietPasses = 0;
+          }
+          continue;
         }
         const ordinals = owners.map(turnOrdinal).filter(Number.isSafeInteger).sort((left, right) => left - right);
         const scroller = scrollParentFor(exactOwner || owners[0] || document.body);
@@ -3933,7 +4016,14 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'mode-model',
       async () => await this.#applyModelIntentImpl(options),
-      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true, authoritativeTerminal: true }
+      // A tab that just opened can still be assembling its composer when the
+      // mode is requested; the control this operation used exists afterwards.
+      {
+        anchorId: 'chat-mode-button',
+        resolveAnchorAfterOperation: true,
+        postcondition: (result) => result?.active === true,
+        authoritativeTerminal: true
+      }
     );
   }
 
@@ -4545,7 +4635,14 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'mode-model',
       async () => await this.#applyModeIntentImpl(options),
-      { anchorId: 'chat-mode-button', postcondition: (result) => result?.active === true, authoritativeTerminal: true }
+      // A tab that just opened can still be assembling its composer when the
+      // mode is requested; the control this operation used exists afterwards.
+      {
+        anchorId: 'chat-mode-button',
+        resolveAnchorAfterOperation: true,
+        postcondition: (result) => result?.active === true,
+        authoritativeTerminal: true
+      }
     );
   }
 
@@ -5117,14 +5214,19 @@ export class ChatGPTController {
             await sleep(jitter(120, 220));
             const targetIndex = Number(snap.targetPowerIndex);
             const maxIndex = Number.isInteger(Number(snap.powerMax)) ? Number(snap.powerMax) : null;
+            const minIndex = Number.isInteger(Number(snap.powerMin)) ? Number(snap.powerMin) : null;
             if (maxIndex !== null && targetIndex >= maxIndex) {
               await this.#sendKey('End');
+            } else if (minIndex !== null && targetIndex <= minIndex) {
+              await this.#sendKey('Home');
             } else {
+              // The slider moves toward a middle target in either direction:
+              // Pro down to Medium needs ArrowLeft.
               const delta = Number.isInteger(targetIndex) && Number.isInteger(Number(snap.powerIndex))
-                ? Math.max(0, targetIndex - Number(snap.powerIndex))
+                ? targetIndex - Number(snap.powerIndex)
                 : 0;
-              for (let i = 0; i < delta; i += 1) {
-                await this.#sendKey('ArrowRight');
+              for (let i = 0; i < Math.abs(delta); i += 1) {
+                await this.#sendKey(delta > 0 ? 'ArrowRight' : 'ArrowLeft');
                 await sleep(jitter(40, 90));
               }
             }
@@ -5568,7 +5670,7 @@ export class ChatGPTController {
         return !!node.isContentEditable || node.getAttribute?.('contenteditable') === 'true' || node.getAttribute?.('role') === 'textbox';
       }) || null;
       const pill = prompt?.querySelector?.(
-        '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"], [data-system-hint-type="plugin:connector_openai_deep_research"]'
+        ${JSON.stringify(DEEP_RESEARCH_INLINE_SELECTION_SELECTOR)}
       ) || null;
       if (!prompt || !pill || !prompt.contains(pill)) {
         return { ok: false, error: 'research_inline_selection_missing' };
@@ -6551,6 +6653,7 @@ export class ChatGPTController {
         async () => await this.#waitForAssistantStableImpl(options),
         {
           anchorId: 'assistant-message',
+          resolveAnchorAfterOperation: true,
           postcondition: (result) => typeof result?.text === 'string' &&
             result.text.length > 0 &&
             isQualifiedCompletionEvidence(result?.meta?.completionEvidence)
@@ -6827,7 +6930,9 @@ export class ChatGPTController {
           return false;
         });
         const isThinking = thinkingBanner || isImagePlaceholder || (${imageGenerationSource} && imageCandidateCount === 0 && hasThinkingLine);
+        const deepResearchFramePresent = !!document.querySelector(${JSON.stringify(DEEP_RESEARCH_IFRAME_SELECTOR)});
         return {
+          deepResearchFramePresent,
           stop,
           stopCount,
           sendEnabled,
@@ -7013,7 +7118,13 @@ export class ChatGPTController {
       // result meta.
       const turnIdentitySatisfied = preSendProviderMessageId == null || nestedResearchReport ||
         (snap?.providerMessageId != null && snap.providerMessageId !== preSendProviderMessageId);
-      const done = newResponseSeen && !progressOnlyCapture && turnIdentitySatisfied && (
+      // Deep Research now acknowledges a request with an ordinary reply ("Deep
+      // Research has started working...") while the report builds in its app
+      // frame; until that frame shows the native completion marker the reply
+      // is not the output, however stable it is.
+      const researchStillRunning = deepResearchObservation && !deepResearchCompleted &&
+        (!!snap?.deepResearchFramePresent || !!deepResearchText);
+      const done = newResponseSeen && !progressOnlyCapture && !researchStillRunning && turnIdentitySatisfied && (
         (!generating && stopGoneLongEnough && sendReady && stable && responseReady && contentReady) ||
         (!generating && !effectiveThinking && !activeStop && fallbackStableLongEnough && contentReady));
       if (done) {
@@ -7253,7 +7364,8 @@ export class ChatGPTController {
     return await this.runCompatibilityCapability(
       'research',
       async () => await this.#activateResearchModeImpl(options),
-      { anchorId: 'research-mode-button', postcondition: (result) => result?.active === true }
+      // Deep Research is an item of the composer's "+" menu, not a button.
+      { anchorId: 'composer-menu-button', postcondition: (result) => result?.active === true }
     );
   }
 
@@ -7286,7 +7398,7 @@ export class ChatGPTController {
         if (explicitActiveNodes.length) {
           const node = explicitActiveNodes[0];
           const inlinePromptSelection = !!node.matches?.(
-            '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"], [data-system-hint-type="plugin:connector_openai_deep_research"]'
+            ${JSON.stringify(DEEP_RESEARCH_INLINE_SELECTION_SELECTOR)}
           );
           return {
             active: true,
@@ -7435,7 +7547,9 @@ export class ChatGPTController {
       'file',
       async () => await this.#exportResearchMarkdownImpl(options),
       {
-        anchorId: 'research-export-button',
+        // The export control lives inside the report's app frame, out of the
+        // page's reach; the reply the report belongs to is the page anchor.
+        anchorId: 'assistant-message',
         postcondition: (result) => Array.isArray(result?.files) && result.files.length > 0,
         authoritativeTerminal: true
       }

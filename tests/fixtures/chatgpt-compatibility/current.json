@@ -196,17 +196,20 @@
     "controller-dom-053",
     "controller-dom-054",
     "controller-dom-055",
-    "controller-dom-056"
+    "controller-dom-056",
+    "controller-dom-057",
+    "controller-dom-058"
   ],
   "resolverFixture": {
     "anchorId": "prompt-textarea",
     "nodes": [
       {
-        "selectors": ["#prompt-textarea"],
-        "tagName": "textarea",
+        "selectors": ["div[contenteditable=\"true\"][role=\"textbox\"][data-composer-markdown]"],
+        "tagName": "div",
+        "contentEditable": true,
         "visible": true,
         "enabled": true,
-        "attributes": { "id": "prompt-textarea", "aria-label": "Message ChatGPT" }
+        "attributes": { "role": "textbox", "contenteditable": "true", "id": "prompt-textarea", "aria-label": "Message ChatGPT" }
       }
     ],
     "expected": { "status": "resolved", "branchKind": "canonical", "postconditionStatus": "ok" }

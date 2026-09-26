@@ -715,3 +715,20 @@ test('chatgpt-ui-primitives: exposes mode browser evaluator source and pending t
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /modeOptionLooksSelected/);
   assert.match(CHATGPT_MODE_PICKER_PRIMITIVES_JS, /isHighConfidenceModeControlDescriptor/);
 });
+
+test('mode primitives: the control name "thinking effort" is not the Thinking mode', () => {
+  // Live 2026-09-26: the trigger read "Select ChatGPT model thinking effort" + "Pro"
+  // while the slider sat at Pro, and an image request meant for Thinking was sent in Pro.
+  const label = 'Select ChatGPT model thinking effortPro';
+  assert.notEqual(modeIntentForLabel(label), 'thinking');
+  assert.equal(modeTriggerConfirmsActive({
+    label,
+    targetIntent: 'thinking',
+    active: false,
+    modeRegion: true,
+    inComposer: true,
+    menuOpen: false
+  }), false);
+  assert.equal(modeIntentForLabel('Thinking'), 'thinking');
+  assert.equal(modeIntentForLabel('Medium'), 'thinking');
+});
