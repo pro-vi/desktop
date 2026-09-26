@@ -971,11 +971,20 @@ export class ChatGPTController {
           return false;
         }
       };
-      const visibleOrdinals = new Set();
+      const messageRole = ${chatgptMessageRole.toString()};
+      const messageId = ${chatgptMessageId.toString()};
+      const visibleTurns = new Set();
       const messages = Array.from(document.querySelectorAll(messageSelector)).slice(0, 2000);
       for (const message of messages) {
         if (!isVisible(message)) continue;
-        if (!String(message.getAttribute?.('data-message-author-role') || '').trim()) continue;
+        if (!String(messageRole(message) || '').trim()) continue;
+        // The search-unit markup has no turn ordinals; a served message
+        // counts by its provider id instead.
+        if (message.closest?.('[data-chatgpt-search-unit-key]')) {
+          const id = messageId(message, null);
+          if (id) visibleTurns.add('id:' + id);
+          continue;
+        }
         const turn = message.closest?.(turnOrdinalSelector);
         if (!isVisible(turn)) continue;
         const match = /^conversation-turn-([1-9]\\d*)$/.exec(
@@ -984,9 +993,9 @@ export class ChatGPTController {
         if (!match) continue;
         const ordinal = Number(match[1]);
         if (!Number.isSafeInteger(ordinal) || ordinal <= 0) continue;
-        visibleOrdinals.add(ordinal);
+        visibleTurns.add(ordinal);
       }
-      return visibleOrdinals.size;
+      return visibleTurns.size;
     })()`);
 
     const deadline = Date.now() + 1_500;
@@ -1039,7 +1048,61 @@ export class ChatGPTController {
 
   async captureConversation({ maxCaptureBytes = 4 * 1024 * 1024, firstMessageWaitMs = 10_000, firstMessagePollMs = 500 } = {}) {
     const cap = Math.max(1, Math.min(16 * 1024 * 1024, Math.floor(Number(maxCaptureBytes) || 4 * 1024 * 1024)));
-    const operation = async () => await this.runCompatibilityCapability('transcript', async () => {
+    const operation = async () => {
+      await this.#waitForServedAssistantMessage({ waitMs: firstMessageWaitMs, pollMs: firstMessagePollMs });
+      return await this.#captureConversationUnderContract({ cap, firstMessageWaitMs, firstMessagePollMs });
+    };
+    try {
+      return await this.#runCaptureWithHostDeadline(operation);
+    } catch (error) {
+      if (error?.code !== 'conversation_capture_timeout') throw error;
+      return parseConversationCapture({
+        status: 'partial',
+        reason: 'conversation_capture_timeout',
+        conversationUrl: null,
+        capturedAt: new Date().toISOString(),
+        rawTurns: [],
+        evidence: {
+          topBoundary: false,
+          bottomBoundary: false,
+          orderedWindowStitching: false,
+          scrollPasses: 0,
+          windowCount: 1,
+          messageCount: 0,
+          providerIdCount: 0,
+          byteCount: 0
+        }
+      });
+    }
+  }
+
+  // The transcript capability resolves its assistant-message anchor before
+  // the capture runs, and an absent anchor turns even a sound capture into
+  // compatibility drift. Right after navigation a conversation can still be
+  // hydrating, so on a canonical conversation page wait (bounded) for a served
+  // assistant message before that resolution.
+  async #waitForServedAssistantMessage({ waitMs, pollMs }) {
+    const assistantSelector = this.selectors?.assistantMessage;
+    if (!assistantSelector || !(waitMs > 0)) return;
+    try {
+      if (parseChatGptEntryTarget(await this.getUrl())?.kind !== 'canonical-conversation') return;
+    } catch {
+      return;
+    }
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      const probe = await this.#eval(`(() => {
+        // first-message probe for the transcript anchor resolution
+        return { count: document.querySelectorAll(${JSON.stringify(assistantSelector)}).length };
+      })()`).catch(() => null);
+      const count = Number(probe?.count);
+      if (!Number.isFinite(count) || count > 0) return;
+      await sleep(pollMs);
+    }
+  }
+
+  async #captureConversationUnderContract({ cap, firstMessageWaitMs, firstMessagePollMs }) {
+    return await this.runCompatibilityCapability('transcript', async () => {
       const readOwnedTarget = async () => {
         try {
           const target = parseChatGptEntryTarget(await this.getUrl());
@@ -1144,28 +1207,6 @@ export class ChatGPTController {
           : { ...value, status: 'partial', reason: 'compatibility_drift' };
       }
     });
-    try {
-      return await this.#runCaptureWithHostDeadline(operation);
-    } catch (error) {
-      if (error?.code !== 'conversation_capture_timeout') throw error;
-      return parseConversationCapture({
-        status: 'partial',
-        reason: 'conversation_capture_timeout',
-        conversationUrl: null,
-        capturedAt: new Date().toISOString(),
-        rawTurns: [],
-        evidence: {
-          topBoundary: false,
-          bottomBoundary: false,
-          orderedWindowStitching: false,
-          scrollPasses: 0,
-          windowCount: 1,
-          messageCount: 0,
-          providerIdCount: 0,
-          byteCount: 0
-        }
-      });
-    }
   }
 
   async #captureConversationBundle({
@@ -1267,6 +1308,12 @@ export class ChatGPTController {
       const artifactNamedButtonSelector = ${JSON.stringify(artifactNamedButtonSelector)};
       const artifactSelectorsAvailable = !!artifactDownloadSelector && !!artifactNamedButtonSelector;
       const transcriptTextForNode = ${extractChatGptTranscriptMessageText.toString()};
+      const messageRole = ${chatgptMessageRole.toString()};
+      const messageId = ${chatgptMessageId.toString()};
+      // The search-unit markup has no turn-ordinal owners: messages carry ids
+      // but no position, so windows stitch by overlapping ids alone.
+      const searchUnitMarkup = document.querySelector?.('[data-chatgpt-search-unit-key]') != null &&
+        document.querySelector?.(turnOrdinalSelector) == null;
       const utf8Bytes = (value) => {
         let bytes = 0;
         for (const symbol of String(value || '')) {
@@ -1287,17 +1334,13 @@ export class ChatGPTController {
       };
       let mappedInputInvalid = false;
       const providerMessageIdForNode = (node) => {
-        const owner = node.closest(ownerSelector);
-        const messageId = (
-          node.getAttribute('data-message-id') ||
-          owner?.getAttribute('data-message-id')
-        );
-        if (typeof messageId !== 'string' || !messageId.length) return null;
-        if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(messageId)) {
+        const providerMessageId = messageId(node, ownerSelector);
+        if (typeof providerMessageId !== 'string' || !providerMessageId.length) return null;
+        if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(providerMessageId)) {
           mappedInputInvalid = true;
           return null;
         }
-        return messageId;
+        return providerMessageId;
       };
       const providerTurnIndexForNode = (node) => {
         const owner = node.closest(turnOrdinalSelector);
@@ -1571,7 +1614,7 @@ export class ChatGPTController {
               mappedInputInvalid = true;
               return null;
             }
-            const roleValue = node.getAttribute('data-message-author-role');
+            const roleValue = messageRole(node);
             const role = typeof roleValue === 'string' && roleValue.length ? roleValue : 'unknown';
             const text = transcriptTextForNode(node);
             const normalizedRole = role.trim().toLowerCase();
@@ -2102,6 +2145,27 @@ export class ChatGPTController {
           if (turn.providerMessageId) windowProviderIds.add(turn.providerMessageId);
           const prior = turn.providerMessageId ? providerTurns.get(turn.providerMessageId) : null;
           if (prior && !sameTurn(prior, turn)) {
+            // Rich content (link cards, images, tables) in a search-unit
+            // message keeps filling in after the message is first served, so
+            // its text can grow under the same id. The later reading replaces
+            // the earlier one; confirmStableWindow keeps reading until a
+            // window produces no refresh, so the kept text is a settled one.
+            if (
+              searchUnitMarkup &&
+              !hasProviderPosition(prior) && !hasProviderPosition(turn) &&
+              prior.role === turn.role
+            ) {
+              const nextByteCount = byteCount - turnBytes(prior) + turnBytes(turn);
+              if (nextByteCount > cap) {
+                reason = 'max_capture_bytes';
+                return { ok: false, added: 0, refreshed, failure: 'capture-limit' };
+              }
+              transcript = transcript.map((candidate) => candidate === prior ? turn : candidate);
+              providerTurns.set(turn.providerMessageId, turn);
+              byteCount = nextByteCount;
+              refreshed += 1;
+              continue;
+            }
             reason = 'compatibility_drift';
             return { ok: false, added: 0, failure: 'compatibility-drift' };
           }
@@ -2155,7 +2219,7 @@ export class ChatGPTController {
                 return { ok: false, added: 0, failure: 'provider-order-changed' };
               }
             }
-            if (!novel.length) return { ok: true, added: 0 };
+            if (!novel.length) return { ok: true, added: 0, refreshed };
             const firstKnown = known[0];
             const lastKnown = known[known.length - 1];
             const additions = direction === 'prepend' && firstKnown.transcriptIndex === 0 &&
@@ -2175,14 +2239,14 @@ export class ChatGPTController {
                 ? [...additions, ...transcript]
                 : [...transcript, ...additions];
               byteCount += addedBytes;
-              return { ok: true, added: additions.length };
+              return { ok: true, added: additions.length, refreshed };
             }
           }
         }
         if (window.length <= transcript.length) {
           for (let start = 0; start <= transcript.length - window.length; start += 1) {
             if (sameSlice(transcript, start, window, 0, window.length)) {
-              return { ok: true, added: 0 };
+              return { ok: true, added: 0, refreshed };
             }
           }
         }
@@ -2214,7 +2278,7 @@ export class ChatGPTController {
           ? [...additions, ...transcript]
           : [...transcript, ...additions];
         byteCount += addedBytes;
-        return { ok: true, added: additions.length };
+        return { ok: true, added: additions.length, refreshed };
       };
 
       const merge = (window, direction, options = {}) => {
@@ -2238,7 +2302,9 @@ export class ChatGPTController {
       const confirmStableWindow = async (direction, initialResult) => {
         let result = initialResult;
         for (let retry = 0; result.ok && retry < providerPositionStabilityObservations * 2; retry += 1) {
-          await settleProviderObservation();
+          // Search-unit content fills in over network time, not a frame.
+          if (searchUnitMarkup) await wait(150);
+          else await settleProviderObservation();
           const observedWindow = readMessages();
           result = merge(observedWindow, direction);
           if (resultHasStableObservedWindow(result)) return result;
@@ -2349,14 +2415,67 @@ export class ChatGPTController {
       }
       windowCount -= 1;
 
-      const scroller = findScroller();
+      // The search-unit markup scrolls a column-reverse container, whose bottom
+      // is scrollTop 0 and whose top is negative, so the scroller walk below,
+      // which treats scrollTop 0 as the top, cannot drive it. It takes the
+      // message-anchored walk instead, stepping the message area itself.
+      const scroller = searchUnitMarkup ? null : findScroller();
+      // The scrollable ancestor holding every served message; a box inside
+      // one message (a wide table, a collapsed long prompt) can scroll too.
+      const messageArea = () => {
+        const nodes = messageNodes();
+        const last = nodes[nodes.length - 1];
+        for (let area = nodes[0]?.parentElement || null; area && area !== document.documentElement; area = area.parentElement) {
+          if (!area.contains(last)) continue;
+          const overflowY = String(getComputedStyle(area).overflowY || '');
+          if (/auto|scroll|overlay/.test(overflowY) && area.scrollHeight > area.clientHeight + 1) return area;
+        }
+        return null;
+      };
+      // Moves the message area so the given message stays 40px inside the
+      // edge it is moving away from: that message stays served, so the next
+      // window overlaps this one. Lowering scrollTop moves toward the top in
+      // both normal and column-reverse containers. Returns whether it moved.
+      const stepMessageArea = (message, direction) => {
+        const area = messageArea();
+        if (!area || !message) return false;
+        const areaRectangle = area.getBoundingClientRect();
+        const messageRectangle = message.getBoundingClientRect();
+        const delta = direction === 'up'
+          ? (areaRectangle.bottom - 40) - messageRectangle.top
+          : messageRectangle.bottom - (areaRectangle.top + 40);
+        const before = area.scrollTop;
+        area.scrollTop = before + (direction === 'up' ? -1 : 1) * Math.max(1, delta);
+        return Math.abs(area.scrollTop - before) > 0.5;
+      };
+      // The step anchors on the transcript's own edge message, not on the
+      // first or last one served: a chunk of older history can render above
+      // the edge between passes, and stepping past that unread chunk would
+      // leave no overlap with the transcript.
+      const edgeMessage = (direction) => {
+        const edge = direction === 'up' ? transcript[0] : transcript[transcript.length - 1];
+        const anchored = edge?.providerMessageId ? messageNodeForProviderId(edge.providerMessageId) : null;
+        const nodes = messageNodes();
+        return anchored || (direction === 'up' ? nodes[0] : nodes[nodes.length - 1]) || null;
+      };
+      // While older history is still loading, ChatGPT serves a role=status
+      // spinner above the first message; the area then cannot move up yet,
+      // but that is not the top of the conversation.
+      const olderHistoryLoading = () => {
+        const first = messageNodes()[0];
+        const area = messageArea();
+        if (!first || !area) return false;
+        return Array.from(area.querySelectorAll('[role="status"]'))
+          .some((status) => (status.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+      };
+      const maxEdgePasses = searchUnitMarkup ? 400 : 100;
       let scrollPasses = 0;
       let topBoundary = false;
       let bottomBoundary = false;
       if (!scroller) {
         adopt(initial);
         let quietPasses = 0;
-        for (let topPasses = 0; !reason && topPasses < 100; topPasses += 1) {
+        for (let topPasses = 0; !reason && topPasses < maxEdgePasses; topPasses += 1) {
           scrollPasses += 1;
           const firstMessage = messageNodes()[0];
           if (!firstMessage) {
@@ -2364,18 +2483,26 @@ export class ChatGPTController {
             break;
           }
           const beforeTop = firstMessage.getBoundingClientRect().top;
-          firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
+          const areaMoved = searchUnitMarkup ? stepMessageArea(edgeMessage('up'), 'up') : false;
+          if (!searchUnitMarkup) firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
           await settle();
           let result = merge(readMessages(), 'prepend', { allowTextRefresh: true });
           result = await confirmStableWindow('prepend', result);
           const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
-          const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
+          const moved = searchUnitMarkup
+            ? areaMoved
+            : !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
           if (!result.ok) {
             if (!reason) reason = 'ambiguous_message_overlap';
             break;
           }
           if (result.added > 0 || result.refreshed > 0 || moved) {
             quietPasses = 0;
+            continue;
+          }
+          if (searchUnitMarkup && olderHistoryLoading()) {
+            quietPasses = 0;
+            await wait(300);
             continue;
           }
           quietPasses += 1;
@@ -2390,7 +2517,7 @@ export class ChatGPTController {
         }
 
         quietPasses = 0;
-        for (let bottomPasses = 0; !reason && bottomPasses < 100; bottomPasses += 1) {
+        for (let bottomPasses = 0; !reason && bottomPasses < maxEdgePasses; bottomPasses += 1) {
           scrollPasses += 1;
           const messages = messageNodes();
           const lastMessage = messages[messages.length - 1];
@@ -2399,12 +2526,15 @@ export class ChatGPTController {
             break;
           }
           const beforeTop = lastMessage.getBoundingClientRect().top;
-          lastMessage.scrollIntoView({ block: 'start', behavior: 'instant' });
+          const areaMoved = searchUnitMarkup ? stepMessageArea(edgeMessage('down'), 'down') : false;
+          if (!searchUnitMarkup) lastMessage.scrollIntoView({ block: 'start', behavior: 'instant' });
           await settle();
           let result = merge(readMessages(), 'append');
           result = await confirmStableWindow('append', result);
           const afterTop = lastMessage.isConnected ? lastMessage.getBoundingClientRect().top : Number.NaN;
-          const moved = !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
+          const moved = searchUnitMarkup
+            ? areaMoved
+            : !Number.isFinite(afterTop) || Math.abs(afterTop - beforeTop) > 2;
           if (!result.ok) {
             if (!reason) reason = 'ambiguous_message_overlap';
             break;
@@ -2932,7 +3062,15 @@ export class ChatGPTController {
         if (!providerPositionsComplete) {
           reason = 'ambiguous_message_overlap';
         }
-      } else if (!reason) {
+      } else if (!reason && !(
+        // Without positions, order rests on id overlap alone: every window
+        // joined the transcript through a shared provider id, so the
+        // transcript is complete between the proven boundaries only when
+        // every turn in it carries one.
+        searchUnitMarkup &&
+        transcript.length > 0 &&
+        transcript.every((turn) => turn.providerMessageId && !hasProviderPosition(turn))
+      )) {
         reason = 'compatibility_drift';
       }
       // A few mapped messages with no transcript text are ordinary image-only

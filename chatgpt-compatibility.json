@@ -1873,7 +1873,7 @@
     "kind": "dependency",
     "dependency": "transcript-message",
     "reason": "provider-visible conversation transcript capture reads ordered role-bearing message turns",
-    "selector": "[data-message-author-role]"
+    "selector": "[data-message-author-role], [data-chatgpt-search-unit-key$=\":user\"], [data-chatgpt-search-unit-key$=\":assistant\"] [data-chatgpt-selection-conversation-id]"
   },
   {
     "id": "controller-dom-044",
@@ -1962,6 +1962,22 @@
     "dependency": "mode-option-clickable-row",
     "reason": "the provider-visible mode menu option row carries the click handler for the labeled option text nested inside it",
     "selector": "button, a, li, label, [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"menuitemcheckbox\"], [role=\"option\"], [role=\"radio\"], [data-radix-collection-item]"
+  },
+  {
+    "id": "controller-dom-055",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "transcript-message-unit",
+    "reason": "the provider-visible search-unit markup names a message's role at the end of its unit key and lists its provider ids on the unit, and carries no turn ordinals",
+    "selector": "[data-chatgpt-search-unit-key]"
+  },
+  {
+    "id": "controller-dom-056",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "transcript-older-history-loading",
+    "reason": "the provider-visible message area shows a status spinner above the first served message while older history is still loading, so the top of what is loaded is not yet the top of the conversation",
+    "selector": "[role=\"status\"]"
   }
 ]
 }

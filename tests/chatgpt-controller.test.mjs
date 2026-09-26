@@ -8,6 +8,7 @@ import vm from 'node:vm';
 import { ChatGPTController, chatgptMessageId, chatgptMessageRole, defaultReconcileGraceMs } from '../chatgpt-controller.mjs';
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
 import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
+import { createProviderCompatibilityBridge, loadChatGptCompatibilityProfile } from '../chatgpt-compatibility.mjs';
 
 function readyState() {
   return {
@@ -10277,4 +10278,282 @@ test('controller: message readers still read the role-attribute markup', () => {
   assert.equal(chatgptMessageId(node, '[data-message-id]'), 'msg-owner');
   assert.equal(chatgptMessageRole(markupNode({})), '');
   assert.equal(chatgptMessageId(markupNode({}), '[data-message-id]'), '');
+});
+
+// A page in ChatGPT's search-unit markup, as observed live on 2026-09-25:
+// messages carry their role in a unit key and their id in unit or selection
+// attributes, with no turn ordinals; the message area is a column-reverse
+// scroller (scrollTop 0 is the bottom, the top is negative) that renders only
+// the messages near the viewport; older history loads in chunks after a delay
+// once the area reaches the loaded top, with a role=status spinner above the
+// first message meanwhile, and a freshly loaded chunk renders whole until the
+// area next scrolls.
+function searchUnitConversationPage(messages, {
+  rowHeight = 100,
+  clientHeight = 300,
+  overscan = 100,
+  initialLoaded = 10,
+  chunk = 8,
+  loadDelayMs = 1_500,
+  loadsLandInIdleWaits = false,
+  hydratingEvaluations = 0,
+  textForRead = (message) => message.text
+} = {}) {
+  let now = 0;
+  let loaded = Math.min(initialLoaded, messages.length);
+  let loadAt = null;
+  let scrollTopValue = 0;
+  let freshChunk = null;
+  const contentHeight = () => loaded * rowHeight;
+  const minimumTop = () => -Math.max(0, contentHeight() - clientHeight);
+  const settleLoading = () => {
+    if (loadAt !== null && now >= loadAt) {
+      const previousFirst = messages.length - loaded;
+      loaded = Math.min(messages.length, loaded + chunk);
+      freshChunk = { start: messages.length - loaded, end: previousFirst };
+      loadAt = null;
+    }
+  };
+  const readCounts = new Map();
+  const area = {
+    clientHeight,
+    parentElement: null,
+    get scrollHeight() {
+      settleLoading();
+      return contentHeight();
+    },
+    get scrollTop() {
+      settleLoading();
+      return scrollTopValue;
+    },
+    set scrollTop(value) {
+      settleLoading();
+      scrollTopValue = Math.min(0, Math.max(minimumTop(), Number(value) || 0));
+      freshChunk = null;
+      if (scrollTopValue <= minimumTop() + 1 && loaded < messages.length && loadAt === null) {
+        loadAt = now + loadDelayMs;
+      }
+    },
+    getBoundingClientRect: () => ({ top: 0, bottom: clientHeight, height: clientHeight, width: 800 }),
+    contains: () => true,
+    querySelectorAll(selector) {
+      settleLoading();
+      return selector === '[role="status"]' && loaded < messages.length ? [spinner] : [];
+    }
+  };
+  const spinner = {
+    compareDocumentPosition: () => 4
+  };
+  const firstLoadedIndex = () => messages.length - loaded;
+  const screenTop = (index) => {
+    const offset = index - firstLoadedIndex();
+    return offset * rowHeight - (contentHeight() - clientHeight + scrollTopValue);
+  };
+  const nodeFor = new Map();
+  const messageNode = (message, index) => {
+    if (nodeFor.has(index)) return nodeFor.get(index);
+    const unitKey = `fallback-turn-${Math.floor(index / 2)}:${message.role === 'user' ? 0 : 1}:${message.role}`;
+    const unitIds = message.unitIds ?? (message.id ? `${message.id} ${message.id}` : '');
+    const unitAttribute = (name) => ({
+      'data-chatgpt-search-unit-key': unitKey,
+      'data-chatgpt-search-message-ids': unitIds
+    })[name] ?? null;
+    const unit = { getAttribute: unitAttribute };
+    const node = {
+      isConnected: true,
+      hidden: false,
+      parentElement: area,
+      getAttribute(name) {
+        if (message.role === 'user') return unitAttribute(name);
+        if (name === 'data-chatgpt-selection-message-id') return message.selectionId === undefined ? message.id : message.selectionId;
+        return null;
+      },
+      hasAttribute: () => false,
+      closest(selector) {
+        return selector === '[data-chatgpt-search-unit-key]' ? (message.role === 'user' ? node : unit) : null;
+      },
+      checkVisibility: () => true,
+      getClientRects: () => [{}],
+      getBoundingClientRect() {
+        const top = screenTop(index);
+        return { top, bottom: top + rowHeight, height: rowHeight, width: 700 };
+      },
+      contains: () => false,
+      querySelectorAll: () => [],
+      get innerText() {
+        const reads = (readCounts.get(index) || 0) + 1;
+        readCounts.set(index, reads);
+        return textForRead(message, reads);
+      }
+    };
+    nodeFor.set(index, node);
+    return node;
+  };
+  let evaluations = 0;
+  const rendered = () => {
+    settleLoading();
+    if (evaluations <= hydratingEvaluations) return [];
+    const nodes = [];
+    for (let index = firstLoadedIndex(); index < messages.length; index += 1) {
+      const top = screenTop(index);
+      const fresh = freshChunk && index >= freshChunk.start && index < freshChunk.end;
+      if (fresh || (top + rowHeight >= -overscan && top <= clientHeight + overscan)) nodes.push(messageNode(messages[index], index));
+    }
+    return nodes;
+  };
+  const messageSelectorPart = '[data-chatgpt-search-unit-key$=":user"]';
+  const assistantSelectorPart = '[data-chatgpt-search-unit-key$=":assistant"] [data-chatgpt-selection-conversation-id]';
+  const document = {
+    documentElement: { parentElement: null },
+    querySelector(selector) {
+      if (selector === '[data-chatgpt-search-unit-key]') return rendered()[0] || null;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (String(selector).includes(messageSelectorPart)) return rendered();
+      if (String(selector).includes(assistantSelectorPart)) {
+        return rendered().filter((node) => node.getAttribute('data-chatgpt-search-unit-key') === null);
+      }
+      return [];
+    }
+  };
+  area.parentElement = document.documentElement;
+  const style = (node) => ({
+    overflowY: node === area ? 'auto' : 'visible',
+    display: 'block',
+    visibility: 'visible',
+    opacity: '1'
+  });
+  return {
+    async navigate() {},
+    async evaluate(js) {
+      evaluations += 1;
+      return await vm.runInNewContext(js, {
+        document,
+        window: { getComputedStyle: style },
+        getComputedStyle: style,
+        Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
+        performance: { now: () => now },
+        setTimeout: (callback, ms) => {
+          now += Number(ms) || 0;
+          // A pending chunk arrives during an idle wait, not a re-read's
+          // short settle: the capture next sees it only after its next step.
+          if (loadsLandInIdleWaits && Number(ms) >= 250 && loadAt !== null) loadAt = Math.min(loadAt, now);
+          callback();
+        }
+      });
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/c/search-unit-thread';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+}
+
+async function searchUnitController(page) {
+  const profile = await loadChatGptCompatibilityProfile();
+  return new ChatGPTController({
+    page,
+    selectors: { stopButton: 'button[data-testid="stop-button"]' },
+    uiContract: { kind: 'chatgpt', profile }
+  });
+}
+
+const searchUnitMessages = (count) => Array.from({ length: count }, (_, index) => ({
+  role: index % 2 === 0 ? 'user' : 'assistant',
+  id: `msg-${String(index).padStart(3, '0')}`,
+  text: `Search unit turn ${index}`
+}));
+
+test('chatgpt-controller: captureConversation stitches the search-unit markup by id up to a loaded top', async () => {
+  const messages = searchUnitMessages(40);
+  // A chunk loads more slowly than the quiet passes last, and renders whole,
+  // far above the viewport, once it arrives.
+  const page = searchUnitConversationPage(messages, { loadDelayMs: 5_000 });
+  const capture = await (await searchUnitController(page)).captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'complete');
+  assert.deepEqual(capture.rawTurns.map(({ providerMessageId }) => providerMessageId), messages.map(({ id }) => id));
+  assert.deepEqual(capture.rawTurns.map(({ role }) => role), messages.map(({ role }) => role));
+  assert.equal(capture.evidence.topBoundary, true);
+  assert.equal(capture.evidence.bottomBoundary, true);
+});
+
+test('chatgpt-controller: search-unit capture steps from its own edge when a chunk lands between passes', async () => {
+  const messages = searchUnitMessages(40);
+  const page = searchUnitConversationPage(messages, { loadDelayMs: 60_000, loadsLandInIdleWaits: true });
+  const capture = await (await searchUnitController(page)).captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'complete');
+  assert.deepEqual(capture.rawTurns.map(({ providerMessageId }) => providerMessageId), messages.map(({ id }) => id));
+});
+
+test('chatgpt-controller: search-unit capture keeps the later reading of a message whose content fills in', async () => {
+  const messages = searchUnitMessages(12);
+  const page = searchUnitConversationPage(messages, {
+    initialLoaded: 12,
+    textForRead: (message, reads) => message.id === 'msg-005' && reads < 3 ? 'Search unit turn 5 (card loading)' : message.text
+  });
+  const capture = await (await searchUnitController(page)).captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'complete');
+  assert.equal(capture.rawTurns.find(({ providerMessageId }) => providerMessageId === 'msg-005').text, 'Search unit turn 5');
+});
+
+test('chatgpt-controller: a search-unit unit holding several messages is one turn under its first id', async () => {
+  const messages = searchUnitMessages(8);
+  messages[3] = { ...messages[3], unitIds: 'msg-003 msg-003 msg-003b', selectionId: null, text: 'Reply and report' };
+  const capture = await (await searchUnitController(searchUnitConversationPage(messages, { initialLoaded: 8 })))
+    .captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'complete');
+  assert.equal(capture.rawTurns[3].providerMessageId, 'msg-003');
+  assert.equal(capture.rawTurns[3].text, 'Reply and report');
+});
+
+test('chatgpt-controller: a search-unit message without any id leaves the capture partial', async () => {
+  const messages = searchUnitMessages(8);
+  messages[5] = { ...messages[5], unitIds: '', selectionId: null };
+  const capture = await (await searchUnitController(searchUnitConversationPage(messages, { initialLoaded: 8 })))
+    .captureConversation({ maxCaptureBytes: 100_000 });
+
+  assert.equal(capture.status, 'partial');
+});
+
+test('chatgpt-controller: route inspection counts served search-unit messages by id', async () => {
+  const page = searchUnitConversationPage(searchUnitMessages(12), { initialLoaded: 12 });
+  const result = await (await searchUnitController(page)).inspectConversationRoute();
+
+  assert.equal(result.status, 'served');
+  assert.equal(result.visibleTurnCount, 5);
+});
+
+test('chatgpt-controller: capture waits for a hydrating conversation before resolving its transcript anchor', async () => {
+  const profile = await loadChatGptCompatibilityProfile();
+  const selectors = JSON.parse(await fs.readFile(new URL('../selectors.json', import.meta.url), 'utf8'));
+  const page = searchUnitConversationPage(searchUnitMessages(6), { initialLoaded: 6, hydratingEvaluations: 3 });
+  const bridge = createProviderCompatibilityBridge({
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT',
+    selectors,
+    profile,
+    onCompatibilityObservation: async () => ({ accepted: true })
+  });
+  const controller = new ChatGPTController({
+    page,
+    selectors: bridge.uiContract.legacySelectors,
+    vendorId: 'chatgpt',
+    vendorName: 'ChatGPT',
+    ...bridge
+  });
+
+  const capture = await controller.captureConversation({ maxCaptureBytes: 100_000, firstMessagePollMs: 1 });
+
+  assert.equal(capture.status, 'complete');
+  assert.equal(capture.rawTurns.length, 6);
 });
