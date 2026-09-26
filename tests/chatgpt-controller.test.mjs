@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 
-import { ChatGPTController, defaultReconcileGraceMs } from '../chatgpt-controller.mjs';
+import { ChatGPTController, chatgptMessageId, chatgptMessageRole, defaultReconcileGraceMs } from '../chatgpt-controller.mjs';
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
 import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 
@@ -10219,4 +10219,62 @@ test('controller: the default reconcile grace gives a response at least an hour 
   assert.equal(defaultReconcileGraceMs(60 * minute), 10 * minute);
   assert.equal(defaultReconcileGraceMs(90 * minute), 10 * minute);
   assert.equal(defaultReconcileGraceMs(0), 60 * minute);
+});
+
+// Stand-in element: attributes plus a parent chain, enough for the readers'
+// getAttribute and closest([attribute]) calls.
+function markupNode(attributes, parent = null) {
+  const node = {
+    parent,
+    getAttribute: (name) => (Object.hasOwn(attributes, name) ? attributes[name] : null),
+    closest(selector) {
+      const name = /^\[([a-z-]+)/.exec(selector)?.[1];
+      for (let current = node; current; current = current.parent) {
+        if (name && current.getAttribute(name) !== null) return current;
+      }
+      return null;
+    }
+  };
+  return node;
+}
+
+test('controller: message readers take role and id from the search-unit markup', () => {
+  const userUnit = markupNode({
+    'data-chatgpt-search-unit-key': 'fallback-turn-0:0:user',
+    'data-chatgpt-search-message-ids': '4a0de4de-6188-4ac4-93a3-d0aae2d60e65'
+  });
+  assert.equal(chatgptMessageRole(userUnit), 'user');
+  assert.equal(chatgptMessageId(userUnit, '[data-message-id]'), '4a0de4de-6188-4ac4-93a3-d0aae2d60e65');
+
+  // While the answer streams, the unit lists no id and the content element
+  // has none yet.
+  const streamingUnit = markupNode({
+    'data-chatgpt-search-unit-key': 'fallback-turn-0:2:assistant',
+    'data-chatgpt-search-message-ids': ''
+  });
+  const streamingContent = markupNode({ 'data-chatgpt-selection-conversation-id': 'local-chatgpt:af34c325' }, streamingUnit);
+  assert.equal(chatgptMessageRole(streamingContent), 'assistant');
+  assert.equal(chatgptMessageId(streamingContent, '[data-message-id]'), '');
+
+  const finalContent = markupNode({
+    'data-chatgpt-selection-conversation-id': '6ab76c3c-eed0-83e8-a482-38c0786ae604',
+    'data-chatgpt-selection-message-id': '527b6452-69b0-4c0d-98da-54497c765a71'
+  }, streamingUnit);
+  assert.equal(chatgptMessageId(finalContent, '[data-message-id]'), '527b6452-69b0-4c0d-98da-54497c765a71');
+
+  // A reloaded conversation fills the unit's id list, repeating the id.
+  const reloadedUnit = markupNode({
+    'data-chatgpt-search-unit-key': 'fallback-turn-3:1:assistant',
+    'data-chatgpt-search-message-ids': '27eec943-aaaa 27eec943-aaaa'
+  });
+  assert.equal(chatgptMessageId(markupNode({}, reloadedUnit), null), '27eec943-aaaa');
+});
+
+test('controller: message readers still read the role-attribute markup', () => {
+  const owner = markupNode({ 'data-message-id': 'msg-owner' });
+  const node = markupNode({ 'data-message-author-role': 'assistant' }, owner);
+  assert.equal(chatgptMessageRole(node), 'assistant');
+  assert.equal(chatgptMessageId(node, '[data-message-id]'), 'msg-owner');
+  assert.equal(chatgptMessageRole(markupNode({})), '');
+  assert.equal(chatgptMessageId(markupNode({}), '[data-message-id]'), '');
 });

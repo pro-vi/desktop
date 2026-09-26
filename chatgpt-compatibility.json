@@ -384,6 +384,12 @@
           "id": "assistant-message-canonical",
           "kind": "canonical",
           "source": "contract",
+          "selector": "[data-chatgpt-search-unit-key$=\":assistant\"] [data-chatgpt-selection-conversation-id]"
+        },
+        {
+          "id": "assistant-message-legacy-role-attribute",
+          "kind": "legacy",
+          "source": "contract",
           "selector": "[data-message-author-role=\"assistant\"]"
         },
         {
@@ -1931,7 +1937,7 @@
     "kind": "dependency",
     "dependency": "prompt-delivery-user-turn",
     "reason": "the provider-visible user turn is read after send to confirm every prompt line was delivered",
-    "selector": "[data-message-author-role=\"user\"]"
+    "selector": "[data-message-author-role=\"user\"], [data-chatgpt-search-unit-key$=\":user\"]"
   },
   {
     "id": "controller-dom-052",

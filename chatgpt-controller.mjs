@@ -75,6 +75,34 @@ function clipText(value, max = 240) {
   return `${text.slice(0, Math.max(0, max - 3))}...`;
 }
 
+// Page-side readers, injected into evaluated scripts with toString(), so a
+// script asks for a message's role and id the same way on either markup.
+// ChatGPT's earlier markup put data-message-author-role and data-message-id
+// on each message. Its current markup (observed live 2026-09-25) makes each
+// message a search unit whose key ends in its role
+// (`fallback-turn-0:2:assistant`); a user unit lists its id in
+// data-chatgpt-search-message-ids, and an assistant unit's content element
+// gains data-chatgpt-selection-message-id only once the answer is final, so
+// an assistant message still streaming has no id yet.
+export function chatgptMessageRole(node) {
+  const legacy = String(node?.getAttribute?.('data-message-author-role') || '').trim();
+  if (legacy) return legacy;
+  const unit = node?.closest?.('[data-chatgpt-search-unit-key]');
+  const matched = /:([A-Za-z]+)$/.exec(String(unit?.getAttribute?.('data-chatgpt-search-unit-key') || ''));
+  return matched ? matched[1] : '';
+}
+
+export function chatgptMessageId(node, ownerSelector) {
+  const legacy = node?.getAttribute?.('data-message-id') ||
+    (ownerSelector ? node?.closest?.(ownerSelector)?.getAttribute?.('data-message-id') : '');
+  if (legacy) return String(legacy);
+  const selection = String(node?.getAttribute?.('data-chatgpt-selection-message-id') || '').trim();
+  if (selection) return selection;
+  const unit = node?.closest?.('[data-chatgpt-search-unit-key]');
+  const ids = String(unit?.getAttribute?.('data-chatgpt-search-message-ids') || '').trim();
+  return ids ? ids.split(/\s+/)[0] : '';
+}
+
 function extractChatGptTranscriptMessageText(node) {
   if (!node || typeof node !== 'object') return '';
   const childNodes = node.childNodes;
@@ -5364,7 +5392,7 @@ export class ChatGPTController {
     let timeoutId = null;
     const recorded = await Promise.race([
       this.#eval(`(() => {
-        const turns = document.querySelectorAll('[data-message-author-role="user"]');
+        const turns = document.querySelectorAll('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"]');
         const last = turns[turns.length - 1];
         return last ? String(last.textContent || '') : null;
       })()`).catch(() => null),
@@ -6457,22 +6485,22 @@ export class ChatGPTController {
     const roleStrict = this.uiContract?.kind === 'chatgpt' &&
       typeof roleSelRaw === 'string' && !!roleSelRaw.trim();
     const snapshot = applyAssistantNodeBasis(await this.#eval(`(() => {
+      const messageRole = ${chatgptMessageRole.toString()};
+      const messageId = ${chatgptMessageId.toString()};
       const nodes = Array.from(document.querySelectorAll(${assistantSel}));
       const lastNode = nodes[nodes.length - 1];
       const pageText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
       const ownerSelector = ${assistantOwnerSel};
-      const owner = lastNode && ownerSelector ? lastNode.closest(ownerSelector) : null;
-      const rawProviderMessageId = lastNode?.getAttribute?.('data-message-id') || owner?.getAttribute?.('data-message-id') || '';
+      const rawProviderMessageId = lastNode ? messageId(lastNode, ownerSelector) : '';
       const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
         ? rawProviderMessageId
         : null;
       const roleSel = ${roleSel};
       const qualifiedNodes = roleSel
-        ? nodes.filter(n => n.getAttribute && n.getAttribute('data-message-author-role') === 'assistant')
+        ? nodes.filter(n => messageRole(n) === 'assistant')
         : [];
       const qualifiedLast = qualifiedNodes[qualifiedNodes.length - 1] || null;
-      const rawQualifiedProviderMessageId = qualifiedLast?.getAttribute?.('data-message-id') ||
-        (qualifiedLast && ownerSelector ? qualifiedLast.closest(ownerSelector)?.getAttribute?.('data-message-id') : '') || '';
+      const rawQualifiedProviderMessageId = qualifiedLast ? messageId(qualifiedLast, ownerSelector) : '';
       const qualifiedProviderMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawQualifiedProviderMessageId)
         ? rawQualifiedProviderMessageId
         : null;
@@ -6603,21 +6631,21 @@ export class ChatGPTController {
         });
         const sendEnabled = send ? !send.disabled : false;
         const sendFound = !!send;
+        const messageRole = ${chatgptMessageRole.toString()};
+        const messageId = ${chatgptMessageId.toString()};
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
         const lastNode = nodes[nodes.length - 1];
         const messageIdOwnerSelector = ${assistantOwnerSel};
-        const messageIdOwner = lastNode && messageIdOwnerSelector ? lastNode.closest(messageIdOwnerSelector) : null;
-        const rawProviderMessageId = lastNode?.getAttribute?.('data-message-id') || messageIdOwner?.getAttribute?.('data-message-id') || '';
+        const rawProviderMessageId = lastNode ? messageId(lastNode, messageIdOwnerSelector) : '';
         const providerMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawProviderMessageId)
           ? rawProviderMessageId
           : null;
         const roleSel = ${assistantRoleSel};
         const qualifiedNodes = roleSel
-          ? nodes.filter(n => n.getAttribute && n.getAttribute('data-message-author-role') === 'assistant')
+          ? nodes.filter(n => messageRole(n) === 'assistant')
           : [];
         const qualifiedLast = qualifiedNodes[qualifiedNodes.length - 1] || null;
-        const rawQualifiedProviderMessageId = qualifiedLast?.getAttribute?.('data-message-id') ||
-          (qualifiedLast && messageIdOwnerSelector ? qualifiedLast.closest(messageIdOwnerSelector)?.getAttribute?.('data-message-id') : '') || '';
+        const rawQualifiedProviderMessageId = qualifiedLast ? messageId(qualifiedLast, messageIdOwnerSelector) : '';
         const qualifiedProviderMessageId = /^[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,511})$/.test(rawQualifiedProviderMessageId)
           ? rawQualifiedProviderMessageId
           : null;
