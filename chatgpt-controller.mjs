@@ -4401,6 +4401,9 @@ export class ChatGPTController {
     let ineffectiveOptionKey = null;
     let ineffectiveOptionClicks = 0;
     let dismissedMenuAfterIneffectiveClicks = false;
+    let ineffectivePowerKey = null;
+    let ineffectivePowerClicks = 0;
+    let powerPathDismissed = false;
     const attempts = [];
 
     while (Date.now() - start < timeoutMs) {
@@ -4411,6 +4414,9 @@ export class ChatGPTController {
         const targetPowerIndex = ${targetPowerIndexSource};
         const anyModeRe = new RegExp(${anyModePatternSource}, 'i');
         const clickedRecently = ${Math.max(0, lastClickAt)} > 0 && (Date.now() - ${Math.max(0, lastClickAt)}) < 2_500;
+        // Once the slider has proven unmovable, the power branch yields to the
+        // menu-option path instead of monopolizing the activation loop.
+        const powerPathDismissed = ${powerPathDismissed};
         const blockedTriggerSignatures = new Set(${JSON.stringify([...blockedTriggerSignatures])});
         ${HOST_DOM_COLLECTION_HELPERS_JS}
         ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
@@ -4658,6 +4664,7 @@ export class ChatGPTController {
         const powerLabels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
         const powerIntents = ['instant', 'thinking', null, null, 'extended-pro'];
         if (
+          !powerPathDismissed &&
           (powerControl || genericPowerThumb) &&
           powerTrack &&
           visible(powerTrack) &&
@@ -4693,6 +4700,7 @@ export class ChatGPTController {
           const trackInset = Math.min(14, Math.max(0, trackRect.w / 4));
           const targetX = trackRect.x + trackInset + (targetPowerIndex / 4) * Math.max(0, trackRect.w - 2 * trackInset);
           const targetY = trackRect.y + trackRect.h / 2;
+          const thumbRect = rectOf(powerThumb);
           return {
             active: false,
             action: 'pointer_power',
@@ -4701,8 +4709,12 @@ export class ChatGPTController {
             activeIntent: powerIntents[powerIndex],
             label: powerLabels[powerIndex],
             rect: { x: targetX - 6, y: targetY - 6, w: 12, h: 12 },
+            thumbRect: { x: thumbRect.x, y: thumbRect.y, w: thumbRect.w, h: thumbRect.h },
+            trackRect: { x: trackRect.x, y: trackRect.y, w: trackRect.w, h: trackRect.h },
             menuOpen: true,
             powerIndex,
+            powerMin,
+            powerMax,
             targetPowerIndex
           };
         }
@@ -4891,6 +4903,61 @@ export class ChatGPTController {
             last = { ...snap, reason: 'mode_option_click_ineffective' };
             break;
           }
+        }
+        if (snap.action === 'pointer_power') {
+          // A track click does not move every power slider; a fresh tab that
+          // sits on Instant has been observed ignoring it entirely. Escalate
+          // per unchanging powerIndex: click, drag the thumb, set by keyboard,
+          // then dismiss the power path so the menu options take over.
+          const powerKey = `index:${Number(snap.powerIndex)}`;
+          if (powerKey === ineffectivePowerKey) ineffectivePowerClicks += 1;
+          else {
+            ineffectivePowerKey = powerKey;
+            ineffectivePowerClicks = 1;
+          }
+          if (ineffectivePowerClicks >= 4) {
+            powerPathDismissed = true;
+            last = { ...snap, reason: 'mode_power_click_ineffective' };
+            await this.#sendKey('Escape');
+            await sleep(450);
+            continue;
+          }
+          attempts.push(modeIntentClickAttempt(snap));
+          const targetCx = Math.round(snap.rect.x + snap.rect.w / 2);
+          const targetCy = Math.round(snap.rect.y + snap.rect.h / 2);
+          if (ineffectivePowerClicks === 1) {
+            await this.#clickAt(targetCx, targetCy);
+          } else if (ineffectivePowerClicks === 2 && Number(snap.thumbRect?.w) > 0 && Number(snap.thumbRect?.h) > 0) {
+            const thumbCx = Math.round(snap.thumbRect.x + snap.thumbRect.w / 2);
+            const thumbCy = Math.round(snap.thumbRect.y + snap.thumbRect.h / 2);
+            await this.#moveMouseTo(thumbCx, thumbCy);
+            await this.page.mouseDown(thumbCx, thumbCy, { button: 'left', clickCount: 1 });
+            await sleep(jitter(40, 90));
+            await this.#moveMouseTo(targetCx, targetCy);
+            await this.page.mouseUp(targetCx, targetCy, { button: 'left', clickCount: 1 });
+          } else {
+            const thumbCx = Math.round((snap.thumbRect?.x || snap.rect.x) + ((snap.thumbRect?.w || snap.rect.w) / 2));
+            const thumbCy = Math.round((snap.thumbRect?.y || snap.rect.y) + ((snap.thumbRect?.h || snap.rect.h) / 2));
+            await this.#clickAt(thumbCx, thumbCy);
+            await sleep(jitter(120, 220));
+            const targetIndex = Number(snap.targetPowerIndex);
+            const maxIndex = Number.isInteger(Number(snap.powerMax)) ? Number(snap.powerMax) : null;
+            if (maxIndex !== null && targetIndex >= maxIndex) {
+              await this.#sendKey('End');
+            } else {
+              const delta = Number.isInteger(targetIndex) && Number.isInteger(Number(snap.powerIndex))
+                ? Math.max(0, targetIndex - Number(snap.powerIndex))
+                : 0;
+              for (let i = 0; i < delta; i += 1) {
+                await this.#sendKey('ArrowRight');
+                await sleep(jitter(40, 90));
+              }
+            }
+          }
+          if (shouldTrackPendingModeTrigger(snap)) pendingTriggerSignature = snap.signature;
+          lastClickAt = Date.now();
+          await sleep(450);
+          continue;
         }
         attempts.push(modeIntentClickAttempt(snap));
         const cx = Math.round(snap.rect.x + Math.max(6, Math.min(snap.rect.w - 6, snap.rect.w / 2)));

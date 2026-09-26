@@ -3072,6 +3072,255 @@ test('chatgpt-controller: query selects Pro through the compact power picker', a
   }
 });
 
+function freshTabPowerPage({ escapeRoute }) {
+  // Fresh tab: trigger opens the menu, the power slider sits on Instant
+  // (index 0) and only the chosen escape route moves it to Pro.
+  const progress = [];
+  const pointerEvents = [];
+  const keys = [];
+  let pickerPhase = 'closed';
+  let dragArmed = false;
+  let menuShowsOptions = false;
+  const powerSnap = () => ({
+    active: false,
+    action: 'pointer_power',
+    reason: 'clicked_mode_power',
+    targetIntent: 'extended-pro',
+    activeIntent: 'instant',
+    label: 'Instant',
+    rect: { x: 174, y: 74, w: 12, h: 12 },
+    thumbRect: { x: 90, y: 74, w: 12, h: 12 },
+    trackRect: { x: 60, y: 74, w: 240, h: 12 },
+    menuOpen: true,
+    powerIndex: 0,
+    powerMin: 0,
+    powerMax: 4,
+    targetPowerIndex: 4
+  });
+  const optionSnap = {
+    active: false,
+    action: 'pointer_option',
+    reason: 'clicked_mode_option',
+    targetIntent: 'extended-pro',
+    activeIntent: null,
+    label: 'Pro',
+    rect: { x: 200, y: 140, w: 120, h: 32 },
+    menuOpen: true
+  };
+  const activeSnap = {
+    active: true,
+    action: 'none',
+    reason: 'mode_power_active',
+    targetIntent: 'extended-pro',
+    activeIntent: 'extended-pro',
+    label: 'Pro',
+    evidenceKind: 'supported_power_slider',
+    menuOpen: true,
+    powerIndex: 4
+  };
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('mode_controls_not_found') && js.includes('clicked_mode_trigger') && js.includes('clicked_mode_option')) {
+        if (pickerPhase === 'closed') {
+          return {
+            active: false,
+            action: 'pointer_trigger',
+            reason: 'clicked_mode_trigger',
+            targetIntent: 'extended-pro',
+            activeIntent: 'instant',
+            label: 'Instant',
+            rect: { x: 40, y: 40, w: 100, h: 28 },
+            signature: '40:40:100:28:instant',
+            menuOpen: false
+          };
+        }
+        if (pickerPhase === 'instant') {
+          if (escapeRoute === 'options' && js.includes('powerPathDismissed = true')) {
+            menuShowsOptions = true;
+            return optionSnap;
+          }
+          return powerSnap();
+        }
+        return activeSnap;
+      }
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+      if (js.includes("already_generating")) {
+        return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8 };
+      }
+      if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: '' };
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: true, promptLen: 0 };
+      if (js.includes('fallbackMainText')) {
+        return {
+          stop: false,
+          sendEnabled: true,
+          sendFound: true,
+          txt: 'Final answer',
+          count: 1,
+          usedFallback: false,
+          hasError: false,
+          hasContinue: false,
+          isThinking: false,
+          pageText: 'Final answer\nPro\nChatGPT can make mistakes. Check important info.'
+        };
+      }
+      if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() { return 'https://chatgpt.com/c/fresh-tab-power'; },
+    async sendKey(key) { keys.push(key); },
+    async insertText() {},
+    async moveMouse(x, y) { pointerEvents.push(`move:${x},${y}`); },
+    async mouseDown(x, y) {
+      pointerEvents.push(`down:${x},${y}`);
+      if (pickerPhase === 'closed' && x < 150) pickerPhase = 'instant';
+      else if (pickerPhase === 'instant' && x < 150 && !menuShowsOptions) dragArmed = true;
+      else if (menuShowsOptions && x >= 150) pickerPhase = 'pro';
+    },
+    async mouseUp(x, y) {
+      pointerEvents.push(`up:${x},${y}`);
+      if (pickerPhase === 'instant' && dragArmed && x >= 150) {
+        if (escapeRoute === 'drag') pickerPhase = 'pro';
+        dragArmed = false;
+      }
+    },
+    async setFileInputFiles() {}
+  };
+  return {
+    page,
+    progress,
+    pointerEvents,
+    keys,
+    setPickerPhase(phase) { pickerPhase = phase; },
+    setSendKeyHandler(handler) { page.sendKey = handler; }
+  };
+}
+
+test('chatgpt-controller: a fresh-tab power slider that ignores track clicks is dragged to Pro', async () => {
+  const realNow = Date.now;
+  let fakeNow = 6_100_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+  const harness = freshTabPowerPage({ escapeRoute: 'drag' });
+  const controller = new ChatGPTController({
+    page: harness.page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 60_000,
+      modeIntent: 'extended-pro',
+      onProgress: (patch) => harness.progress.push(patch)
+    });
+    assert.equal(result.text, 'Final answer');
+    // Rung 1 clicked the track target (180,80) and it did not move; rung 2
+    // pressed the thumb (96,80) and released at the target.
+    assert.equal(harness.pointerEvents.some((item) => item === 'down:180,80'), true);
+    assert.equal(harness.pointerEvents.some((item) => item === 'down:96,80'), true);
+    assert.equal(harness.pointerEvents.some((item) => item === 'up:180,80'), true);
+    const provenancePatch = harness.progress.find((patch) => patch?.phase === 'mode_intent_confirmed');
+    assert.equal(provenancePatch?.modeIntentProvenance?.activeIntent, 'extended-pro');
+    assert.deepEqual(
+      provenancePatch?.modeIntentProvenance?.attempts?.map((item) => item.action),
+      ['pointer_trigger', 'pointer_power', 'pointer_power']
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: a power slider immune to pointer input is set by keyboard', async () => {
+  const realNow = Date.now;
+  let fakeNow = 6_350_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+  const harness = freshTabPowerPage({ escapeRoute: 'keyboard' });
+  harness.setPickerPhase('instant');
+  harness.setSendKeyHandler(async (key) => {
+    harness.keys.push(key);
+    if (key === 'End') harness.setPickerPhase('pro');
+  });
+  const controller = new ChatGPTController({
+    page: harness.page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 60_000,
+      modeIntent: 'extended-pro',
+      onProgress: (patch) => harness.progress.push(patch)
+    });
+    assert.equal(result.text, 'Final answer');
+    assert.equal(harness.keys.includes('End'), true);
+    const provenancePatch = harness.progress.find((patch) => patch?.phase === 'mode_intent_confirmed');
+    assert.deepEqual(
+      provenancePatch?.modeIntentProvenance?.attempts?.map((item) => item.action),
+      ['pointer_power', 'pointer_power', 'pointer_power']
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('chatgpt-controller: an unmovable power slider falls back to the menu option', async () => {
+  const realNow = Date.now;
+  let fakeNow = 6_600_000;
+  Date.now = () => {
+    fakeNow += 1_000;
+    return fakeNow;
+  };
+  const harness = freshTabPowerPage({ escapeRoute: 'options' });
+  harness.setPickerPhase('instant');
+  const controller = new ChatGPTController({
+    page: harness.page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  try {
+    const result = await controller.query({
+      prompt: 'agentify',
+      timeoutMs: 90_000,
+      modeIntent: 'extended-pro',
+      onProgress: (patch) => harness.progress.push(patch)
+    });
+    assert.equal(result.text, 'Final answer');
+    // After the dismiss, the option row was clicked and the menu dismissed.
+    assert.equal(harness.pointerEvents.some((item) => item === 'down:260,156'), true);
+    assert.equal(harness.keys.includes('Escape'), true);
+    const provenancePatch = harness.progress.find((patch) => patch?.phase === 'mode_intent_confirmed');
+    assert.deepEqual(
+      provenancePatch?.modeIntentProvenance?.attempts?.map((item) => item.action),
+      ['pointer_power', 'pointer_power', 'pointer_power', 'pointer_option']
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: already-selected supported Pro slider confirms without a trigger candidate', async () => {
   const realNow = Date.now;
   let fakeNow = 5_750_000;

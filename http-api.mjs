@@ -1770,10 +1770,13 @@ export function startHttpApi({
       const label = detail?.state?.label ? trimPreview(detail.state.label, 60) : null;
       const stateMenuOpen = typeof detail?.state?.menuOpen === 'boolean' ? detail.state.menuOpen : null;
       const stateMenuText = detail?.state?.menuText ? trimPreview(detail.state.menuText, 80) : null;
+      const attempts = Array.isArray(detail?.attempts) && detail.attempts.length
+        ? `attempts=${trimPreview(detail.attempts.map((item) => `${item.action}:${item.label || ''}`).join(' | '), 500)}`
+        : null;
       const composerHints = Array.isArray(detail?.state?.composerHints) && detail.state.composerHints.length
         ? trimPreview(detail.state.composerHints.join(' | '), 100)
         : null;
-      const debugSuffix = [targetIntent ? `target=${targetIntent}` : null, activeIntent ? `active=${activeIntent}` : null, label, stateMenuOpen === null ? null : `menuOpen=${stateMenuOpen}`, stateMenuText, composerHints]
+      const debugSuffix = [targetIntent ? `target=${targetIntent}` : null, activeIntent ? `active=${activeIntent}` : null, label, stateMenuOpen === null ? null : `menuOpen=${stateMenuOpen}`, stateMenuText, attempts, composerHints]
         .filter(Boolean)
         .join('; ');
       return {
