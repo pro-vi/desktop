@@ -1520,7 +1520,7 @@ export function startHttpApi({
 
   // Governor state (per-desktop instance).
   const providerSlots = createProviderSlotLeases({
-    maxSlots: 2,
+    maxSlots: 3,
     onChange: () => emitRuntimeChanged()
   });
   const operationScopes = providerTabOperations;
@@ -1533,7 +1533,7 @@ export function startHttpApi({
 
   const getGovernor = async () => {
     const s = (await getSettings?.().catch(() => null)) || {};
-    const maxInflightQueries = Math.max(1, Number(s.maxInflightQueries || 2) || 2);
+    const maxInflightQueries = Math.max(1, Number(s.maxInflightQueries || 3) || 3);
     const maxQueriesPerMinute = Math.max(1, Number(s.maxQueriesPerMinute || 12) || 12);
     const minTabGapMs = Math.max(0, Number(s.minTabGapMs || 0) || 0);
     const minGlobalGapMs = Math.max(0, Number(s.minGlobalGapMs || 0) || 0);

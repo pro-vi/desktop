@@ -769,7 +769,7 @@ function defaultSettings() {
     chromeProfileMode: 'isolated',
     chromeProfileName: 'Default',
     maxTabs: 50,
-    maxInflightQueries: 2,
+    maxInflightQueries: 3,
     maxQueriesPerMinute: 12,
     minTabGapMs: 0,
     minGlobalGapMs: 0,
@@ -847,7 +847,7 @@ async function refresh() {
     const runtime = lastState.runtime || { inflightQueries: 0, providerSlots: { max: 2, activeLeases: [], queued: [] }, activeQueries: [], lastOutcomes: [] };
     const activeQueries = Array.isArray(runtime.activeQueries) ? runtime.activeQueries : [];
     const lastOutcomes = Array.isArray(runtime.lastOutcomes) ? runtime.lastOutcomes : [];
-    const providerSlots = runtime.providerSlots || { max: settings.maxInflightQueries || 2, activeLeases: [], queued: [] };
+    const providerSlots = runtime.providerSlots || { max: settings.maxInflightQueries || 3, activeLeases: [], queued: [] };
     const activeByTab = new Map(activeQueries.map((item) => [item.tabId, item]));
     const outcomeByTab = new Map(lastOutcomes.map((item) => [item.tabId, item]));
     const sortedTabs = [...tabs].sort((a, b) => {
@@ -1200,7 +1200,7 @@ async function refresh() {
         : 'Electron';
     const activeSlots = Array.isArray(providerSlots.activeLeases) ? providerSlots.activeLeases.length : Number(runtime.inflightQueries || 0);
     const queuedSlots = Array.isArray(providerSlots.queued) ? providerSlots.queued.length : 0;
-    const runningSummary = ` • Slots: ${activeSlots}/${providerSlots.max || settings.maxInflightQueries || 2}${queuedSlots ? ` +${queuedSlots} queued` : ''} • Running: ${activeQueries.length}`;
+    const runningSummary = ` • Slots: ${activeSlots}/${providerSlots.max || settings.maxInflightQueries || 3}${queuedSlots ? ` +${queuedSlots} queued` : ''} • Running: ${activeQueries.length}`;
     const runsSummary = ` • Runs: ${runs.length}`;
     const liveSummary = hasLiveUpdates ? 'Live updates on' : 'Polling every 3s';
     const refreshedSummary = lastRefreshAt ? ` • Refreshed ${new Date(lastRefreshAt).toLocaleTimeString()}` : '';
@@ -1406,7 +1406,7 @@ async function main() {
           chromeProfileMode: String(el('setChromeProfileMode').value || 'isolated').trim() || 'isolated',
           chromeProfileName: String(el('setChromeProfileName').value || 'Default').trim() || 'Default',
           maxTabs: num('setMaxTabs', 50),
-          maxInflightQueries: num('setMaxInflight', 2),
+          maxInflightQueries: num('setMaxInflight', 3),
           maxQueriesPerMinute: num('setQpm', 12),
           minTabGapMs: num('setTabGap', 0),
           minGlobalGapMs: num('setGlobalGap', 0),

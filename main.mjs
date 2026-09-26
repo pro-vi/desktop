@@ -429,7 +429,7 @@ async function main() {
       browser: browserState,
       compatibility: getCompatibilityStatus(),
       libraryStartup,
-      runtime: server?.getRuntimeState?.() || { inflightQueries: 0, providerSlots: { max: settings.maxInflightQueries || 2, activeLeases: [], queued: [] }, activeQueries: [] }
+      runtime: server?.getRuntimeState?.() || { inflightQueries: 0, providerSlots: { max: settings.maxInflightQueries || 3, activeLeases: [], queued: [] }, activeQueries: [] }
     };
   });
 

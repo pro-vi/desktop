@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 
-import { ChatGPTController } from '../chatgpt-controller.mjs';
+import { ChatGPTController, defaultReconcileGraceMs } from '../chatgpt-controller.mjs';
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
 import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 
@@ -10208,4 +10208,15 @@ test('chatgpt-controller: transcript keeps the line breaks of a user turn shown 
   assert.equal(capture.status, 'complete');
   assert.equal(capture.rawTurns[0].text, 'H1. Four kinds:\n- consent: ask first\n- content: name a stand-in\n\nH2. Remove pause.');
   assert.equal(capture.rawTurns[1].text, 'A reply whose source newline is ordinary markup whitespace');
+});
+
+test('controller: the default reconcile grace gives a response at least an hour before the hard deadline', () => {
+  const minute = 60_000;
+  // Default 10-minute query: hard deadline 60 minutes, not 20.
+  assert.equal(10 * minute + defaultReconcileGraceMs(10 * minute), 60 * minute);
+  assert.equal(30 * minute + defaultReconcileGraceMs(30 * minute), 60 * minute);
+  // A soft deadline already past the hour keeps its previous 5-10 minute grace.
+  assert.equal(defaultReconcileGraceMs(60 * minute), 10 * minute);
+  assert.equal(defaultReconcileGraceMs(90 * minute), 10 * minute);
+  assert.equal(defaultReconcileGraceMs(0), 60 * minute);
 });

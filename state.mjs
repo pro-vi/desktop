@@ -38,7 +38,7 @@ export function defaultSettings() {
 
     // Governor defaults (bounded, but large enough for persistent multi-agent work).
     maxTabs: 50,
-    maxInflightQueries: 2,
+    maxInflightQueries: 3,
     maxQueriesPerMinute: 12,
     minTabGapMs: 1200,
     minGlobalGapMs: 200,

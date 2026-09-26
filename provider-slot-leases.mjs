@@ -25,10 +25,10 @@ function makeCancelledError({ runId, reason = 'cancelled' } = {}) {
   return err;
 }
 
-export function createProviderSlotLeases({ maxSlots = 2, now = () => Date.now(), onChange = null } = {}) {
+export function createProviderSlotLeases({ maxSlots = 3, now = () => Date.now(), onChange = null } = {}) {
   const active = new Map();
   const queue = [];
-  let capacity = positiveInt(maxSlots, 2);
+  let capacity = positiveInt(maxSlots, 3);
   let sequence = 0;
 
   const emitChange = () => {

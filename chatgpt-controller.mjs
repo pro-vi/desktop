@@ -37,6 +37,15 @@ const EVALUATION_TERMINATION_TIMEOUT_MS = 5_000;
 const PROMPT_DELIVERY_READ_TIMEOUT_MS = 2_000;
 const RESPONSE_BACKSTOP_MARGIN_MS = 10_000;
 const DEEP_RESEARCH_OBSERVATION_INTERVAL_MS = 5_000;
+// Pro can think for many minutes, and an answer that lands after the hard
+// deadline is never attached to its run, so the default grace stretches the
+// hard deadline (soft deadline + grace) to at least this long.
+const MIN_RESPONSE_HARD_DEADLINE_MS = 60 * 60_000;
+
+export function defaultReconcileGraceMs(softDeadlineMs) {
+  const soft = Math.max(0, Math.floor(Number(softDeadlineMs) || 0));
+  return Math.max(5 * 60_000, Math.min(soft, 10 * 60_000), MIN_RESPONSE_HARD_DEADLINE_MS - soft);
+}
 
 async function removeOwnedDownloadFile(outDir, filePath) {
   const root = path.resolve(String(outDir || ''));
@@ -6389,7 +6398,7 @@ export class ChatGPTController {
     );
     const reconcileGraceMs = Number.isFinite(Number(options.reconcileGraceMs)) && Number(options.reconcileGraceMs) > 0
       ? Math.floor(Number(options.reconcileGraceMs))
-      : Math.max(5 * 60_000, Math.min(timeoutMs, 10 * 60_000));
+      : defaultReconcileGraceMs(timeoutMs);
     const recoveryTimeoutMs = Number.isFinite(Number(options.recoveryTimeoutMs)) && Number(options.recoveryTimeoutMs) > 0
       ? Math.floor(Number(options.recoveryTimeoutMs))
       : Math.min(this.captureHostTimeoutMs, 30_000);
@@ -6538,7 +6547,7 @@ export class ChatGPTController {
           1,
           Number.isFinite(Number(reconcileGraceMs)) && Number(reconcileGraceMs) > 0
             ? Math.floor(Number(reconcileGraceMs))
-            : Math.max(5 * 60_000, Math.min(effectiveTimeoutMs, 10 * 60_000))
+            : defaultReconcileGraceMs(effectiveTimeoutMs)
         )
       : 0;
     const hardDeadlineMs = effectiveTimeoutMs + effectiveReconcileGraceMs;
