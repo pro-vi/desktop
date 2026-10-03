@@ -2,6 +2,19 @@
 
 Deferred work with reopen triggers. Each entry names the plan it came from and the observation that should reopen it — a deferral is a decision with a tripwire, not a drop.
 
+Verdicts: `architect` (needs a plan), `direct` (one commit), `defer` (waiting for its reopen trigger), `pending` (awaiting triage), `drop` (not pursued). Check a task when its plan is written or its direct commit lands.
+
+## Lanes
+
+- [ ] **live-probe-runner** — Reusable consent-gated live-probe runner · verdict: defer
+- [ ] **missing-run-watchdog** — Independent missing-run watchdog · verdict: defer
+- [ ] **visual-proof-ci** — GUI CI lane for the visual-proof tests · verdict: defer
+- [ ] **prompt-line-loss** — Isolate what makes ChatGPT drop a prompt line · verdict: defer
+- [ ] **quit-when-idle** — Quit when idle (fallback for idle cost) · verdict: defer
+- [ ] **chatgpt-compatibility-drift** — ChatGPT compatibility drift seen 2026-09-23, not investigated · verdict: defer
+- [ ] **status-response-slimming** — `/status` response slimming · verdict: pending
+- [ ] **core-tool-profile** — Default MCP tool profile → core · verdict: pending
+
 ## Deferred
 
 - **Reusable consent-gated live-probe runner** (`scripts/live-probe.mjs`) — origin: plan `2026-09-18-001` (CI gate, probe convention, clean-environment acceptance). One driver for live provider probes (consent gate, respawn, exercise, verify, record, close tab) instead of a hand-rolled driver per probe; four were hand-rolled in the 2026-09-17 session alone. Reopen trigger: the next hand-rolled probe driver prompts a tally of the recurring mechanics (consent, lifecycle, timeout, cleanup, receipt) — reopen when estimated recurring savings exceed the runner's build + maintenance cost, not only when one future driver exceeds the whole build. Tally 2026-09-23 (the trigger fired): five hand-rolled probe sends in `docs/probes/2026-09-23-prompt-line-delivery-probe.md` each repeated the same nine steps — consent question, `/status` in-flight check, `agentify_shutdown` respawn, a byte-exact body built with `jq`, `POST /query` with `fireAndForget`, a `/runs/get` poll loop, a wait for `outputManifest.transcript.state == ready`, a Python diff of the snapshot's user turn against the prompt, and `POST /tabs/close` — plus a separate Electron frame-rate script. Reopen decision is the maintainer's.
