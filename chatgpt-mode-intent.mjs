@@ -4,6 +4,7 @@ import {
   projectUrlForLocation,
   resolveChatGptLocation
 } from './chatgpt-location.mjs';
+import { parseChatGptRecipient, parseDotKeyMeta } from './chatgpt-recipient.mjs';
 
 export const CHATGPT_MODE_INTENTS = ['extended-pro', 'thinking', 'instant'];
 export const CHATGPT_MODEL_INTENTS = ['gpt-5.5-pro', 'gpt-5.4-pro'];
@@ -36,6 +37,13 @@ export function normalizeChatGptModelIntent(value, { fallback = null } = {}) {
 
 export function normalizePersistedChatGptKeyMeta(input) {
   const objectInput = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  if ((Object.hasOwn(objectInput, 'dotBinding') || Object.hasOwn(objectInput, 'dotSubmission')) && objectInput.recipient?.kind !== 'dot') {
+    throw new Error('saved_dot_binding_invalid');
+  }
+  if (Object.hasOwn(objectInput, 'recipient')) {
+    const recipient = parseChatGptRecipient(objectInput.recipient);
+    if (recipient.kind === 'dot') return parseDotKeyMeta(objectInput);
+  }
   const location = decodePersistedChatGptLocation(input);
   return {
     location,

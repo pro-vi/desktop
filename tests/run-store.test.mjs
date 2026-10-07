@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 
 import { createRunStore, parseResponseDebug, parseResponseRecovery } from '../run-store.mjs';
+import { initialDotSubmission } from '../chatgpt-recipient.mjs';
 
 function completionReceipt(kind = 'assistant-response') {
   return {
@@ -16,6 +17,39 @@ function completionReceipt(kind = 'assistant-response') {
     capturedAt: Date.now()
   };
 }
+
+test('run-store: Dot identity and delivery survive summary, restart, and interruption', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-dot-run-'));
+  t.after(async () => fs.rm(stateDir, { recursive: true, force: true }));
+  const recipient = { kind: 'dot', dotUrl: 'https://chatgpt.com/fixture-dot' };
+  const dotBinding = { dotId: 'fixture-dot', dotUrl: recipient.dotUrl, conversationId: 'fixture-conversation', conversationUrl: recipient.dotUrl, accountId: 'fixture-account' };
+  const store = createRunStore(stateDir);
+  await store.load();
+  await store.create({ id: 'dot-run', kind: 'query', status: 'running', recipient, dotBinding, dotSubmission: initialDotSubmission(), logicalRequest: { recipient, prompt: 'fixture' } });
+  await store.patch('dot-run', { dotSubmission: { state: 'unknown', userMessageId: null } });
+  const restarted = createRunStore(stateDir);
+  await restarted.load();
+  const loaded = restarted.get('dot-run');
+  assert.deepEqual(loaded.recipient, recipient);
+  assert.deepEqual(loaded.dotBinding, dotBinding);
+  assert.deepEqual(loaded.dotSubmission, { state: 'unknown', userMessageId: null });
+  assert.deepEqual(restarted.list()[0].dotSubmission, loaded.dotSubmission);
+  await restarted.finalize('dot-run', { status: 'interrupted' });
+  assert.deepEqual(restarted.get('dot-run').dotSubmission, loaded.dotSubmission);
+  await assert.rejects(restarted.create({ id: 'missing-dot-proof', kind: 'query', status: 'running', recipient, dotBinding }), /invalid_dot_submission/);
+  for (const fields of [
+    { dotBinding, dotSubmission: { state: 'unknown', userMessageId: null } },
+    { recipient: { kind: 'chat' }, dotBinding },
+    { logicalRequest: { recipient } }
+  ]) {
+    await assert.rejects(restarted.create({ id: 'lost-dot-recipient', kind: 'query', status: 'running', ...fields }), /invalid_dot_run/);
+  }
+  await restarted.create({ id: 'submitted-dot-run', kind: 'query', status: 'running', recipient, dotBinding, dotSubmission: { state: 'submitted', userMessageId: 'fixture-user' } });
+  await assert.rejects(restarted.finalize('submitted-dot-run', { status: 'success' }), /missing_completion_receipt/);
+  assert.equal(restarted.get('submitted-dot-run').status, 'running');
+  await restarted.finalize('submitted-dot-run', { status: 'success', completionReceipt: completionReceipt() });
+  assert.equal(restarted.get('submitted-dot-run').status, 'success');
+});
 
 test('run-store: create, patch, finalize, and archive lifecycle', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-'));

@@ -16,6 +16,24 @@ function stubBrowserBackend() {
   };
 }
 
+test('tab-manager: Dot recipient reaches the factory and cannot become implicit Chat', async () => {
+  let seen;
+  let initialUrl;
+  const backend = stubBrowserBackend();
+  const createSession = backend.createSession;
+  backend.createSession = async (options) => { initialUrl = options.url; return createSession(options); };
+  const manager = new TabManager({ browserBackend: backend, createController: async (args) => { seen = args; return {}; } });
+  const recipient = { kind: 'dot', dotUrl: 'https://chatgpt.com/fixture-dot' };
+  const id = await manager.createTab({ key: 'dot-key', vendorId: 'chatgpt', url: recipient.dotUrl, recipient });
+  assert.deepEqual(seen.recipient, recipient);
+  assert.deepEqual(manager.listTabs()[0].recipient, recipient);
+  assert.equal(initialUrl, 'about:blank');
+  assert.equal(manager.listTabs()[0].url, 'about:blank');
+  await assert.rejects(manager.ensureTab({ key: 'dot-key', vendorId: 'chatgpt', recipient: { kind: 'chat' } }), /recipient_conflict/);
+  await assert.rejects(manager.createTab({ key: 'dot-key', vendorId: 'chatgpt', recipient: { kind: 'chat' } }), /recipient_conflict/);
+  assert.equal(await manager.ensureTab({ key: 'dot-key' }), id);
+});
+
 test('tab-manager: setMaxTabs raises the live creation cap', async () => {
   const manager = new TabManager({
     browserBackend: stubBrowserBackend(),

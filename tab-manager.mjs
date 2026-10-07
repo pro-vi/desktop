@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { parseChatGptRecipient } from './chatgpt-recipient.mjs';
 
 class Mutex {
   #p = Promise.resolve();
@@ -69,10 +70,19 @@ export class TabManager {
     vendorName = null,
     projectUrl = null,
     modeIntent = null,
-    modelIntent = null
+    modelIntent = null,
+    recipient = undefined
   } = {}) {
+    const parsedRecipient = parseChatGptRecipient(recipient);
+    if (parsedRecipient.kind === 'dot' && vendorId !== 'chatgpt') throw new Error('recipient_conflict');
     return await this.mutex.run(async () => {
-      if (key && this.keyToId.has(key)) return this.keyToId.get(key);
+      if (key && this.keyToId.has(key)) {
+        const id = this.keyToId.get(key);
+        if (recipient !== undefined && this.tabs.get(id)?.recipient.kind !== parsedRecipient.kind) {
+          throw new Error('recipient_conflict');
+        }
+        return id;
+      }
       if (this.tabs.size >= this.maxTabs) throw new Error('max_tabs_reached');
 
       const id = crypto.randomUUID();
@@ -88,7 +98,7 @@ export class TabManager {
 
       const session = await this.browserBackend.createSession({
         tabId: id,
-        url,
+        url: parsedRecipient.kind === 'dot' ? 'about:blank' : url,
         show,
         protectedTab,
         vendorId,
@@ -102,7 +112,8 @@ export class TabManager {
           page: session.page,
           session,
           vendorId,
-          vendorName
+          vendorName,
+          recipient: parsedRecipient
         });
       } catch (error) {
         try {
@@ -118,7 +129,8 @@ export class TabManager {
         name: name || key || `tab-${id.slice(0, 8)}`,
         vendorId: vendorId || null,
         vendorName: vendorName || null,
-        url: String(url || ''),
+        recipient: parsedRecipient,
+        url: parsedRecipient.kind === 'dot' ? 'about:blank' : String(url || ''),
         session,
         presenter: session.presenter,
         controller,
@@ -137,19 +149,22 @@ export class TabManager {
     });
   }
 
-  async ensureTab({ key, name, url, vendorId, vendorName, show, projectUrl, modeIntent, modelIntent } = {}) {
+  async ensureTab({ key, name, url, vendorId, vendorName, show, projectUrl, modeIntent, modelIntent, recipient } = {}) {
     if (!key) throw new Error('missing_key');
     const existing = this.keyToId.get(key);
     if (existing) {
       const tab = this.tabs.get(existing);
       if (!tab) {
         this.keyToId.delete(key);
-        return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent, modelIntent });
+        return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent, modelIntent, recipient });
       }
       if (!tabMatchesVendor(tab, { vendorId, url })) throw new Error('key_vendor_mismatch');
+      if (recipient !== undefined && parseChatGptRecipient(recipient).kind !== tab.recipient.kind) {
+        throw new Error('recipient_conflict');
+      }
       return existing;
     }
-    return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent, modelIntent });
+    return await this.createTab({ key, name, show: !!show, url, vendorId, vendorName, projectUrl, modeIntent, modelIntent, recipient });
   }
 
   listTabs() {
@@ -161,6 +176,7 @@ export class TabManager {
         name: t.name,
         vendorId: t.vendorId || null,
         vendorName: t.vendorName || null,
+        recipient: t.recipient,
         url: t.url || null,
         projectUrl: t.projectUrl || null,
         modeIntent: t.modeIntent || null,

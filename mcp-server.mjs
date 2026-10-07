@@ -5,6 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { locationFromConversationUrl } from './chatgpt-location.mjs';
+import { parseDotQueryRequest, parseDotRunFields, parseDotUrl } from './chatgpt-recipient.mjs';
+import { assertDotReplyEvidence } from './chatgpt-completion-evidence.mjs';
 import {
   CATALOG_LIST_CURSOR_PATTERN,
   parseCatalogPage,
@@ -123,6 +125,12 @@ function runOutputPath(run = {}, data = {}) {
   );
 }
 
+function runMetadataContent(data) {
+  if (data.run?.recipient?.kind !== 'dot') return data;
+  const { outputText, ...metadata } = data;
+  return metadata;
+}
+
 function runStatusText(run = {}, data = {}) {
   if (!run) return 'Run not found.';
   const bits = [
@@ -132,6 +140,7 @@ function runStatusText(run = {}, data = {}) {
     run.kind ? `kind=${run.kind}` : null
   ].filter(Boolean);
   const lines = [bits.join(' ')];
+  if (run.recipient?.kind === 'dot') lines.push('recipient=dot reply_status=message-only');
   // An incomplete delivery rides above label/detail: a caller skimming the
   // first lines must not read the run as clean (the label also carries it).
   const deliveryNotice = promptDeliveryNotice(run.promptDelivery);
@@ -835,6 +844,41 @@ function parseCatalogVerificationResponse(value, expectedIdentity) {
   }
   return outcome;
 }
+
+registerTool(
+  'agentify_dot_query',
+  {
+    description: 'Send a text message to the personal ChatGPT Dot at dotUrl and return its completed message reply. Success confirms this reply was saved, not that background tasks have finished. Chat model and reasoning settings do not apply. For a long reply, set fireAndForget=true and call agentify_wait_run with the returned runId.',
+    inputSchema: z.object({
+      dotUrl: z.string().refine((value) => acceptedBy(parseDotUrl, value)).describe('HTTPS ChatGPT web locator for the personal Dot; provider identity is confirmed before sending.'),
+      prompt: z.string().min(1).max(200_000),
+      key: z.string().min(1).optional().describe('Stable conversation key. Omit to derive it from dotUrl.'),
+      tabId: z.string().min(1).optional().describe('Existing Dot-bound tab id.'),
+      timeoutMs: z.number().positive().optional(),
+      fireAndForget: z.boolean().optional()
+    }).strict()
+  },
+  async ({ dotUrl, ...options }) => {
+    const body = parseDotQueryRequest({ ...options, recipient: { kind: 'dot', dotUrl }, source: 'mcp' });
+    const conn = await getConn();
+    const data = await requestJson({ ...conn, method: 'POST', path: '/query', body });
+    if (data.async) {
+      const dot = parseDotRunFields(data);
+      return {
+        content: [{ type: 'text', text: `Dot query queued. runId=${data.runId}. Next: call agentify_wait_run for the completed message reply.` }],
+        structuredContent: { ...asyncQueryStructuredContent(data), ...dot }
+      };
+    }
+    const dot = parseDotRunFields(data.result?.meta);
+    const evidence = assertDotReplyEvidence(data.result.meta.completionEvidence, dot);
+    if (typeof data.result.text !== 'string' || !data.result.text.trim()) throw new Error('dot_reply_unconfirmed');
+    const meta = { ...dot, completionEvidence: evidence, outputManifest: data.result.meta.outputManifest, durationMs: data.result.meta.durationMs };
+    return {
+      content: [{ type: 'text', text: data.result.text }],
+      structuredContent: { runId: data.runId, meta }
+    };
+  }
+);
 
 registerTool(
   'agentify_query',
@@ -1581,12 +1625,12 @@ registerTool(
     if (full && !includeOutputText) {
       return {
         content: [{ type: 'text', text: JSON.stringify(data.run || null, null, 2) }],
-        structuredContent: data
+        structuredContent: runMetadataContent(data)
       };
     }
     return {
       content: [{ type: 'text', text: runStatusText(data.run || null, data) }],
-      structuredContent: data
+      structuredContent: runMetadataContent(data)
     };
   }
 );
@@ -1625,13 +1669,13 @@ registerTool(
       if (!data?.run) throw error;
       return {
         content: [{ type: 'text', text: `waitTimedOut=true\n${runStatusText(data.run || null, data)}` }],
-        structuredContent: { ...data, waitTimedOut: true },
+        structuredContent: { ...runMetadataContent(data), waitTimedOut: true },
         isError: true
       };
     }
     return {
       content: [{ type: 'text', text: runStatusText(data.run || null, data) }],
-      structuredContent: data,
+      structuredContent: runMetadataContent(data),
       isError: data.run?.status !== 'success'
     };
   }
@@ -1691,6 +1735,12 @@ registerTool(
         source: 'mcp'
       }
     });
+    if (data.run?.recipient?.kind === 'dot') {
+      return {
+        content: [{ type: 'text', text: runStatusText(data.run, data) }],
+        structuredContent: runMetadataContent(data)
+      };
+    }
     return {
       content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
       structuredContent: data

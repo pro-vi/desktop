@@ -4,13 +4,28 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { ensureToken, readToken, writeToken, defaultSettings, normalizeSettings, readSettings, writeSettings } from '../state.mjs';
+import { ensureToken, readToken, writeToken, defaultSettings, normalizeSettings, readSettings, writeSettings, readProjects, writeProjects } from '../state.mjs';
 import { DEFAULT_CHAT_MODE_INTENT, DEFAULT_IMAGE_MODE_INTENT } from '../chatgpt-mode-intent.mjs';
 
 async function tempDir() {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-desktop-test-'));
   return base;
 }
+
+test('state: invalid Dot affinity remains stored without hiding valid Chat keys', async (t) => {
+  const dir = await tempDir();
+  t.after(async () => fs.rm(dir, { recursive: true, force: true }));
+  const invalidDot = { recipient: { kind: 'dot', dotUrl: 'https://chatgpt.com/fixture-dot' }, dotBinding: { dotId: 'missing-conversation' } };
+  await writeProjects({ invalidDot, chat: { conversationUrl: 'https://chatgpt.com/c/fixture-chat', modeIntent: 'thinking' } }, dir);
+  const first = await readProjects(dir);
+  assert.deepEqual(first.invalidDot, invalidDot);
+  assert.equal(first.chat.conversationUrl, 'https://chatgpt.com/c/fixture-chat');
+  await writeProjects({ ...first, anotherChat: { conversationUrl: 'https://chatgpt.com/c/another-chat' } }, dir);
+  const second = await readProjects(dir);
+  assert.deepEqual(second.invalidDot, invalidDot);
+  assert.equal(second.chat.conversationUrl, 'https://chatgpt.com/c/fixture-chat');
+  assert.equal(second.anotherChat.conversationUrl, 'https://chatgpt.com/c/another-chat');
+});
 
 test('state: ensureToken creates and is readable', async () => {
   const dir = await tempDir();

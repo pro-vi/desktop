@@ -3,6 +3,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { CHATGPT_MODEL_INTENTS, normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-location.mjs';
+import { parseChatGptRecipient } from './chatgpt-recipient.mjs';
+import {
+  completionEvidenceFor,
+  isQualifiedCompletionEvidence
+} from './chatgpt-completion-evidence.mjs';
 import { providerConversationIdFromOwnedLocation } from './conversation-identity.mjs';
 import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
 import { DEEP_RESEARCH_IFRAME_SELECTOR } from './deep-research-target.mjs';
@@ -353,23 +358,6 @@ const IMAGE_THINKING_LINE_RE = /(^|(?:\\n)|\n)\s*thinking(?:\s*(?:\\n|\n|$))/i;
 // query/research output only when this is present (O1/O2). The closed source
 // set names where finality came from; transient, error, and timeout paths
 // never construct one.
-const COMPLETION_EVIDENCE_SOURCES = Object.freeze([
-  'assistant-node',
-  'image-output',
-  'deep-research-report',
-  'structured-recovery'
-]);
-
-function completionEvidenceFor(source) {
-  if (!COMPLETION_EVIDENCE_SOURCES.includes(source)) return null;
-  return { source, observedAt: Date.now() };
-}
-
-function isQualifiedCompletionEvidence(value) {
-  return !!(value && typeof value === 'object' && !Array.isArray(value) &&
-    COMPLETION_EVIDENCE_SOURCES.includes(value.source));
-}
-
 // Progress-only assistant labels: surfaces whose entire text is a known
 // provider progress state. Exact equality after whitespace collapse (with an
 // optional trailing ellipsis) — an answer that merely discusses "thinking" or
@@ -624,6 +612,7 @@ export class ChatGPTController {
     stateDir,
     vendorId = null,
     vendorName = null,
+    recipient = undefined,
     uiContract = null,
     onCompatibilityObservation = null,
     compatibilityBackend = 'electron',
@@ -635,6 +624,9 @@ export class ChatGPTController {
     this.selectors = selectors;
     this.vendorId = vendorId;
     this.vendorName = vendorName;
+    const parsedRecipient = parseChatGptRecipient(recipient);
+    if (parsedRecipient.kind === 'dot' && vendorId !== 'chatgpt') throw new Error('recipient_conflict');
+    Object.defineProperty(this, 'recipient', { value: parsedRecipient, enumerable: true });
     this.uiContract = uiContract;
     this.onCompatibilityObservation =
       typeof onCompatibilityObservation === 'function' ? onCompatibilityObservation : null;
@@ -668,6 +660,9 @@ export class ChatGPTController {
   }
 
   async recordCompatibilityObservation(observation) {
+    if (this.recipient.kind === 'dot' && !String(observation?.capabilityId || '').startsWith('dot-')) {
+      return { accepted: false, reason: 'dot-capability-required' };
+    }
     if (
       this.vendorId !== 'chatgpt' ||
       this.uiContract?.kind !== 'chatgpt' ||
@@ -1059,6 +1054,7 @@ export class ChatGPTController {
   }
 
   async inspectConversationRoute() {
+    if (this.recipient.kind === 'dot') throw new Error('dot_operation_unsupported');
     const messageSelector = this.#transcriptDependencySelector(
       'transcript-message',
       '[data-message-author-role]'
@@ -3309,6 +3305,7 @@ export class ChatGPTController {
   }
 
   async readConversationText({ maxChars = 200_000, includeTranscriptText = false, firstMessageWaitMs = 10_000, firstMessagePollMs = 500 } = {}) {
+    if (this.recipient.kind === 'dot') throw new Error('dot_operation_unsupported');
     const projectionCap = Math.max(1, Math.min(1_000_000, Math.floor(Number(maxChars) || 200_000)));
     const maxCaptureBytes = 16 * 1024 * 1024;
     let captureWindow;
@@ -5567,6 +5564,7 @@ export class ChatGPTController {
       this.currentRun.requestedAt = Date.now();
       this.currentRun.reason = reason || 'user_stop';
     }
+    if (this.recipient.kind === 'dot') return { ok: true, requested: !!this.currentRun, clicked: false };
     const clicked = await this.#clickVisibleStop().catch(() => false);
     return { ok: true, requested: !!this.currentRun || !!clicked, clicked };
   }
@@ -7403,6 +7401,7 @@ export class ChatGPTController {
     attachments = [],
     timeoutMs = 10 * 60_000,
     onProgress = null,
+    recipient = undefined,
     imageGeneration = false,
     modeIntent = null,
     modelIntent = null,
@@ -7411,6 +7410,9 @@ export class ChatGPTController {
     recoveryTimeoutMs = null,
     backstopSlackMs = null
   } = {}) {
+    const requestedRecipient = parseChatGptRecipient(recipient);
+    if (requestedRecipient.kind !== this.recipient.kind) throw new Error('recipient_conflict');
+    if (requestedRecipient.kind === 'dot') throw new Error('dot_binding_unconfirmed');
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
     const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress };
@@ -7996,6 +7998,7 @@ export class ChatGPTController {
   }
 
   async research({ prompt, attachments = [], timeoutMs = 45 * 60_000, outDir = path.join(this.stateDir, 'downloads'), onProgress = null } = {}) {
+    if (this.recipient.kind === 'dot') throw new Error('recipient_conflict');
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
     const requestedTimeoutMs = Number(timeoutMs);
@@ -8079,6 +8082,7 @@ export class ChatGPTController {
   }
 
   async send({ text, timeoutMs = 3 * 60_000, stopAfterSend = false, onProgress = null } = {}) {
+    if (this.recipient.kind === 'dot') throw new Error('recipient_conflict');
     const prompt = String(text || '');
     if (!prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');

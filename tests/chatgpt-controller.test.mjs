@@ -31,6 +31,25 @@ function readyState() {
   };
 }
 
+test('chatgpt-controller: Dot-bound stop is local even without a current run', async () => {
+  let evaluations = 0;
+  const recipient = { kind: 'dot', dotUrl: 'https://chatgpt.com/fixture-dot' };
+  const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient, stateDir: os.tmpdir(), page: { evaluate: async () => { evaluations++; return true; } }, selectors: {} });
+  assert.deepEqual(await controller.requestStop(), { ok: true, requested: false, clicked: false });
+  controller.currentRun = { requested: false };
+  const stopped = await controller.requestStop();
+  assert.equal(stopped.requested, true);
+  assert.equal(stopped.clicked, false);
+  assert.equal(controller.currentRun.requested, true);
+  assert.equal(evaluations, 0);
+  assert.throws(() => { controller.recipient = { kind: 'chat' }; }, TypeError);
+  await assert.rejects(controller.query({ prompt: 'fixture' }), /recipient_conflict/);
+  await assert.rejects(controller.research({ prompt: 'fixture' }), /recipient_conflict/);
+  await assert.rejects(controller.send({ text: 'fixture' }), /recipient_conflict/);
+  await assert.rejects(controller.readConversationText(), /dot_operation_unsupported/);
+  assert.equal(evaluations, 0);
+});
+
 test('chatgpt-controller: timed-out exclusive work quarantines already queued operations until settlement', async () => {
   const controller = new ChatGPTController({ page: {}, selectors: {} });
   let enterExclusive;

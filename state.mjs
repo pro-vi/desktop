@@ -170,7 +170,13 @@ export async function readProjects(stateDir = defaultStateDir()) {
     const out = {};
     for (const [k, v] of Object.entries(raw)) {
       // Backwards compat: old format stored bare strings (projectUrl only).
-      out[k] = normalizePersistedChatGptKeyMeta(v);
+      try {
+        out[k] = normalizePersistedChatGptKeyMeta(v);
+      } catch {
+        // Preserve an invalid entry so saving another key cannot discard it.
+        // The key's consumer validates it again and reports its own error.
+        out[k] = v;
+      }
     }
     return out;
   } catch {

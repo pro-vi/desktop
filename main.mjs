@@ -269,7 +269,7 @@ async function main() {
     maxTabs: resolveMaxTabs(settings),
     onNeedsAttention,
     onChanged: emitTabsChanged,
-    createController: async ({ tabId, page, vendorId, vendorName }) => {
+    createController: async ({ tabId, page, vendorId, vendorName, recipient }) => {
       const compatibilityBridge = createProviderCompatibilityBridge({
         vendorId,
         vendorName,
@@ -286,6 +286,7 @@ async function main() {
         selectors: controllerSelectors,
         vendorId,
         vendorName,
+        recipient,
         ...compatibilityBridge,
         compatibilityBackend: browserBackendKind === 'chrome-cdp' ? 'chrome-cdp' : 'electron',
         stateDir,

@@ -4,6 +4,18 @@ import path from 'node:path';
 import { URL } from 'node:url';
 import crypto from 'node:crypto';
 import { writeToken, readProjects, writeProjects } from './state.mjs';
+import {
+  DOT_HTTP_ERROR_STATUS,
+  derivedDotKey,
+  dotConversationScope,
+  initialDotSubmission,
+  parseChatGptRecipient,
+  parseDotBinding,
+  parseDotQueryRequest,
+  parseDotSubmission,
+  sameDotBinding
+} from './chatgpt-recipient.mjs';
+import { assertDotReplyEvidence, parseCompletionEvidence } from './chatgpt-completion-evidence.mjs';
 import { parseChatGptCompatibilityStatus } from './chatgpt-compatibility.mjs';
 import {
   normalizeChatGptModelIntent,
@@ -191,6 +203,7 @@ function mapErrorToHttp(error) {
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
   if (msg === 'chat_surface_activation_failed') return { code: 409, body: { error: 'chat_surface_activation_failed', data: error?.data || null } };
+  if (Object.hasOwn(DOT_HTTP_ERROR_STATUS, msg)) return { code: DOT_HTTP_ERROR_STATUS[msg], body: { error: msg } };
   if (msg === 'model_intent_activation_failed') return { code: 409, body: { error: 'model_intent_activation_failed', data: error?.data || null } };
   const transcript = transcriptHttpError(error);
   if (transcript.body.error !== 'internal_error') return transcript;
@@ -574,7 +587,8 @@ async function resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault = f
   const tabId = (body?.tabId ? String(body.tabId).trim() : '') || getTabIdFromUrl(url) || null;
   const key = (body?.key ? String(body.key).trim() : '') || null;
   const name = (body?.name ? String(body.name).trim() : '') || null;
-  const explicitVendor = resolveVendor({ body, vendors });
+  const recipient = Object.hasOwn(body || {}, 'recipient') ? parseChatGptRecipient(body.recipient) : undefined;
+  const explicitVendor = recipient?.kind === 'dot' ? builtinChatGPTVendor() : resolveVendor({ body, vendors });
   const vendor = explicitVendor || defaultVendor(vendors);
   if (tabId) return tabId;
   if (key) {
@@ -588,9 +602,10 @@ async function resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault = f
       key,
       name,
       show: envShowTabsDefault() || showTabsByDefault,
-      url: vendor?.url,
+      url: recipient?.kind === 'dot' ? recipient.dotUrl : vendor?.url,
       vendorId: vendor?.id,
-      vendorName: vendor?.name
+      vendorName: vendor?.name,
+      ...(recipient ? { recipient } : {})
     });
   }
   if (explicitVendor) {
@@ -774,10 +789,11 @@ const COMPLETION_EVIDENCE_ALLOWED = Object.freeze({
   research: new Set(['deep-research-report', 'structured-recovery'])
 });
 
-function completionEvidenceForResult(result, flowKind) {
+function completionEvidenceForResult(result, flowKind, recipient = undefined) {
   const allowed = COMPLETION_EVIDENCE_ALLOWED[flowKind];
-  const evidence = result?.meta?.completionEvidence;
+  const evidence = parseCompletionEvidence(result?.meta?.completionEvidence);
   if (!allowed || !evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return null;
+  if (recipient?.kind === 'dot') return flowKind === 'query' && evidence.source === 'dot-message' ? evidence : null;
   return allowed.has(evidence.source) ? evidence : null;
 }
 
@@ -1099,21 +1115,29 @@ export function startHttpApi({
   const projectsReady = readProjects(stateDir).then((p) => { keyMetaByKey = p; }).catch(() => {});
   function persistKeyMeta(key, patch) {
     if (!key || !patch) return Promise.resolve(null);
-    const existing = normalizePersistedChatGptKeyMeta(keyMetaByKey[key]);
-    const updated = normalizePersistedChatGptKeyMeta({ ...existing, ...patch });
-    if (
-      existing.projectUrl === updated.projectUrl &&
-      existing.conversationUrl === updated.conversationUrl &&
-      existing.modeIntent === updated.modeIntent
-    ) {
-      return Promise.resolve(updated);
-    }
-    const snapshot = { ...keyMetaByKey, [key]: updated };
-    keyMetaByKey = snapshot;
-    keyMetaWriteQueue = keyMetaWriteQueue
-      .catch(() => {})
-      .then(() => writeProjects(snapshot, stateDir));
-    return keyMetaWriteQueue.then(() => updated).catch(() => updated);
+    const operation = keyMetaWriteQueue.catch(() => {}).then(async () => {
+      const hasExisting = Object.hasOwn(keyMetaByKey, key);
+      const existing = normalizePersistedChatGptKeyMeta(keyMetaByKey[key]);
+      const dotPatch = patch.recipient?.kind === 'dot';
+      if (dotPatch && hasExisting && existing.recipient?.kind !== 'dot') throw new Error('recipient_conflict');
+      if (!dotPatch && existing.recipient?.kind === 'dot') throw new Error('recipient_conflict');
+      const updated = normalizePersistedChatGptKeyMeta(dotPatch ? patch : { ...existing, ...patch });
+      if (JSON.stringify(existing) === JSON.stringify(updated)) return updated;
+      const previous = keyMetaByKey;
+      const snapshot = { ...previous, [key]: updated };
+      keyMetaByKey = snapshot;
+      try {
+        await writeProjects(snapshot, stateDir);
+      } catch (error) {
+        if (dotPatch) {
+          keyMetaByKey = previous;
+          throw error;
+        }
+      }
+      return updated;
+    });
+    keyMetaWriteQueue = operation;
+    return operation;
   }
   function getPersistedKeyMeta(key) {
     return key ? normalizePersistedChatGptKeyMeta(keyMetaByKey[key]) : null;
@@ -1478,7 +1502,13 @@ export function startHttpApi({
   }
 
   const runStore = createRunStore(stateDir);
-  const runsSnapshot = ({ includeArchived = false, limit = 100 } = {}) => runStore.list({ includeArchived, limit });
+  const unconfirmedRunTerminals = new Set();
+  const terminalFailureWaiters = new Map();
+  const runsSnapshot = ({ includeArchived = false, limit = 100 } = {}) => runStore.list({ includeArchived, limit }).map((run) => (
+    unconfirmedRunTerminals.has(run.id)
+      ? { ...run, terminalStatusUnconfirmed: true, label: 'Run status unconfirmed' }
+      : run
+  ));
   const emitRunsChanged = () => {
     try {
       onRunsChanged?.(runsSnapshot());
@@ -1875,7 +1905,8 @@ export function startHttpApi({
     projectUrl,
     imageGeneration,
     modeIntent,
-    modelIntent
+    modelIntent,
+    recipient = undefined
   }) => ({
     prompt: String(prompt || ''),
     promptPrefix: String(promptPrefix || ''),
@@ -1896,7 +1927,8 @@ export function startHttpApi({
     projectUrl: String(projectUrl || '').trim() || null,
     imageGeneration: !!imageGeneration,
     modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null }),
-    modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null })
+    modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
+    ...(recipient?.kind === 'dot' ? { recipient } : {})
   });
 
   const logicalResearchRequest = ({
@@ -2277,12 +2309,20 @@ export function startHttpApi({
     modeIntent = null,
     modelIntent = null,
     activeQuery = null,
-    transcriptState = null
+    transcriptState = null,
+    recipient = undefined,
+    dotBinding = null,
+    dotSubmission = null
   } = {}) => {
     // Bare nonempty text proves nothing about finality: the controller must
     // have qualified the capture (final assistant answer, image output, or a
     // complete structured recovery) before any artifact or receipt exists.
-    const completionEvidence = completionEvidenceForResult(result, 'query');
+    const isDot = recipient?.kind === 'dot';
+    const completionEvidence = completionEvidenceForResult(result, 'query', recipient);
+    if (isDot) {
+      assertDotReplyEvidence(completionEvidence, { dotBinding, dotSubmission });
+      if (typeof result?.text !== 'string' || !result.text.trim()) throw new Error('dot_reply_unconfirmed');
+    }
     if (!completionEvidence) {
       const err = new Error('completion_evidence_missing');
       err.data = {
@@ -2299,7 +2339,7 @@ export function startHttpApi({
       tabKey: tabMeta?.key || null,
       vendorId: tabMeta?.vendorId || null
     });
-    const usage = queryUsageForResult({ result, modeIntent, modelIntent, activeQuery });
+    const usage = isDot ? {} : queryUsageForResult({ result, modeIntent, modelIntent, activeQuery });
     const responsePath = await writeQueryResponseFile({ outDir, text: result?.text || '' });
     const metadataPath = path.join(outDir, 'metadata.json');
     await atomicWriteFile(
@@ -2310,13 +2350,14 @@ export function startHttpApi({
         key: tabMeta?.key || null,
         vendorId: tabMeta?.vendorId || null,
         vendorName: tabMeta?.vendorName || null,
+        ...(isDot ? { recipient, dotBinding, dotSubmission } : {}),
         conversationUrl: conversationUrl || null,
         modeIntent: usage.modeIntent || null,
         modelIntent: usage.modelIntent || null,
         modeUsed: usage.modeUsed || null,
         modelUsed: usage.modelUsed || null,
         degradedFrom: usage.degradedFrom || null,
-        completionEvidence: { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
+        completionEvidence: isDot ? completionEvidence : { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
         responsePath,
         capturedAt: new Date().toISOString()
       }, null, 2)}\n`,
@@ -2335,7 +2376,7 @@ export function startHttpApi({
           filePath: responsePath,
           originalName: path.basename(responsePath),
           mime: 'text/markdown',
-          source: 'agentify_query',
+          source: isDot ? 'agentify_dot_query' : 'agentify_query',
           meta: { role: 'assistant_response' }
         },
         {
@@ -2343,7 +2384,7 @@ export function startHttpApi({
           filePath: metadataPath,
           originalName: path.basename(metadataPath),
           mime: 'application/json',
-          source: 'agentify_query',
+          source: isDot ? 'agentify_dot_query' : 'agentify_query',
           meta: { role: 'metadata' }
         }
       ]
@@ -2497,17 +2538,17 @@ export function startHttpApi({
     const promptIncomplete = meta.promptDelivery?.checked === true && meta.promptDelivery.complete === false;
     return {
       status: 'success',
-      label: promptIncomplete ? 'Response received (prompt incomplete)' : 'Response received',
-      detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
+      label: op?.recipient?.kind === 'dot' ? 'Dot reply received' : promptIncomplete ? 'Response received (prompt incomplete)' : 'Response received',
+      detail: op?.recipient?.kind === 'dot' ? 'The completed Dot message reply was saved.' : result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
       conversationUrl: conversationUrl || null,
       source: op?.source || 'http',
       kind: op?.kind || 'query',
       finishedAt: now,
       durationMs: Math.max(0, now - Number(op?.startedAt || now)),
-      modeUsed: outputManifest?.modeUsed || normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null }),
-      modelUsed: outputManifest?.modelUsed || normalizeChatGptModelIntent(meta.modelUsed || meta.actualModelIntent, { fallback: null }),
-      degradedFrom: outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
-      recovery: parseResponseRecovery(result?.recovery),
+      modeUsed: op?.recipient?.kind === 'dot' ? null : outputManifest?.modeUsed || normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null }),
+      modelUsed: op?.recipient?.kind === 'dot' ? null : outputManifest?.modelUsed || normalizeChatGptModelIntent(meta.modelUsed || meta.actualModelIntent, { fallback: null }),
+      degradedFrom: op?.recipient?.kind === 'dot' ? null : outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
+      recovery: op?.recipient?.kind === 'dot' ? null : parseResponseRecovery(result?.recovery),
       outputManifest: outputManifest || null,
       completionReceipt,
       promptDelivery: meta.promptDelivery && typeof meta.promptDelivery === 'object' ? meta.promptDelivery : null
@@ -2931,6 +2972,7 @@ export function startHttpApi({
   const getRunRecordOrThrow = (runId) => {
     const id = String(runId || '').trim();
     if (!id) throw new Error('missing_run_id');
+    if (unconfirmedRunTerminals.has(id)) throw new Error('run_status_unconfirmed');
     const run = runStore.get(id);
     if (!run) throw new Error('run_not_found');
     return run;
@@ -3013,18 +3055,26 @@ export function startHttpApi({
     const after = Math.max(0, Number(afterRevision) || 0);
     if (isTerminalRunStatus(initial.status) || initial.revision > after) return initial;
     const timeout = positiveIntOr(waitTimeoutMs, 25_000, 30_000);
-    return await new Promise((resolve) => {
+    return await new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
       let unsubscribe = () => {};
-      const finish = (run = null) => {
+      const finish = (run = null, error = null) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
         unsubscribe();
+        const waiters = terminalFailureWaiters.get(initial.id);
+        waiters?.delete(onTerminalFailure);
+        if (waiters?.size === 0) terminalFailureWaiters.delete(initial.id);
         signal?.removeEventListener?.('abort', onAbort);
-        resolve(run);
+        if (error) reject(error);
+        else resolve(run);
       };
+      const onTerminalFailure = () => finish(null, new Error('run_status_unconfirmed'));
+      const failureWaiters = terminalFailureWaiters.get(initial.id) || new Set();
+      failureWaiters.add(onTerminalFailure);
+      terminalFailureWaiters.set(initial.id, failureWaiters);
       const onAbort = () => finish(null);
       unsubscribe = runStore.subscribe((run) => {
         if (run.id === initial.id && (isTerminalRunStatus(run.status) || run.revision > after)) finish(run);
@@ -3044,6 +3094,7 @@ export function startHttpApi({
   const openRunAction = async ({ runId, timeoutMs = 30_000, show = true } = {}) => {
     await runsReady;
     const run = getRunRecordOrThrow(runId);
+    if (run.recipient?.kind === 'dot') throw new Error('dot_binding_unconfirmed');
     const savedMeta = getPersistedKeyMeta(run.key);
     const imageGeneration = !!run?.logicalRequest?.imageGeneration;
     const resolvedRun = {
@@ -3112,6 +3163,11 @@ export function startHttpApi({
   const retryRunAction = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
     await runsReady;
     const original = getRunRecordOrThrow(runId);
+    if (original.recipient?.kind === 'dot') {
+      if (original.status === 'success') return await getRunPayload({ runId, view: 'summary', includeOutputText: true });
+      const submission = parseDotSubmission(original.dotSubmission);
+      throw new Error(submission.state === 'not-submitted' ? 'dot_binding_unconfirmed' : 'dot_delivery_unconfirmed');
+    }
     const savedMeta = getPersistedKeyMeta(original.key);
     const imageGeneration = !!original?.logicalRequest?.imageGeneration;
     const hasLiveContinuation = Object.prototype.hasOwnProperty.call(
@@ -3884,6 +3940,7 @@ export function startHttpApi({
         await projectsReady;
         await runsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
+        if (parseChatGptRecipient(body?.recipient).kind !== 'chat') throw new Error('recipient_conflict');
         const timeoutMs = researchTimeoutMs(body.timeoutMs, 45 * 60_000);
         const prompt = String(body.prompt || '');
         if (!prompt.trim()) throw new Error('missing_prompt');
@@ -4106,7 +4163,10 @@ export function startHttpApi({
       if (url.pathname === '/query' && req.method === 'POST') {
         await projectsReady;
         await runsReady;
-        const body = await parseBody(req, { maxBytes: 5_000_000 });
+        let body = await parseBody(req, { maxBytes: 5_000_000 });
+        const recipient = parseChatGptRecipient(body?.recipient);
+        const isDot = recipient.kind === 'dot';
+        if (isDot) body = parseDotQueryRequest(body);
         const timeoutMs = positiveIntOr(body.timeoutMs, 10 * 60_000, 30 * 60_000);
         const prompt = String(body.prompt || '');
         if (!prompt.trim()) throw new Error('missing_prompt');
@@ -4133,19 +4193,26 @@ export function startHttpApi({
         }
         if (imageGeneration && suppliedChatUrl) throw new Error('chat_url_unsupported_for_image');
         const tabKey = liveContinuationSource?.key || (body.key ? String(body.key).trim() : '') ||
-          (!body?.tabId && suppliedChatUrl ? derivedChatKey(suppliedChatUrl) : null);
+          (isDot && body.tabId ? getTabMeta(tabs, String(body.tabId).trim())?.key || null : null) ||
+          (!body?.tabId && isDot ? derivedDotKey(recipient.dotUrl) : !body?.tabId && suppliedChatUrl ? derivedChatKey(suppliedChatUrl) : null);
         const settings = await getSettings?.() || {};
-        const vendor = resolveVendor({ body, vendors }) || defaultVendor(vendors);
+        const vendor = isDot ? builtinChatGPTVendor() : resolveVendor({ body, vendors }) || defaultVendor(vendors);
         const advisoryTabMeta = body?.tabId
           ? getTabMeta(tabs, String(body.tabId).trim() || null)
           : tabKey
             ? ((tabs.listTabs?.() || []).find((item) => item?.key === tabKey) || null)
             : null;
         const effectiveVendorId = normalizeVendorToken(advisoryTabMeta?.vendorId || vendor?.id || '');
+        if (isDot && body.tabId && body.key && advisoryTabMeta?.key !== body.key) throw new Error('selector_conflict');
+        if (advisoryTabMeta && (advisoryTabMeta.recipient?.kind || 'chat') !== recipient.kind) throw new Error('recipient_conflict');
+        if (isDot && effectiveVendorId !== 'chatgpt') throw new Error('recipient_conflict');
         const isChatGpt = effectiveVendorId === 'chatgpt';
         const requestedModelIntent = normalizeQueryModelIntent({ ...body, imageGeneration }, { isChatGpt });
         const initialSavedMeta = getPersistedKeyMeta(tabKey);
-        const chatProfile = isChatGpt
+        if (tabKey && Object.hasOwn(keyMetaByKey, tabKey) && (initialSavedMeta?.recipient?.kind || 'chat') !== recipient.kind) {
+          throw new Error('recipient_conflict');
+        }
+        const chatProfile = isChatGpt && !isDot
           ? resolveChatGptQueryProfile({
             imageGeneration,
             key: tabKey,
@@ -4164,19 +4231,20 @@ export function startHttpApi({
           requestUrl: url
         });
         const savedMeta = getPersistedKeyMeta(requestedKey);
-        const projectUrl = chatProfile
+        const projectUrl = isDot ? null : chatProfile
           ? chatProfile.projectUrl
           : trimOrNull(body.projectUrl) || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
-        const savedConversationUrl = chatProfile
+        const savedConversationUrl = isDot ? savedMeta?.dotBinding?.conversationUrl || null : chatProfile
           ? chatProfile.conversationUrl
           : (imageGeneration ? null : savedMeta?.conversationUrl || null);
         const modeIntent = chatProfile?.modeIntent || null;
         const modelIntent = chatProfile?.modelIntent || requestedModelIntent || null;
-        const persistKeyLocationForRun = chatProfile ? chatProfile.persistKeyLocation : !imageGeneration;
+        const persistKeyLocationForRun = !isDot && (chatProfile ? chatProfile.persistKeyLocation : !imageGeneration);
         const entryTarget = chatProfile?.entryTarget || null;
         const op = {
           id: crypto.randomUUID(),
           kind: 'query',
+          ...(isDot ? { recipient } : {}),
           tabId: null,
           startedAt: Date.now(),
           promptPreview: trimPreview(prompt),
@@ -4194,11 +4262,12 @@ export function startHttpApi({
         let runCreated = false;
         let detachedQueryStarted = false;
         try {
-          const resolutionBody = requestedKey && !tabKey ? { ...body, key: requestedKey } : body;
+          const resolutionBody = requestedKey ? { ...body, key: requestedKey } : body;
           tabId = await resolveTab({ tabs, defaultTabId, body: resolutionBody, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
           assertTabNotBusy(tabId);
           reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
           const tabMeta = getTabMeta(tabs, tabId);
+          if ((tabMeta?.recipient?.kind || 'chat') !== recipient.kind) throw new Error('recipient_conflict');
           if (hasLiveSourceId) assertLiveContinuationTab(liveContinuationSource, tabMeta);
           const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
           if (chatProfile?.locationSource === 'explicit-chat') tabPatch.projectUrl = projectUrl || null;
@@ -4214,6 +4283,7 @@ export function startHttpApi({
           const effectiveKey = requestedKey || tabMeta?.key || null;
           const activeOp = {
             ...op,
+            ...(isDot ? { dotBinding: savedMeta?.dotBinding || null, dotSubmission: initialDotSubmission() } : {}),
             key: effectiveKey,
             vendorId: tabMeta?.vendorId || null,
             vendorName: tabMeta?.vendorName || null,
@@ -4230,6 +4300,7 @@ export function startHttpApi({
           await createRunRecord({
             id: op.id,
             kind: 'query',
+            ...(isDot ? { recipient, dotBinding: savedMeta?.dotBinding || null, dotSubmission: initialDotSubmission() } : {}),
             source,
             status: 'running',
             phase: op.phase,
@@ -4259,7 +4330,8 @@ export function startHttpApi({
               projectUrl,
               imageGeneration,
               modeIntent,
-              modelIntent
+              modelIntent,
+              recipient
             })
           });
           runCreated = true;
@@ -4289,15 +4361,30 @@ export function startHttpApi({
             });
             packed.context.summary.clampedLimits = clampedLimits;
             const controller = tabs.getControllerById(tabId);
-            const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
+            const effectiveProjectUrl = isDot ? null : projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
             await patchRunRecord(op.id, {
               materializedReplay: materializedReplay({ packed, timeoutMs }),
               packedContextSummary: packed.context?.summary || null,
               packedContextBudget: effectiveBudget
             });
             const runQuery = async () => {
+              let confirmedDotBinding = null;
               const execution = await runExclusive(controller, async () => {
-                if (entryTarget) {
+                if (isDot) {
+                  if (typeof controller.prepareDotEntry !== 'function') throw new Error('dot_binding_unconfirmed');
+                  confirmedDotBinding = parseDotBinding(await controller.prepareDotEntry({
+                    recipient, dotBinding: savedMeta?.dotBinding || null, timeoutMs
+                  }));
+                  assertProviderSendAllowed(op.id);
+                  if (savedMeta?.dotBinding && !sameDotBinding(confirmedDotBinding, savedMeta.dotBinding)) throw new Error('dot_binding_mismatch');
+                  reserveOperationScopes({ heldScopes, scopes: [dotConversationScope(confirmedDotBinding)], operation: op, tabId });
+                  await patchRunRecord(op.id, { dotBinding: confirmedDotBinding });
+                  patchActiveQuery(tabId, { dotBinding: confirmedDotBinding });
+                  if (effectiveKey) await persistKeyMeta(effectiveKey, {
+                    recipient: { kind: 'dot', dotUrl: confirmedDotBinding.dotUrl }, dotBinding: confirmedDotBinding
+                  });
+                  assertProviderSendAllowed(op.id);
+                } else if (entryTarget) {
                   patchActiveQuery(tabId, {
                     phase: entryTarget.kind === 'shared-snapshot' ? 'opening_shared_chat' : 'resuming_conversation'
                   });
@@ -4322,6 +4409,23 @@ export function startHttpApi({
                     : null;
                   assertLiveContinuationServedRoute(preSendSource, suppliedChatUrl, servedUrl);
                 }
+                let checkpointQueue = Promise.resolve();
+                const recordDotSubmission = (value) => {
+                  const next = parseDotSubmission(value);
+                  const transition = checkpointQueue.then(async () => {
+                    assertProviderSendAllowed(op.id);
+                    const current = parseDotSubmission(getRunRecordOrThrow(op.id).dotSubmission);
+                    if (
+                      !(current.state === 'not-submitted' && next.state === 'unknown') &&
+                      !(current.state === 'unknown' && next.state === 'submitted')
+                    ) throw new Error('dot_submission_transition_invalid');
+                    await patchRunRecord(op.id, { dotSubmission: next });
+                    assertProviderSendAllowed(op.id);
+                    patchActiveQuery(tabId, { dotSubmission: next });
+                  });
+                  checkpointQueue = transition.catch(() => {});
+                  return transition;
+                };
                 const queryResult = await controller.query({
                   prompt: packed.prompt,
                   attachments: packed.attachments,
@@ -4330,7 +4434,8 @@ export function startHttpApi({
                   imageGeneration,
                   modeIntent,
                   modelIntent,
-                  durableObservation: true
+                  durableObservation: true,
+                  ...(isDot ? { recipient, dotBinding: confirmedDotBinding, recordDotSubmission } : {})
                 });
                 const servedUrl = typeof controller.getUrl === 'function'
                   ? await controller.getUrl().catch(() => null)
@@ -4338,6 +4443,15 @@ export function startHttpApi({
                 return { result: queryResult, conversationUrl: servedUrl };
               });
               const result = execution.result;
+              let qualifiedDotEvidence = null;
+              if (isDot) {
+                if (typeof controller.inspectDotBinding !== 'function') throw new Error('dot_binding_unconfirmed');
+                const observed = parseDotBinding(await controller.inspectDotBinding());
+                if (!sameDotBinding(observed, confirmedDotBinding)) throw new Error('dot_binding_mismatch');
+                qualifiedDotEvidence = assertDotReplyEvidence(result?.meta?.completionEvidence, {
+                  dotBinding: confirmedDotBinding, dotSubmission: getRunRecordOrThrow(op.id).dotSubmission
+                });
+              }
               assertNoModeDowngrade({ modeIntent, result });
               const activeQuery = activeQueries.get(tabId);
               assertConfirmedModelIntent({ modelIntent, activeQuery });
@@ -4374,7 +4488,8 @@ export function startHttpApi({
                   modeIntent,
                   modelIntent,
                   activeQuery,
-                  transcriptState: imageGeneration || !effectiveKey || !conversationUrl || !transcriptSync || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
+                  ...(isDot ? { recipient, dotBinding: confirmedDotBinding, dotSubmission: getRunRecordOrThrow(op.id).dotSubmission } : {}),
+                  transcriptState: isDot || imageGeneration || !effectiveKey || !conversationUrl || !transcriptSync || !isCanonicalConversationUrl(conversationUrl) ? 'not_applicable' : 'pending'
                 });
                 completionReceipt = await completionReceiptForManifest({ kind: 'assistant-response', outputManifest, conversationUrl });
               } catch (error) {
@@ -4386,7 +4501,8 @@ export function startHttpApi({
               const resultWithMeta = {
                 ...result,
                 meta: {
-                  ...(result?.meta && typeof result.meta === 'object' ? result.meta : {}),
+                  ...(isDot ? { completionEvidence: qualifiedDotEvidence, providerMessageId: qualifiedDotEvidence.providerMessageId } : result?.meta && typeof result.meta === 'object' ? result.meta : {}),
+                  ...(isDot ? { recipient, dotBinding: confirmedDotBinding, dotSubmission: getRunRecordOrThrow(op.id).dotSubmission } : {}),
                   modeUsed: outputManifest.modeUsed || null,
                   modelUsed: outputManifest.modelUsed || null,
                   degradedFrom: outputManifest.degradedFrom || null,
@@ -4411,7 +4527,7 @@ export function startHttpApi({
               const tabMeta = getTabMeta(tabs, tabId);
               detachedQueryStarted = true;
               runQueryWithLease().then(async (completed) => {
-                publishRunTranscript({
+                if (!isDot) publishRunTranscript({
                   runId: op.id,
                   liveSourceId,
                   key: effectiveKey,
@@ -4424,6 +4540,21 @@ export function startHttpApi({
                 const outcome = outcomeFromError(error, op);
                 setLastOutcome(tabId, outcome);
                 return durableRunFinalizeFromOutcome(op.id, outcome);
+              }).catch(() => {
+                // A rejected terminal write cannot publish a durable transition.
+                // Wake waiters with an explicit error instead of leaving them
+                // observing an apparently active record after ownership ends.
+                if (!runStore.get(op.id)?.finishedAt) {
+                  unconfirmedRunTerminals.add(op.id);
+                  for (const listener of terminalFailureWaiters.get(op.id) || []) listener();
+                  setLastOutcome(tabId, {
+                    status: 'error', kind: op.kind, source: op.source, runId: op.id,
+                    label: 'Run status unconfirmed',
+                    detail: 'The final run status could not be saved. The recorded status is stale.',
+                    finishedAt: Date.now()
+                  });
+                  emitRunsChanged();
+                }
               }).finally(() => {
                 clearActiveQuery(tabId, op.id);
                 releaseOperationScopes(heldScopes, op.id);
@@ -4435,12 +4566,13 @@ export function startHttpApi({
                 key: tabMeta?.key || tabKey || null,
                 queryId: op.id,
                 runId: op.id,
-                packedContextSummary: packed.context?.summary || null
+                packedContextSummary: packed.context?.summary || null,
+                ...(isDot ? { recipient, dotBinding: null, dotSubmission: initialDotSubmission() } : {})
               });
             }
 
             const completed = await runQueryWithLease();
-            publishRunTranscript({
+            if (!isDot) publishRunTranscript({
               runId: op.id,
               liveSourceId,
               key: effectiveKey,
@@ -4483,6 +4615,7 @@ export function startHttpApi({
         await projectsReady;
         await runsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
+        if (parseChatGptRecipient(body?.recipient).kind !== 'chat') throw new Error('recipient_conflict');
         const timeoutMs = positiveIntOr(body.timeoutMs, 3 * 60_000, 30 * 60_000);
         const text = String(body.text || '');
         if (!text.trim()) throw new Error('missing_prompt');

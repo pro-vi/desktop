@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { atomicWriteFile } from './fs-utils.mjs';
+import { parseChatGptRecipient, parseDotRunFields } from './chatgpt-recipient.mjs';
 import {
   LIVE_RUN_STATUSES,
   assertRunLifecycle,
@@ -105,6 +106,13 @@ function normalizeRun(input = {}) {
   const inputFinishedAt = normalizeTime(input.finishedAt);
   const archivedAt = normalizeTime(input.archivedAt);
   const status = normalizeRunStatus(input.status);
+  const hasDotData = Object.hasOwn(input, 'dotBinding') || Object.hasOwn(input, 'dotSubmission') || input.logicalRequest?.recipient?.kind === 'dot';
+  if (hasDotData && input.recipient?.kind !== 'dot') throw new Error('invalid_dot_run');
+  const recipient = input.recipient === undefined ? null : parseChatGptRecipient(input.recipient);
+  const recipientFields = recipient?.kind === 'dot' ? parseDotRunFields(input) : {};
+  if (recipient?.kind === 'dot' && status === 'success' && (
+    !recipientFields.dotBinding || recipientFields.dotSubmission.state !== 'submitted'
+  )) throw new Error('invalid_dot_run');
   const finishedAt = isTerminalRunStatus(status) ? (inputFinishedAt || updatedAt) : null;
   const phase = normalizePhaseForStatus({ status, phase: input.phase, finishedAt });
   return {
@@ -119,6 +127,7 @@ function normalizeRun(input = {}) {
     key: normalizeString(input.key),
     vendorId: normalizeString(input.vendorId),
     vendorName: normalizeString(input.vendorName),
+    ...recipientFields,
     location: normalizeObject(input.location),
     sourceChatUrl: normalizeString(input.sourceChatUrl),
     projectUrl: normalizeString(input.projectUrl),
