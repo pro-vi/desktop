@@ -47,7 +47,7 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
 
 | Method | Journey | Repetitions | Observable pass condition | 2026-09-26 | Evidence |
 |---|---|---:|---|:---:|---|
-| `agentify_query` | LIVE-QUERY | 3 | Three distinct Pro runs finish `success`, each with confirmed `extended-pro`, a completion receipt, and saved response bytes. | ✅ | runs `d40d0884`, `dc1de8ed`, `8136f506`: three Pro runs, `extended-pro` confirmed on the slider, receipts |
+| `agentify_query` | LIVE-QUERY | 3 | Three distinct Pro runs finish `success`, each with confirmed `extended-pro`, a completion receipt, and saved response bytes. | ✅ | 2026-10-07, `59bc7ea`: three Chat Pro runs with confirmed mode, exact saved answers and matching receipts; [probe](probes/2026-10-07-chat-only-send-probe.md) |
 | `agentify_research` | LIVE-RESEARCH | 2 | Two Deep Research runs finish with distinct conversations, canonical Markdown artifacts, matching `research-report` receipts, and byte-verified hashes. | ✅ | run `1e8e194b`: `research-report` receipt over the exported `deep-research-report.md` (hash matches). 1 of 2 repetitions |
 | `agentify_read_page` | LOCAL-BROWSER | 2 | The owned tab returns non-empty ready-page text before and after navigation. | ✅ | `e2e-mcp-live-browser` receipt |
 | `agentify_read_conversation` | LIVE-CONVERSATION | 2 | Two warm captures return verified transcript paths; the second capture has the same normalized content when no turn changed. | ✅ | `6ab4fab5` (14 turns) and `690126b6` (400 turns) complete; file-card conversation read twice, same sha `52780af7` |
@@ -57,7 +57,7 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
 | `agentify_list_runs` | LOCAL-OPERATIONS | 2 | Default listing includes active test runs and later excludes the archived test run; archived listing still includes it. | ✅ | archived `dca4b9b9` absent by default, present with `includeArchived` |
 | `agentify_get_run` | LIVE-QUERY | 3 | One compact live snapshot and two terminal snapshots agree with the corresponding durable run revisions and omit replay payloads. | ✅ | `ec98be2e` terminal snapshot; live snapshot seen in the stop response |
 | `agentify_wait_run` | LIVE-QUERY | 3 | Each wait returns only after a validated output manifest and includes the saved response markdown. | ✅ | `8136f506`, `d40d0884`: returned after the output manifest with the saved text |
-| `agentify_image_gen` | LIVE-MEDIA | 1 | Thinking mode produces at least one locally saved image path. | ✅ | run `670b80bc`: Thinking confirmed (Medium on the slider), 1254×1254 PNG saved |
+| `agentify_image_gen` | LIVE-MEDIA | 1 | Thinking mode produces at least one locally saved image path. | ✅ | 2026-10-07, `59bc7ea`: Thinking image in confirmed Chat, decoded 1254×1254 PNG; [probe](probes/2026-10-07-chat-only-send-probe.md) |
 | `agentify_import_selected_chatgpt_export` | CONTROLLED-LIBRARY | 2 | A deterministic dialog at the production picker contract selects a real ZIP; the exact MCP method grants and completes the import without returning the path or grant. | ✅ | `e2e-mcp-catalog-import` receipt |
 | `agentify_import_chatgpt_export` | CONTROLLED-LIBRARY | 2 | A valid controlled one-use grant is consumed once per run and produces the expected complete import. | ✅ | `e2e-mcp-catalog-import` receipt |
 | `agentify_list_chatgpt_imports` | CONTROLLED-LIBRARY | 2 | The disposable import appears after import and reflects its later reassignment state without archive paths or record text. | ✅ | `e2e-transcript-library` receipt |
