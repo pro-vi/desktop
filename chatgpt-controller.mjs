@@ -4808,6 +4808,41 @@ export class ChatGPTController {
             isNearPrompt(r)
           );
         };
+        // Chat reasoning intents require the Chat surface. Confirm Chat
+        // before interpreting its model picker.
+        const surfaceGroup = queryAll('[aria-label="Composer mode"]').find(visible);
+        const surfaceButtons = surfaceGroup
+          ? Array.from(surfaceGroup.querySelectorAll('button, [role="tab"], [role="switch"]')).filter(visible)
+          : [];
+        const surfaceName = (node) => String(node?.getAttribute?.('aria-label') || node?.textContent || '').trim().toLowerCase();
+        const chatSurface = surfaceButtons.find((node) => surfaceName(node) === 'chat');
+        const workSurface = surfaceButtons.find((node) => surfaceName(node) === 'work');
+        const surfaceSelected = (node) => modePickerPrimitives.modeOptionLooksSelected({
+          ariaPressed: node?.getAttribute?.('aria-pressed'),
+          ariaChecked: node?.getAttribute?.('aria-checked'),
+          ariaSelected: node?.getAttribute?.('aria-selected'),
+          dataState: node?.getAttribute?.('data-state')
+        });
+        const workComposer = ['aria-label', 'placeholder']
+          .some((attribute) => /^work with chatgpt$/i.test(String(prompt?.getAttribute?.(attribute) || '').trim()));
+        if (chatSurface && workSurface) {
+          const chatSelected = surfaceSelected(chatSurface);
+          const workSelected = surfaceSelected(workSurface);
+          if ((!chatSelected && workSelected) || (workComposer && !chatSelected)) {
+            return {
+              active: false, action: 'pointer_chat_surface', reason: 'chat_surface_switch_required',
+              targetIntent, label: 'Chat', rect: rectOf(chatSurface)
+            };
+          }
+          if (!chatSelected || workSelected || workComposer) {
+            return { active: false, action: 'none', reason: 'chat_surface_unconfirmed', targetIntent };
+          }
+        } else if (workComposer) {
+          return {
+            active: false, action: 'none', reason: 'chat_surface_required', targetIntent,
+            hint: 'Chat reasoning intents require Chat. Open a Chat conversation, or use modeIntent none to preserve the selected Work model and effort.'
+          };
+        }
         const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
         const explicitActive = explicitActiveNodes
           .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)), rect: rectOf(n) }))
@@ -5125,6 +5160,7 @@ export class ChatGPTController {
         };
       })()`);
       last = snap;
+      if (snap?.reason === 'chat_surface_required') break;
       if (pendingTriggerSignature && snap?.action === 'pointer_trigger' && !snap?.menuOpen && snap?.signature === pendingTriggerSignature) {
         blockedTriggerSignatures.add(pendingTriggerSignature);
         pendingTriggerSignature = null;
@@ -5146,7 +5182,7 @@ export class ChatGPTController {
         await sleep(250);
         continue;
       }
-      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option' || snap?.action === 'pointer_power') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option' || snap?.action === 'pointer_power' || snap?.action === 'pointer_chat_surface') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
         if (snap.action === 'pointer_option') {
           const optionKey = [
             Math.round(snap.rect.x),

@@ -3839,10 +3839,11 @@ function makeModePickerNode({ tag = 'div', text = '', attrs = {}, rect = { x: 0,
   return node;
 }
 
-function buildModePickerDom({ checked = false, slider = false } = {}) {
+function buildModePickerDom({ checked = false, slider = false, composerMode = null, surfaceSwitcher = false } = {}) {
   const body = makeModePickerNode({ tag: 'body', rect: { x: 0, y: 0, w: 1280, h: 900 } });
   const prompt = makeModePickerNode({
     tag: 'textarea',
+    attrs: composerMode ? { 'aria-label': composerMode === 'work' ? 'Work with ChatGPT' : 'Ask ChatGPT' } : {},
     rect: { x: 400, y: 800, w: 600, h: 48 },
     tokens: ['#prompt-textarea', 'textarea'],
     parent: body
@@ -3858,6 +3859,27 @@ function buildModePickerDom({ checked = false, slider = false } = {}) {
     parent: body
   });
   modePickerNodes.push(body, prompt, menu);
+  if (surfaceSwitcher) {
+    const group = makeModePickerNode({
+      attrs: { 'aria-label': 'Composer mode' },
+      rect: { x: 200, y: 20, w: 200, h: 40 },
+      tokens: ['[aria-label="Composer mode"]'],
+      parent: body
+    });
+    const chat = makeModePickerNode({
+      tag: 'button', text: 'Chat',
+      attrs: { 'aria-pressed': composerMode === 'chat' ? 'true' : 'false' },
+      rect: { x: 200, y: 20, w: 100, h: 40 },
+      tokens: ['button'], parent: group
+    });
+    const work = makeModePickerNode({
+      tag: 'button', text: 'Work',
+      attrs: { 'aria-pressed': composerMode === 'work' ? 'true' : 'false' },
+      rect: { x: 300, y: 20, w: 100, h: 40 },
+      tokens: ['button'], parent: group
+    });
+    modePickerNodes.push(group, chat, work);
+  }
   if (slider) {
     const track = makeModePickerNode({
       tag: 'div',
@@ -3915,6 +3937,83 @@ function buildModePickerDom({ checked = false, slider = false } = {}) {
 }
 
 let modePickerNodes = [];
+
+test('chatgpt-controller: Chat intent switches a Work homepage before inspecting its model picker', async () => {
+  const js = await modePickerEvalJs();
+  modePickerNodes = [];
+  const snap = vm.runInNewContext(js, buildModePickerDom({
+    composerMode: 'work', surfaceSwitcher: true, slider: true
+  }));
+  assert.equal(snap.active, false);
+  assert.equal(snap.action, 'pointer_chat_surface');
+  assert.equal(snap.reason, 'chat_surface_switch_required');
+  assert.equal(snap.rect.x, 200);
+});
+
+test('chatgpt-controller: an existing Work conversation cannot certify a Chat reasoning intent', async () => {
+  const js = await modePickerEvalJs();
+  modePickerNodes = [];
+  const snap = vm.runInNewContext(js, buildModePickerDom({ composerMode: 'work', slider: true }));
+  assert.equal(snap.active, false);
+  assert.equal(snap.action, 'none');
+  assert.equal(snap.reason, 'chat_surface_required');
+});
+
+test('chatgpt-controller: selected Chat still confirms Pro on its five-position slider', async () => {
+  const js = await modePickerEvalJs();
+  modePickerNodes = [];
+  const snap = vm.runInNewContext(js, buildModePickerDom({
+    composerMode: 'chat', surfaceSwitcher: true, slider: true
+  }));
+  assert.equal(snap.active, true);
+  assert.equal(snap.reason, 'mode_power_active');
+  assert.equal(snap.activeIntent, 'extended-pro');
+});
+
+for (const scenario of ['ignored Chat click', 'inconsistent surface selection', 'existing Work conversation']) {
+  test(`chatgpt-controller: ${scenario} withholds prompt insertion and send`, async () => {
+    const realNow = Date.now;
+    let fakeNow = 9_000_000;
+    Date.now = () => { fakeNow += 1_000; return fakeNow; };
+    modePickerNodes = [];
+    const dom = buildModePickerDom({
+      composerMode: scenario === 'inconsistent surface selection' ? 'chat' : 'work',
+      surfaceSwitcher: scenario !== 'existing Work conversation',
+      slider: true
+    });
+    if (scenario === 'inconsistent surface selection') {
+      modePickerNodes.find((node) => node.textContent === 'Work').attrs['aria-pressed'] = 'true';
+    }
+    const harness = freshTabPowerPage({ escapeRoute: 'drag' });
+    const originalEvaluate = harness.page.evaluate;
+    harness.page.evaluate = async (js) => js.includes('chat_surface_switch_required')
+      ? vm.runInNewContext(js, dom)
+      : await originalEvaluate(js);
+    let insertions = 0;
+    harness.page.insertText = async () => { insertions += 1; };
+    const controller = new ChatGPTController({ page: harness.page, selectors: {
+      promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]', assistantMessage: '[data-message-author-role="assistant"]'
+    } });
+    try {
+      await assert.rejects(controller.query({ prompt: 'probe', timeoutMs: 20_000, modeIntent: 'extended-pro' }), (error) => {
+        assert.equal(error.message, 'mode_intent_activation_failed');
+        const expected = scenario === 'ignored Chat click' ? 'chat_surface_switch_required'
+          : scenario === 'existing Work conversation' ? 'chat_surface_required' : 'chat_surface_unconfirmed';
+        assert.equal(error.data.reason, expected);
+        if (scenario === 'ignored Chat click') {
+          assert.ok(error.data.attempts.length > 0);
+          assert.ok(error.data.attempts.every(({ action }) => action === 'pointer_chat_surface'));
+        } else assert.equal(error.data.attempts.length, 0);
+        return true;
+      });
+      assert.equal(insertions, 0);
+      assert.equal(harness.pointerEvents.includes('down:335,335'), false);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+}
 
 test('chatgpt-controller: mode picker eval proposes the clickable option row, not its bare label span', async () => {
   const js = await modePickerEvalJs();

@@ -2042,6 +2042,22 @@
     "dependency": "conversation-artifact-name-title",
     "reason": "the provider-visible file card labels its preview button with a phrase ending in the file name and carries the bare file name as a title attribute",
     "selector": "[title]"
+  },
+  {
+    "id": "controller-dom-059",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "composer-surface-switcher",
+    "reason": "provider-visible surface switching scopes Chat reasoning selection; existing conversations without a switcher must retain their surface",
+    "selector": "[aria-label=\"Composer mode\"]"
+  },
+  {
+    "id": "controller-dom-060",
+    "capabilityId": "mode-model",
+    "kind": "dependency",
+    "dependency": "composer-surface-choice",
+    "reason": "provider-visible surface choices are read inside the composer switcher; reasoning confirmation requires an unambiguous selected Chat choice",
+    "selector": "button, [role=\"tab\"], [role=\"switch\"]"
   }
 ]
 }
