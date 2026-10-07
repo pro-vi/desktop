@@ -164,6 +164,54 @@ export function chatgptFileCardName(label, card) {
   return titles.length === 1 ? titles[0] : text;
 }
 
+function chatSurfaceActivationError(surface, attempts = []) {
+  const error = new Error('chat_surface_activation_failed');
+  error.data = {
+    reason: surface?.reason || 'chat_surface_unconfirmed',
+    attempts,
+    state: surface || null,
+    hint: 'Agentify sends only in Chat. Use a Chat conversation or start a new one.'
+  };
+  return error;
+}
+
+function chatgptComposerSurface({ document, prompt, visible, isSelected }) {
+  const group = Array.from(document.querySelectorAll('[aria-label="Composer mode"]')).find(visible);
+  const choices = group
+    ? Array.from(group.querySelectorAll('button, [role="tab"], [role="switch"]')).filter(visible)
+    : [];
+  const name = (node) => String(node?.getAttribute?.('aria-label') || node?.textContent || '').trim().toLowerCase();
+  const chat = choices.find((node) => name(node) === 'chat');
+  const work = choices.find((node) => name(node) === 'work');
+  const selected = (node) => isSelected({
+    ariaPressed: node?.getAttribute?.('aria-pressed'),
+    ariaChecked: node?.getAttribute?.('aria-checked'),
+    ariaSelected: node?.getAttribute?.('aria-selected'),
+    dataState: node?.getAttribute?.('data-state')
+  });
+  const labels = ['aria-label', 'placeholder'].map((attribute) => String(prompt?.getAttribute?.(attribute) || '').trim());
+  const workComposer = labels.some((label) => /^work with chatgpt$/i.test(label));
+  if (chat && work) {
+    const chatSelected = selected(chat);
+    const workSelected = selected(work);
+    if (!chatSelected && (workSelected || workComposer)) {
+      const r = chat.getBoundingClientRect();
+      return {
+        active: false, action: 'pointer_chat_surface', reason: 'chat_surface_switch_required',
+        rect: { x: r.x, y: r.y, w: r.width, h: r.height }
+      };
+    }
+    if (chatSelected && !workSelected && !workComposer) {
+      return { active: true, action: 'none', reason: 'chat_surface_confirmed' };
+    }
+  } else if (workComposer) {
+    return { active: false, action: 'none', reason: 'chat_surface_required' };
+  } else if (!group && labels.some((label) => /^(ask|message) chatgpt$|^ask anything$/i.test(label))) {
+    return { active: true, action: 'none', reason: 'chat_surface_confirmed' };
+  }
+  return { active: false, action: 'none', reason: 'chat_surface_unconfirmed' };
+}
+
 function extractChatGptTranscriptMessageText(node) {
   if (!node || typeof node !== 'object') return '';
   const childNodes = node.childNodes;
@@ -4808,41 +4856,6 @@ export class ChatGPTController {
             isNearPrompt(r)
           );
         };
-        // Chat reasoning intents require the Chat surface. Confirm Chat
-        // before interpreting its model picker.
-        const surfaceGroup = queryAll('[aria-label="Composer mode"]').find(visible);
-        const surfaceButtons = surfaceGroup
-          ? Array.from(surfaceGroup.querySelectorAll('button, [role="tab"], [role="switch"]')).filter(visible)
-          : [];
-        const surfaceName = (node) => String(node?.getAttribute?.('aria-label') || node?.textContent || '').trim().toLowerCase();
-        const chatSurface = surfaceButtons.find((node) => surfaceName(node) === 'chat');
-        const workSurface = surfaceButtons.find((node) => surfaceName(node) === 'work');
-        const surfaceSelected = (node) => modePickerPrimitives.modeOptionLooksSelected({
-          ariaPressed: node?.getAttribute?.('aria-pressed'),
-          ariaChecked: node?.getAttribute?.('aria-checked'),
-          ariaSelected: node?.getAttribute?.('aria-selected'),
-          dataState: node?.getAttribute?.('data-state')
-        });
-        const workComposer = ['aria-label', 'placeholder']
-          .some((attribute) => /^work with chatgpt$/i.test(String(prompt?.getAttribute?.(attribute) || '').trim()));
-        if (chatSurface && workSurface) {
-          const chatSelected = surfaceSelected(chatSurface);
-          const workSelected = surfaceSelected(workSurface);
-          if ((!chatSelected && workSelected) || (workComposer && !chatSelected)) {
-            return {
-              active: false, action: 'pointer_chat_surface', reason: 'chat_surface_switch_required',
-              targetIntent, label: 'Chat', rect: rectOf(chatSurface)
-            };
-          }
-          if (!chatSelected || workSelected || workComposer) {
-            return { active: false, action: 'none', reason: 'chat_surface_unconfirmed', targetIntent };
-          }
-        } else if (workComposer) {
-          return {
-            active: false, action: 'none', reason: 'chat_surface_required', targetIntent,
-            hint: 'Chat reasoning intents require Chat. Open a Chat conversation, or use modeIntent none to preserve the selected Work model and effort.'
-          };
-        }
         const explicitActiveNodes = uniq(queryAll(${activeSel})).filter(visible);
         const explicitActive = explicitActiveNodes
           .map((n) => ({ node: n, label: labelOf(n), intent: intentForLabel(labelOf(n)), rect: rectOf(n) }))
@@ -5160,7 +5173,6 @@ export class ChatGPTController {
         };
       })()`);
       last = snap;
-      if (snap?.reason === 'chat_surface_required') break;
       if (pendingTriggerSignature && snap?.action === 'pointer_trigger' && !snap?.menuOpen && snap?.signature === pendingTriggerSignature) {
         blockedTriggerSignatures.add(pendingTriggerSignature);
         pendingTriggerSignature = null;
@@ -5182,7 +5194,7 @@ export class ChatGPTController {
         await sleep(250);
         continue;
       }
-      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option' || snap?.action === 'pointer_power' || snap?.action === 'pointer_chat_surface') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
+      if ((snap?.action === 'pointer_trigger' || snap?.action === 'pointer_option' || snap?.action === 'pointer_power') && snap?.rect?.w > 0 && snap?.rect?.h > 0) {
         if (snap.action === 'pointer_option') {
           const optionKey = [
             Math.round(snap.rect.x),
@@ -5319,7 +5331,7 @@ export class ChatGPTController {
       const hasAuthInput = !!document.querySelector('input[type=\"password\"], input[name=\"password\"], input[autocomplete=\"current-password\"]');
       const hasLoginText = /log in|sign in|continue with/i.test(bodyText);
 
-      const rawPromptVisible = (() => {
+      const prompt = (() => {
         const pickPrompt = (nodes) => {
           const editable = (n) => {
             if (!n) return false;
@@ -5369,8 +5381,15 @@ export class ChatGPTController {
           seen.add(n);
           uniq.push(n);
         }
-        return !!pickPrompt(uniq);
+        return pickPrompt(uniq);
       })();
+
+      const rawPromptVisible = !!prompt;
+      ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
+      ${chatgptComposerSurface.toString()}
+      const chatSurface = location.hostname === 'chatgpt.com'
+        ? chatgptComposerSurface({ document, prompt, visible, isSelected: modePickerPrimitives.modeOptionLooksSelected })
+        : null;
 
       const sendVisible = (() => {
         const labelOf = (n) =>
@@ -5397,7 +5416,7 @@ export class ChatGPTController {
       const blocked = hasTurnstile || hasArkose || hasVerifyButton || looks403 || (loginLike && !promptVisible);
       const kind = (hasTurnstile || hasArkose || hasVerifyButton) ? 'captcha' : (loginLike ? 'login' : (looks403 ? 'blocked' : null));
       return {
-        url, title, readyState,
+        url, title, readyState, chatSurface,
         blocked,
         promptVisible,
         kind,
@@ -5445,6 +5464,44 @@ export class ChatGPTController {
     const ready = await this.waitForPromptVisible({ timeoutMs });
     await this.#exitBlockedStateIfNeeded();
     return ready;
+  }
+
+  // Every ChatGPT send requires Chat, independently of reasoning selection.
+  async #ensureChat({ timeoutMs = 20_000 } = {}) {
+    let ready = await this.ensureReady({ timeoutMs });
+    let chatGptHost = false;
+    try { chatGptHost = new URL(ready?.url || '').hostname === 'chatgpt.com'; } catch {}
+    if (this.vendorId !== 'chatgpt' && !chatGptHost) return ready;
+    if (ready?.chatSurface?.active === true) return ready;
+    const startedAt = Date.now();
+    const limit = Math.min(timeoutMs, 20_000);
+    const attempts = [];
+    let clicked = false;
+    while (Date.now() - startedAt < limit) {
+      this.#throwIfStopRequested();
+      const surface = ready?.chatSurface;
+      if (surface?.active === true) return ready;
+      if (surface?.reason === 'chat_surface_required') break;
+      if (!clicked && surface?.action === 'pointer_chat_surface' && surface?.rect?.w > 0 && surface?.rect?.h > 0) {
+        attempts.push(modeIntentClickAttempt({ ...surface, label: 'Chat' }));
+        await this.#clickAt(surface.rect.x + surface.rect.w / 2, surface.rect.y + surface.rect.h / 2);
+        clicked = true;
+      }
+      await sleep(250);
+      ready = await this.ensureReady({ timeoutMs: Math.max(1, limit - (Date.now() - startedAt)) });
+    }
+    throw chatSurfaceActivationError(ready?.chatSurface, attempts);
+  }
+
+  async #assertChatBeforeSend() {
+    this.#throwIfStopRequested();
+    const state = await this.detectChallenge();
+    let chatGptHost = false;
+    try { chatGptHost = new URL(state?.url || '').hostname === 'chatgpt.com'; } catch {}
+    if (this.vendorId !== 'chatgpt' && !chatGptHost) return;
+    if (state?.chatSurface?.active !== true || state?.promptVisible !== true) {
+      throw chatSurfaceActivationError(state?.chatSurface);
+    }
   }
 
   async #enterBlockedState(st) {
@@ -5559,10 +5616,20 @@ export class ChatGPTController {
     }
   }
 
-  async #clickAt(x, y) {
+  async #clickAt(x, y, beforeInput = null) {
     await this.#moveMouseTo(x, y);
+    if (beforeInput) await beforeInput();
     await this.page.mouseDown(x, y, { button: 'left', clickCount: 1 });
-    await sleep(jitter(20, 60));
+    try {
+      await sleep(jitter(20, 60));
+      if (beforeInput) await beforeInput();
+    } catch (error) {
+      // Release outside the viewport to cancel the pressed send button.
+      await this.page.moveMouse(-1, -1);
+      this.mouse = { x: -1, y: -1 };
+      await this.page.mouseUp(-1, -1, { button: 'left', clickCount: 1 });
+      throw error;
+    }
     await this.page.mouseUp(x, y, { button: 'left', clickCount: 1 });
   }
 
@@ -5918,6 +5985,12 @@ export class ChatGPTController {
       const stopNodes = Array.from(document.querySelectorAll(${stopSel})).filter(visible);
       const stopCount = stopNodes.length;
       const prompt = pickPrompt();
+      ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
+      ${chatgptComposerSurface.toString()}
+      if (host === 'chatgpt.com') {
+        const chatSurface = chatgptComposerSurface({ document, prompt, visible, isSelected: modePickerPrimitives.modeOptionLooksSelected });
+        if (!chatSurface.active) return { ok: false, error: 'chat_surface_activation_failed', host, chatSurface };
+      }
       const promptLen = prompt
         ? prompt.matches('textarea, input')
           ? String(prompt.value || '').trim().length
@@ -6074,6 +6147,12 @@ export class ChatGPTController {
             prompt = n;
           }
         }
+        ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
+        ${chatgptComposerSurface.toString()}
+        if (${this.vendorId === 'chatgpt'} || location.hostname === 'chatgpt.com') {
+          const chatSurface = chatgptComposerSurface({ document, prompt, visible, isSelected: modePickerPrimitives.modeOptionLooksSelected });
+          if (!chatSurface.active) return { error: 'chat_surface_activation_failed', chatSurface };
+        }
         const form = prompt?.closest?.('form') || null;
         if (!form || typeof form.requestSubmit !== 'function') return false;
         const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
@@ -6081,6 +6160,7 @@ export class ChatGPTController {
         form.requestSubmit(submitBtn);
         return true;
       })()`);
+      if (submitted?.error === 'chat_surface_activation_failed') throw chatSurfaceActivationError(submitted.chatSurface);
       lastSendDebug = {
         ...lastSendDebug,
         stage: 'request_submit',
@@ -6113,7 +6193,7 @@ export class ChatGPTController {
           button: res?.button || lastSendDebug?.button || null
         };
         await this.#emitProgress({ sendDebug: lastSendDebug });
-        await this.#clickAt(cx, cy);
+        await this.#clickAt(cx, cy, () => this.#assertChatBeforeSend());
         sent = await this.#waitForSendSignal({
           timeoutMs: 2200,
           pollMs: 120,
@@ -6185,6 +6265,12 @@ export class ChatGPTController {
           }
         }
         prompt = prompt || document.activeElement;
+        ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
+        ${chatgptComposerSurface.toString()}
+        if (${this.vendorId === 'chatgpt'} || location.hostname === 'chatgpt.com') {
+          const chatSurface = chatgptComposerSurface({ document, prompt, visible, isSelected: modePickerPrimitives.modeOptionLooksSelected });
+          if (!chatSurface.active) return { error: 'chat_surface_activation_failed', chatSurface };
+        }
         const form = prompt?.closest?.('form') || null;
         if (form && typeof form.requestSubmit === 'function') {
           const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
@@ -6202,6 +6288,7 @@ export class ChatGPTController {
         }
         return false;
       })()`);
+      if (submitAttempt?.error === 'chat_surface_activation_failed') throw chatSurfaceActivationError(submitAttempt.chatSurface);
       lastSendDebug = {
         ...lastSendDebug,
         stage: 'secondary_submit',
@@ -6304,6 +6391,7 @@ export class ChatGPTController {
         };
         await this.#emitProgress({ sendDebug: lastSendDebug });
         await sleep(jitter(25, 90));
+        await this.#assertChatBeforeSend();
         await this.#sendKey(key, { modifiers });
         sent = await this.#waitForSendSignal({
           timeoutMs: 1500,
@@ -7328,7 +7416,7 @@ export class ChatGPTController {
     const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress };
     this.currentRun = run;
     try {
-      await this.ensureReady({ timeoutMs });
+      await this.#ensureChat({ timeoutMs });
       const modeIntentActivation = await this.#applyModeIntent({ modeIntent, timeoutMs: Math.min(timeoutMs, 20_000) });
       const modeIntentProvenance = buildModeIntentProvenance({ activation: modeIntentActivation, modeIntent, stage: 'before_send' });
       if (modeIntentProvenance) {
@@ -7919,7 +8007,7 @@ export class ChatGPTController {
       this.currentRun = run;
       let researchMeta = buildResearchMeta();
       try {
-        await this.ensureReady({ timeoutMs: effectiveTimeoutMs });
+        await this.#ensureChat({ timeoutMs: effectiveTimeoutMs });
         const researchActivation = await this.#activateResearchMode({ timeoutMs: 30_000 });
         researchMeta = buildResearchMeta({
           activated: true,
@@ -8003,7 +8091,7 @@ export class ChatGPTController {
         const initialTarget = (() => {
           try { return parseChatGptEntryTarget(initialUrl); } catch { return null; }
         })();
-        await this.ensureReady({ timeoutMs });
+        await this.#ensureChat({ timeoutMs });
         await this.#typePrompt(prompt);
         await this.#clickSend();
 

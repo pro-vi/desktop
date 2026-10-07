@@ -17,6 +17,7 @@ function readyState() {
     readyState: 'complete',
     blocked: false,
     promptVisible: true,
+    chatSurface: { active: true, action: 'none', reason: 'chat_surface_confirmed' },
     kind: null,
     indicators: {
       hasTurnstile: false,
@@ -3922,6 +3923,8 @@ function buildModePickerDom({ checked = false, slider = false, composerMode = nu
   }
   const document = {
     body,
+    title: 'ChatGPT',
+    readyState: 'complete',
     querySelectorAll(selectorList) {
       const sel = String(selectorList);
       return modePickerNodes.filter((node) => node.tokens.some((token) => sel.includes(token)));
@@ -3932,28 +3935,206 @@ function buildModePickerDom({ checked = false, slider = false, composerMode = nu
   };
   return {
     document,
+    location: { href: 'https://chatgpt.com/', hostname: 'chatgpt.com' },
     window: { getComputedStyle: () => ({}) }
   };
 }
 
 let modePickerNodes = [];
 
-test('chatgpt-controller: Chat intent switches a Work homepage before inspecting its model picker', async () => {
-  const js = await modePickerEvalJs();
+for (const operation of ['query', 'research', 'send']) {
+  test(`chatgpt-controller: ${operation} rejects an existing Work conversation before preparing a send`, async () => {
+    const harness = freshTabPowerPage({ escapeRoute: 'drag' });
+    const originalEvaluate = harness.page.evaluate;
+    let insertions = 0;
+    let researchActions = 0;
+    harness.page.evaluate = async (js) => {
+      if (js.includes('const hasTurnstile')) return {
+        ...readyState(),
+        chatSurface: { active: false, action: 'none', reason: 'chat_surface_required' }
+      };
+      if (js.includes('clicked_deep_research_option')) researchActions += 1;
+      return await originalEvaluate(js);
+    };
+    harness.page.insertText = async () => { insertions += 1; };
+    const controller = new ChatGPTController({ page: harness.page, selectors: {
+      promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]', assistantMessage: '[data-message-author-role="assistant"]'
+    } });
+    const request = operation === 'query'
+      ? controller.query({ prompt: 'probe', modeIntent: 'none', timeoutMs: 100 })
+      : operation === 'research' ? controller.research({ prompt: 'probe', timeoutMs: 100, outDir: os.tmpdir() })
+        : controller.send({ text: 'probe', timeoutMs: 100 });
+    await assert.rejects(request, (error) => error.message === 'chat_surface_activation_failed');
+    assert.equal(insertions, 0);
+    assert.equal(researchActions, 0);
+    assert.equal(harness.pointerEvents.includes('down:335,335'), false);
+  });
+}
+
+test('chatgpt-controller: no reasoning intent still switches a new Work page to Chat', async () => {
   modePickerNodes = [];
-  const snap = vm.runInNewContext(js, buildModePickerDom({
-    composerMode: 'work', surfaceSwitcher: true, slider: true
-  }));
+  const dom = buildModePickerDom({ composerMode: 'work', surfaceSwitcher: true });
+  const chat = modePickerNodes.find((node) => node.textContent === 'Chat');
+  const work = modePickerNodes.find((node) => node.textContent === 'Work');
+  const prompt = modePickerNodes.find((node) => node.tagName === 'textarea');
+  const harness = freshTabPowerPage({ escapeRoute: 'drag' });
+  const originalEvaluate = harness.page.evaluate;
+  const originalMouseDown = harness.page.mouseDown;
+  let reasoningEvaluations = 0;
+  harness.page.evaluate = async (js) => {
+    if (js.includes('const hasTurnstile')) return vm.runInNewContext(js, dom);
+    if (js.includes('mode_controls_not_found')) reasoningEvaluations += 1;
+    return await originalEvaluate(js);
+  };
+  harness.page.mouseDown = async (x, y) => {
+    await originalMouseDown(x, y);
+    if (x === 250 && y === 40) {
+      chat.attrs['aria-pressed'] = 'true';
+      work.attrs['aria-pressed'] = 'false';
+      prompt.attrs['aria-label'] = 'Ask ChatGPT';
+    }
+  };
+  const controller = new ChatGPTController({ page: harness.page, selectors: {
+    promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]', assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+  const result = await controller.query({ prompt: 'probe', modeIntent: 'none', timeoutMs: 10_000 });
+  assert.equal(result.text, 'Final answer');
+  assert.equal(reasoningEvaluations, 0);
+  const switchIndex = harness.pointerEvents.indexOf('down:250,40');
+  const sendIndex = harness.pointerEvents.indexOf('down:335,335');
+  assert.ok(switchIndex >= 0 && sendIndex > switchIndex);
+});
+
+test('chatgpt-controller: a surface changed to Work after prompt entry is rejected at the send decision', async () => {
+  modePickerNodes = [];
+  const dom = buildModePickerDom({ composerMode: 'work' });
+  const harness = freshTabPowerPage({ escapeRoute: 'drag' });
+  const originalEvaluate = harness.page.evaluate;
+  let insertions = 0;
+  harness.page.evaluate = async (js) => {
+    if (js.includes('already_generating')) return vm.runInNewContext(js, dom);
+    return await originalEvaluate(js);
+  };
+  harness.page.insertText = async () => { insertions += 1; };
+  const controller = new ChatGPTController({ page: harness.page, selectors: {
+    promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]',
+    stopButton: 'button[data-testid="stop-button"]', assistantMessage: '[data-message-author-role="assistant"]'
+  } });
+  await assert.rejects(controller.send({ text: 'probe', timeoutMs: 100 }),
+    (error) => error.message === 'chat_surface_activation_failed');
+  assert.ok(insertions > 0);
+  assert.equal(harness.pointerEvents.includes('down:335,335'), false);
+});
+
+async function surfaceSnapshot(options) {
+  modePickerNodes = [];
+  const dom = buildModePickerDom(options);
+  const controller = new ChatGPTController({
+    page: { evaluate: async (js) => vm.runInNewContext(js, dom) },
+    selectors: { promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]' }
+  });
+  return (await controller.detectChallenge()).chatSurface;
+}
+
+for (const changedAt of ['choose_action', 'click_button', 'click_result', 'keypress', 'pointer_move', 'pointer_down']) {
+  test(`chatgpt-controller: a surface changed at ${changedAt} blocks all subsequent submission attempts`, async () => {
+    const realNow = Date.now;
+    let fakeNow = 12_000_000;
+    Date.now = () => { fakeNow += 1_000; return fakeNow; };
+    modePickerNodes = [];
+    const dom = buildModePickerDom({ composerMode: 'chat', surfaceSwitcher: true });
+    const prompt = modePickerNodes.find((node) => node.tagName === 'textarea');
+    const chat = modePickerNodes.find((node) => node.textContent === 'Chat');
+    const work = modePickerNodes.find((node) => node.textContent === 'Work');
+    const form = makeModePickerNode({ tag: 'form', rect: { x: 390, y: 790, w: 700, h: 70 }, parent: dom.document.body });
+    prompt.parent = form;
+    const button = makeModePickerNode({
+      tag: 'button', text: 'Send', attrs: { 'data-testid': 'send-button', type: 'submit' },
+      tokens: ['button[data-testid="send-button"]', 'button'],
+      rect: { x: 1000, y: 800, w: 40, h: 40 }, parent: form
+    });
+    modePickerNodes.push(form, button);
+    const writes = [];
+    const record = () => writes.push({ composer: prompt.attrs['aria-label'], chat: chat.attrs['aria-pressed'], work: work.attrs['aria-pressed'] });
+    form.requestSubmit = record;
+    button.click = record;
+    const harness = freshTabPowerPage({ escapeRoute: 'drag' });
+    const originalEvaluate = harness.page.evaluate;
+    const originalMouseDown = harness.page.mouseDown;
+    const originalMouseUp = harness.page.mouseUp;
+    const originalMoveMouse = harness.page.moveMouse;
+    let changed = false;
+    let currentStage = null;
+    let pressedSend = false;
+    const changeSurface = () => {
+      changed = true;
+      prompt.attrs['aria-label'] = 'Work with ChatGPT';
+      chat.attrs['aria-pressed'] = 'false';
+      work.attrs['aria-pressed'] = 'true';
+    };
+    harness.page.evaluate = async (js) => {
+      if (js.includes('const hasTurnstile') || js.includes('already_generating') || js.includes('form.requestSubmit(submitBtn);') || js.includes('prompt?.focus?.();')) {
+        return vm.runInNewContext(js, dom);
+      }
+      if (js.includes('promptLen') && js.includes('stopVisible')) return { stopVisible: false, sendDisabled: false, promptLen: 1, stopCount: 0 };
+      return await originalEvaluate(js);
+    };
+    harness.page.insertText = async (text) => { prompt.value = text; prompt.innerText = text; prompt.textContent = text; };
+    harness.page.mouseDown = async (x, y) => {
+      await originalMouseDown(x, y);
+      if (x === 1020 && y === 820) {
+        pressedSend = true;
+        if (changedAt === 'pointer_down') changeSurface();
+      }
+    };
+    harness.page.mouseUp = async (x, y) => {
+      await originalMouseUp(x, y);
+      if (pressedSend && x === 1020 && y === 820) record();
+      pressedSend = false;
+    };
+    harness.page.moveMouse = async (x, y) => {
+      await originalMoveMouse(x, y);
+      if (changedAt === 'pointer_move' && currentStage === 'click_button' && !changed) changeSurface();
+    };
+    harness.page.sendKey = async (key) => { if (key === 'Enter') record(); };
+    const controller = new ChatGPTController({ page: harness.page, vendorId: 'chatgpt', selectors: {
+      promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]', assistantMessage: '[data-message-author-role="assistant"]'
+    } });
+    try {
+      let failure;
+      try {
+        await controller.send({ text: 'probe', timeoutMs: 10_000, onProgress: (patch) => {
+          currentStage = patch.sendDebug?.stage || currentStage;
+          if (patch.sendDebug?.stage === changedAt) {
+            changeSurface();
+          }
+        } });
+      } catch (error) { failure = error; }
+      assert.equal(changed, true);
+      assert.ok(writes.every((write) => write.composer === 'Ask ChatGPT' && write.chat === 'true' && write.work === 'false'));
+      assert.equal(failure?.message, 'chat_surface_activation_failed');
+      assert.equal(pressedSend, false);
+      if (changedAt === 'choose_action') assert.equal(writes.length, 0);
+      else assert.ok(writes.length > 0);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+}
+
+test('chatgpt-controller: readiness identifies a Work homepage and its Chat switch', async () => {
+  const snap = await surfaceSnapshot({ composerMode: 'work', surfaceSwitcher: true, slider: true });
   assert.equal(snap.active, false);
   assert.equal(snap.action, 'pointer_chat_surface');
   assert.equal(snap.reason, 'chat_surface_switch_required');
   assert.equal(snap.rect.x, 200);
 });
 
-test('chatgpt-controller: an existing Work conversation cannot certify a Chat reasoning intent', async () => {
-  const js = await modePickerEvalJs();
-  modePickerNodes = [];
-  const snap = vm.runInNewContext(js, buildModePickerDom({ composerMode: 'work', slider: true }));
+test('chatgpt-controller: readiness identifies an existing Work conversation', async () => {
+  const snap = await surfaceSnapshot({ composerMode: 'work', slider: true });
   assert.equal(snap.active, false);
   assert.equal(snap.action, 'none');
   assert.equal(snap.reason, 'chat_surface_required');
@@ -3986,7 +4167,7 @@ for (const scenario of ['ignored Chat click', 'inconsistent surface selection', 
     }
     const harness = freshTabPowerPage({ escapeRoute: 'drag' });
     const originalEvaluate = harness.page.evaluate;
-    harness.page.evaluate = async (js) => js.includes('chat_surface_switch_required')
+    harness.page.evaluate = async (js) => js.includes('const hasTurnstile')
       ? vm.runInNewContext(js, dom)
       : await originalEvaluate(js);
     let insertions = 0;
@@ -3997,7 +4178,7 @@ for (const scenario of ['ignored Chat click', 'inconsistent surface selection', 
     } });
     try {
       await assert.rejects(controller.query({ prompt: 'probe', timeoutMs: 20_000, modeIntent: 'extended-pro' }), (error) => {
-        assert.equal(error.message, 'mode_intent_activation_failed');
+        assert.equal(error.message, 'chat_surface_activation_failed');
         const expected = scenario === 'ignored Chat click' ? 'chat_surface_switch_required'
           : scenario === 'existing Work conversation' ? 'chat_surface_required' : 'chat_surface_unconfirmed';
         assert.equal(error.data.reason, expected);

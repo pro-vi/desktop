@@ -2045,18 +2045,18 @@
   },
   {
     "id": "controller-dom-059",
-    "capabilityId": "mode-model",
+    "capabilityId": "submit",
     "kind": "dependency",
     "dependency": "composer-surface-switcher",
-    "reason": "provider-visible surface switching scopes Chat reasoning selection; existing conversations without a switcher must retain their surface",
+    "reason": "provider-visible surface confirmation precedes every ChatGPT send; existing Work conversations without a switcher must be rejected without replacement",
     "selector": "[aria-label=\"Composer mode\"]"
   },
   {
     "id": "controller-dom-060",
-    "capabilityId": "mode-model",
+    "capabilityId": "submit",
     "kind": "dependency",
     "dependency": "composer-surface-choice",
-    "reason": "provider-visible surface choices are read inside the composer switcher; reasoning confirmation requires an unambiguous selected Chat choice",
+    "reason": "provider-visible surface choices confirm Chat when the switcher is present; an existing conversation instead requires its Chat composer label",
     "selector": "button, [role=\"tab\"], [role=\"switch\"]"
   }
 ]

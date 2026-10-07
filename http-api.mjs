@@ -190,6 +190,7 @@ function mapErrorToHttp(error) {
   if (msg === 'research_requires_chatgpt') return { code: 409, body: { error: 'research_requires_chatgpt', data: error?.data || null } };
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
+  if (msg === 'chat_surface_activation_failed') return { code: 409, body: { error: 'chat_surface_activation_failed', data: error?.data || null } };
   if (msg === 'model_intent_activation_failed') return { code: 409, body: { error: 'model_intent_activation_failed', data: error?.data || null } };
   const transcript = transcriptHttpError(error);
   if (transcript.body.error !== 'internal_error') return transcript;
@@ -1752,6 +1753,14 @@ export function startHttpApi({
         detail: detail?.reason
           ? `ChatGPT Deep Research could not be activated: ${detail.reason}${debugSuffix ? ` (${debugSuffix})` : ''}`
           : 'ChatGPT Deep Research could not be activated on this tab.'
+      };
+    }
+    if (message === 'chat_surface_activation_failed') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Chat mode required',
+        detail: 'Agentify sends only in Chat. Use a Chat conversation or start a new one.'
       };
     }
     if (message === 'mode_intent_activation_failed') {

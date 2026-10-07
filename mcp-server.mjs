@@ -849,7 +849,7 @@ registerTool(
       liveSourceId: z.string().regex(LIBRARY_LOCAL_ID_PATTERN).optional()
         .describe('Tracked Transcript Library source id returned with sourceKey and conversationUrl; enables fail-closed live continuation validation.'),
       projectUrl: z.string().optional().describe('ChatGPT Project URL (e.g., https://chatgpt.com/g/g-p-{id}/project). Routes conversations into the project.'),
-      modeIntent: z.string().optional().describe('ChatGPT mode intent for this tab/query. Supported intents: extended-pro (Pro Extended), thinking (Medium), instant. This is separate from the vendor `model` hint.'),
+      modeIntent: z.string().optional().describe('ChatGPT Chat reasoning intent: extended-pro (Pro Extended), thinking (Medium), instant. none skips reasoning selection. Agentify sends only in Chat; none does not enable Work. Separate from the vendor `model` hint.'),
       modelIntent: z.string().optional().describe('Optional explicit ChatGPT generation intent for this query only. Supported intents: gpt-5.5-pro, gpt-5.4-pro. Any other value is rejected before sending rather than ignored, so a successful run always means the requested generation was applied. Omit to leave the picker as-is. The controller also fails closed when the UI cannot confirm the requested generation.'),
       bundleName: z.string().optional().describe('Named context bundle to merge into this query before sending.'),
       prompt: z.string().describe('Prompt to send to ChatGPT.'),
