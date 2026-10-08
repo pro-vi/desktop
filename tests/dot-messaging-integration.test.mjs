@@ -129,3 +129,31 @@ test('Dot MCP oversized-message errors preserve IDs, budgets, and reading positi
     assert.equal(result.structuredContent.cursor, initial.structuredContent.cursor);
   }
 });
+
+test('Dot sends through different keys serialize by native room until delivery settles', async (t) => {
+  const native = createNativeDotPage({ settle: false });
+  const fixture = await createDotServiceFixture({ native }); t.after(() => fixture.close());
+  const waitForInputs = async (count) => {
+    const deadline = Date.now() + 1_000;
+    while (native.state.inputCount < count && Date.now() < deadline) await pause(5);
+    assert.equal(native.state.inputCount, count);
+  };
+  const acceptCurrent = (id) => {
+    const message = native.state.messages.at(-1);
+    message.id = id;
+    message.deliveryState = '';
+    native.state.unconfirmed = [];
+  };
+  const first = fixture.call('/dot/talk', { key: 'first-agent', text: 'first', timeoutMs: 2_000 });
+  await waitForInputs(1);
+  const blocked = await fixture.call('/dot/talk', { key: 'second-agent', text: 'must not interleave' });
+  assert.equal(blocked.data.error, 'tab_busy');
+  assert.equal(native.state.inputCount, 1);
+  acceptCurrent('first-canonical');
+  assert.equal((await first).status, 200);
+  const next = fixture.call('/dot/talk', { key: 'second-agent', text: 'after settlement', timeoutMs: 2_000 });
+  await waitForInputs(2);
+  acceptCurrent('second-canonical');
+  assert.equal((await next).status, 200);
+  assert.deepEqual(native.state.texts, ['first', 'after settlement']);
+});
