@@ -2,7 +2,7 @@
 
 This is the maintained feature checklist for the public Agentify Desktop MCP surface.
 `ALL_MCP_TOOL_NAMES` in `mcp-tool-profile.mjs` is the method authority; the matrix has
-one row per method, 47 today.
+one row per method, 50 in the current catalog.
 
 A row passes only after the named public MCP method returns its expected observable
 result through the real Electron service. Unit tests, a lower HTTP call, listing a
@@ -20,6 +20,9 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
 - **LIVE-QUERY** — three new ChatGPT Pro conversations derived from clean wiki notes;
   each run is accepted asynchronously, observed once while live, awaited to a
   receipt-backed response, reopened, and checked through its saved output.
+- **LIVE-DOT** — one scoped text-only personal Dot connection plus a continuation;
+  observe native delivery, several incoming posts, and cursor reuse. This journey
+  remains pending; local fixtures do not establish provider support.
 - **LIVE-RESEARCH** — one ChatGPT Deep Research request derived from a wiki gap;
   await its durable report and inspect the exported result.
 - **LIVE-CONVERSATION** — capture one LIVE-QUERY conversation, inventory a generated
@@ -48,6 +51,9 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
 | Method | Journey | Repetitions | Observable pass condition | 2026-09-26 | Evidence |
 |---|---|---:|---|:---:|---|
 | `agentify_query` | LIVE-QUERY | 3 | Three distinct Pro runs finish `success`, each with confirmed `extended-pro`, a completion receipt, and saved response bytes. | ✅ | 2026-10-07, `59bc7ea`: three Chat Pro runs with confirmed mode, exact saved answers and matching receipts; [probe](probes/2026-10-07-chat-only-send-probe.md) |
+| `agentify_dot_talk` | LIVE-DOT | 1 | Personal Dot accepts one outgoing text message; durable delivery and a pre-send cursor return through MCP. | ⏳ | Local native/controller/HTTP/storage/stdio and Electron fixtures pass; provider exchange unverified; [report](probes/2026-10-08-dot-messaging-fixtures.md) |
+| `agentify_dot_read` | LIVE-DOT | 2 | A limited batch preserves remaining posts; an independent reader sees the same messages. | ⏳ | Local fixtures pass; actual timeline/history coverage unverified; [report](probes/2026-10-08-dot-messaging-fixtures.md) |
+| `agentify_dot_wait` | LIVE-DOT | 2 | Incoming messages return without task completion; timeout and restart preserve the cursor. | ⏳ | Local fixtures pass; actual provider continuation unverified; [report](probes/2026-10-08-dot-messaging-fixtures.md) |
 | `agentify_research` | LIVE-RESEARCH | 2 | Two Deep Research runs finish with distinct conversations, canonical Markdown artifacts, matching `research-report` receipts, and byte-verified hashes. | ✅ | run `1e8e194b`: `research-report` receipt over the exported `deep-research-report.md` (hash matches). 1 of 2 repetitions |
 | `agentify_read_page` | LOCAL-BROWSER | 2 | The owned tab returns non-empty ready-page text before and after navigation. | ✅ | `e2e-mcp-live-browser` receipt |
 | `agentify_read_conversation` | LIVE-CONVERSATION | 2 | Two warm captures return verified transcript paths; the second capture has the same normalized content when no turn changed. | ✅ | `6ab4fab5` (14 turns) and `690126b6` (400 turns) complete; file-card conversation read twice, same sha `52780af7` |

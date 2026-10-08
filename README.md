@@ -453,6 +453,47 @@ npm run start -- --chrome-debug-port 9333
 npm run start -- --chrome-binary "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 ```
 
+### Personal Dot messages
+
+The three Dot tools are available in the core MCP profile. Their local fixtures
+pass; the actual provider send/read/wait exchange is still awaiting scoped live
+verification. ChatGPT's native messaging getters are private and can change.
+
+1. Call `agentify_dot_talk` with `{ "text": "your exact message" }`.
+2. Use its returned `dotCursor` as `after` in `agentify_dot_read`.
+3. Use the latest returned `cursor` as `after` in `agentify_dot_wait`.
+
+Omitting `dotUrl` selects the signed-in account's personal sidebar Dot. `key`
+selects local affinity; it does not create a separate remote Dot room. An optional
+`dotUrl` must resolve to that personal Dot. Existing Chat tools remain Chat-only.
+
+Talk returns `runId`, the accepted outgoing message ID, and the cursor from
+before sending. Delivery confirms the message was saved; read/wait return
+incoming messages independently. A prompt can produce several posts, and posts
+can be proactive or belong to another agent. Each reader keeps its own cursor.
+
+Read without `after` returns recent posts. `limit` bounds the message count
+(default and maximum 32); `maxChars` bounds complete message bodies (default
+20000, maximum 1000000). `hasMore` means another batch remains. If a message
+cannot fit, `dot_message_too_large` returns its ID and required character count;
+increase `maxChars` and reuse the same cursor. Non-text posts remain explicit.
+Missing history anchors return `dot_cursor_unavailable`, never a silent reset.
+
+Wait returns available messages immediately. `timeoutMs` ends only that caller's
+observation; omit it or use 0 to wait indefinitely. Empty timed-out results keep
+the input cursor. Cancellation does not stop Dot's background work. Generic
+`agentify_wait_run` remains for query/research completion, not Dot messaging.
+
+If delivery is uncertain, retain the returned run ID and checkpoint. Agentify
+never resends automatically. Retrying a recorded accepted message returns its
+original acknowledgement. Model controls, reasoning settings, file/context
+uploads, and task-management controls are outside these tools.
+
+Run `node scripts/e2e-mcp-dot-messaging.mjs` for the isolated native-page,
+HTTP/storage/stdio, restart, and Electron DOM fixtures. It sends no provider
+message. See [the verification report](docs/probes/2026-10-08-dot-messaging-fixtures.md)
+for the live checks still required.
+
 ## Transcript Library V0
 
 Transcript Library keeps exact ChatGPT conversations as private local evidence. The normal workflow is to ask an MCP-connected coding agent to track, sync, list, retrieve, cite, continue, verify, forget, or import an exact conversation. The Control Center remains an optional fallback for the same ZIP picker, content-free status, and recovery actions. Both live capture and import produce immutable snapshots: saved captures that are never edited in place. ZIP import is optional and is not required for live tracking, retrieval, continuation, or local forgetting.

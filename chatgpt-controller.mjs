@@ -1106,7 +1106,7 @@ export class ChatGPTController {
     const messages = observation.received;
     if (!Array.isArray(messages)) throw new Error('dot_binding_unconfirmed');
     const last = messages.at(-1)?.id ?? cursor?.messageId ?? observation.messages.filter((message) => message.deliveryState === '' && !message.deleted && !observation.unconfirmedRequestIds.includes(message.requestId || message.id)).at(-1)?.id ?? null;
-    return parseDotMessageBatch({ binding: observation.binding, messages, cursor: encodeDotCursor(observation.binding, last), hasMore: observation.hasMore });
+    return parseDotMessageBatch({ binding: observation.binding, messages, cursor: !messages.length && after !== undefined ? after : encodeDotCursor(observation.binding, last), hasMore: observation.hasMore });
   }
 
   async talkDot({ text, binding, timeoutMs = 30_000, recordDotSubmission, recordDotCursor } = {}) {

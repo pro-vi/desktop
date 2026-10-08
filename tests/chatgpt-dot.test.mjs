@@ -129,3 +129,11 @@ test('Dot empty recent read never anchors an unconfirmed outgoing message', asyn
   fixture.state.messages.push(fixture.incoming('later'));
   assert.deepEqual((await controller.readDotMessages({ after: empty.cursor })).messages.map(({ id }) => id), ['later']);
 });
+
+test('Dot empty reads retain the exact valid opaque cursor representation', async () => {
+  const fixture = createNativeDotPage();
+  const controller = controllerFor(fixture);
+  await controller.prepareDotEntry();
+  const cursor = Buffer.from(JSON.stringify({ messageId: null, binding })).toString('base64url');
+  assert.equal((await controller.readDotMessages({ after: cursor })).cursor, cursor);
+});

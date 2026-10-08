@@ -206,7 +206,7 @@ export function parseDotMessageBatch(value) {
   fields(input, ['binding', 'messages', 'cursor', 'hasMore'], ['timedOut'], 'invalid_dot_batch');
   const binding = parseDotBinding(input.binding);
   const cursor = parseDotCursor(input.cursor);
-  if (!sameDotBinding(binding, cursor.binding) || typeof input.hasMore !== 'boolean' || !Array.isArray(input.messages)) throw invalid('invalid_dot_batch');
+  if (!sameDotBinding(binding, cursor.binding) || typeof input.hasMore !== 'boolean' || !Array.isArray(input.messages) || input.messages.length > 32) throw invalid('invalid_dot_batch');
   if (Object.hasOwn(input, 'timedOut') && typeof input.timedOut !== 'boolean') throw invalid('invalid_dot_batch');
   const ids = new Set();
   const messages = input.messages.map((value) => {
@@ -217,6 +217,7 @@ export function parseDotMessageBatch(value) {
     ids.add(id);
     return { ...message, id };
   });
+  if (messages.reduce((count, message) => count + (message.text?.length || 0), 0) > 1_000_000) throw invalid('invalid_dot_batch');
   if ((messages.length && cursor.messageId !== messages.at(-1).id) || (input.timedOut === true && (messages.length || input.hasMore))) throw invalid('invalid_dot_batch');
   return { binding, messages, cursor: input.cursor, hasMore: input.hasMore, ...(Object.hasOwn(input, 'timedOut') ? { timedOut: input.timedOut } : {}) };
 }
