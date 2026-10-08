@@ -247,7 +247,7 @@ test('Ordinary requests cannot replace an expired saved Dot key with Chat', asyn
   const dot = fixture.tabs.listTabs().find((tab) => tab.key === 'personal-dot');
   await fixture.tabs.closeTab(dot.id);
   const count = fixture.tabs.listTabs().length;
-  for (const route of ['/query', '/send', '/research', '/navigate', '/ensure-ready', '/read-page', '/read-conversation']) {
+  for (const route of ['/query', '/send', '/research', '/navigate', '/ensure-ready', '/read-page', '/read-conversation', '/tabs/create']) {
     const result = await fixture.call(route, { key: 'personal-dot', text: 'Chat request', prompt: 'Chat request', url: 'https://chatgpt.com/' });
     assert.equal(result.data.error, 'recipient_conflict', route);
     assert.equal(fixture.tabs.listTabs().length, count, route);
@@ -293,7 +293,7 @@ test('Ordinary key-only requests reject a live Dot tab after failed key persiste
   await fs.rmdir(keyFile);
   const dot = fixture.tabs.listTabs().find((tab) => tab.key === 'personal-dot');
   assert.equal(dot.recipient.kind, 'dot');
-  for (const route of ['/query', '/send', '/research', '/navigate', '/ensure-ready', '/read-page', '/read-conversation']) {
+  for (const route of ['/query', '/send', '/research', '/navigate', '/ensure-ready', '/read-page', '/read-conversation', '/tabs/create']) {
     const result = await fixture.call(route, { key: 'personal-dot', text: 'ordinary request', prompt: 'ordinary request', url: 'https://chatgpt.com/c/fixture-chat' });
     assert.equal(result.data.error, 'recipient_conflict', route);
     assert.equal(await fixture.native.page.getUrl(), binding.dotUrl, route);

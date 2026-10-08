@@ -3927,6 +3927,7 @@ export function startHttpApi({
       if (url.pathname === '/tabs/create' && req.method === 'POST') {
         await projectsReady;
         const body = await parseBody(req);
+        await assertChatTarget(body, url);
         assertNoModelIntent(body);
         const key = (body.key ? String(body.key).trim() : '') || null;
         const name = (body.name ? String(body.name).trim() : '') || null;
