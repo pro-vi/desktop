@@ -5,8 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { locationFromConversationUrl } from './chatgpt-location.mjs';
-import { parseDotQueryRequest, parseDotRunFields, parseDotUrl } from './chatgpt-recipient.mjs';
-import { assertDotReplyEvidence } from './chatgpt-completion-evidence.mjs';
+import { DOT_OPERATION_SCHEMAS, parseDotOperationRequest, parseDotMessageBatch, parseDotDelivery, parseDotRunFields } from './chatgpt-recipient.mjs';
+import { waitForDotMessages } from './dot-message-waiter.mjs';
 import {
   CATALOG_LIST_CURSOR_PATTERN,
   parseCatalogPage,
@@ -140,7 +140,7 @@ function runStatusText(run = {}, data = {}) {
     run.kind ? `kind=${run.kind}` : null
   ].filter(Boolean);
   const lines = [bits.join(' ')];
-  if (run.recipient?.kind === 'dot') lines.push('recipient=dot reply_status=message-only');
+  if (run.recipient?.kind === 'dot') lines.push('recipient=dot delivery_status=message-only');
   // An incomplete delivery rides above label/detail: a caller skimming the
   // first lines must not read the run as clean (the label also carries it).
   const deliveryNotice = promptDeliveryNotice(run.promptDelivery);
@@ -845,40 +845,43 @@ function parseCatalogVerificationResponse(value, expectedIdentity) {
   return outcome;
 }
 
-registerTool(
-  'agentify_dot_query',
-  {
-    description: 'Send a text message to the personal ChatGPT Dot at dotUrl and return its completed message reply. Success confirms this reply was saved, not that background tasks have finished. Chat model and reasoning settings do not apply. For a long reply, set fireAndForget=true and call agentify_wait_run with the returned runId.',
-    inputSchema: z.object({
-      dotUrl: z.string().refine((value) => acceptedBy(parseDotUrl, value)).describe('HTTPS ChatGPT web locator for the personal Dot; provider identity is confirmed before sending.'),
-      prompt: z.string().min(1).max(200_000),
-      key: z.string().min(1).optional().describe('Stable conversation key. Omit to derive it from dotUrl.'),
-      tabId: z.string().min(1).optional().describe('Existing Dot-bound tab id.'),
-      timeoutMs: z.number().positive().optional(),
-      fireAndForget: z.boolean().optional()
-    }).strict()
-  },
-  async ({ dotUrl, ...options }) => {
-    const body = parseDotQueryRequest({ ...options, recipient: { kind: 'dot', dotUrl }, source: 'mcp' });
+function dotBatchResult(value) {
+  const batch = parseDotMessageBatch(value);
+  const content = batch.messages.map((message) => ({ type: 'text', text: `messageId=${message.id} sender=dot\n${message.text === null ? '[non-text message]' : message.text}` }));
+  if (!content.length) content.push({ type: 'text', text: batch.timedOut ? 'No new Dot messages observed before the wait deadline.' : 'No new Dot messages observed.' });
+  const messages = batch.messages.map(({ text, ...metadata }) => metadata);
+  return { content, structuredContent: { ...batch, messages } };
+}
+
+for (const [operation, description] of [
+  ['talk', 'Send text to the authenticated account’s personal Dot. Returns native message delivery and a pre-send cursor. Read or wait with that cursor to receive incoming messages; delivery does not mean background work finished. An optional dotUrl must resolve to the same personal Dot.'],
+  ['read', 'Read a bounded batch of personal Dot messages. Pass after to continue, or omit it for recent posts. Returns an independent cursor without consuming another reader’s messages. Incoming posts may be proactive or belong to other agents. Increase maxChars if one complete message cannot fit.'],
+  ['wait', 'Wait for incoming personal Dot messages after a cursor. Returns the available batch immediately without matching a prompt or waiting for a task result. timeoutMs belongs to this caller; omit it or use 0 to wait indefinitely. Cancellation ends local observation only.']
+]) {
+  registerTool(`agentify_dot_${operation}`, {
+    description,
+    inputSchema: DOT_OPERATION_SCHEMAS[operation]
+  }, async (options, extra) => {
+    const body = parseDotOperationRequest(options, operation);
     const conn = await getConn();
-    const data = await requestJson({ ...conn, method: 'POST', path: '/query', body });
-    if (data.async) {
+    try {
+      if (operation === 'wait') return dotBatchResult(await waitForDotMessages({ conn, body: { ...body, source: 'mcp' }, signal: extra?.signal }));
+      const data = await requestJson({ ...conn, method: 'POST', path: `/dot/${operation}`, body: { ...body, source: 'mcp' }, signal: extra?.signal });
+      if (operation === 'read') return dotBatchResult(data);
+      const delivery = parseDotDelivery(data);
+      return { content: [{ type: 'text', text: `Dot message delivered. runId=${delivery.runId} messageId=${delivery.dotSubmission.userMessageId}. Read or wait using the returned dotCursor for incoming messages.` }], structuredContent: delivery };
+    } catch (error) {
+      const code = error?.data?.body?.error;
+      const data = error?.data?.body?.data;
+      if (code === 'dot_message_too_large' && typeof data?.messageId === 'string' && Number.isSafeInteger(data?.requiredChars) && data.requiredChars > 0) {
+        return { content: [{ type: 'text', text: `Dot message ${data.messageId} requires maxChars>=${data.requiredChars}. Increase the budget and reuse the same reading position.` }], structuredContent: { error: code, messageId: data.messageId, requiredChars: data.requiredChars, cursor: body.after || null }, isError: true };
+      }
+      if (operation !== 'talk' || !data?.runId) throw error;
       const dot = parseDotRunFields(data);
-      return {
-        content: [{ type: 'text', text: `Dot query queued. runId=${data.runId}. Next: call agentify_wait_run for the completed message reply.` }],
-        structuredContent: { ...asyncQueryStructuredContent(data), ...dot }
-      };
+      return { content: [{ type: 'text', text: `Dot message delivery unconfirmed. runId=${data.runId} state=${dot.dotSubmission.state}. Check the recorded delivery before deciding what to send next; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code }, isError: true };
     }
-    const dot = parseDotRunFields(data.result?.meta);
-    const evidence = assertDotReplyEvidence(data.result.meta.completionEvidence, dot);
-    if (typeof data.result.text !== 'string' || !data.result.text.trim()) throw new Error('dot_reply_unconfirmed');
-    const meta = { ...dot, completionEvidence: evidence, outputManifest: data.result.meta.outputManifest, durationMs: data.result.meta.durationMs };
-    return {
-      content: [{ type: 'text', text: data.result.text }],
-      structuredContent: { runId: data.runId, meta }
-    };
-  }
-);
+  });
+}
 
 registerTool(
   'agentify_query',

@@ -1,6 +1,8 @@
 const CORE_TOOLS = [
   'agentify_query',
-  'agentify_dot_query',
+  'agentify_dot_talk',
+  'agentify_dot_read',
+  'agentify_dot_wait',
   'agentify_research',
   'agentify_read_page',
   'agentify_read_conversation',

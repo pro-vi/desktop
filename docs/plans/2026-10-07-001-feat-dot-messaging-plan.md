@@ -2,7 +2,7 @@
 title: Explicit Dot messaging through Agentify
 objective: Coding agents can exchange messages with the account's personal Dot and continue that conversation.
 type: feat
-status: active
+status: superseded
 builder: cold
 date: 2026-10-07
 origin: conversation

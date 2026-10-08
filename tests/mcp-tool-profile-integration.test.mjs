@@ -17,87 +17,6 @@ import { createProviderTabOperationLeases } from '../provider-tab-operation-leas
 const repoDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const serverPath = path.join(repoDir, 'mcp-server.mjs');
 
-test('mcp Dot query crosses real stdio, HTTP, run storage, and reply projection', async (t) => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-dot-'));
-  const token = 'dot-fixture-token';
-  const serverId = 'dot-fixture-server';
-  const dotUrl = 'https://chatgpt.com/fixture-dot';
-  const dotBinding = { dotId: 'fixture-dot', dotUrl, conversationId: 'fixture-conversation', conversationUrl: 'https://chatgpt.com/c/fixture-dot-conversation', accountId: 'fixture-account' };
-  let calls = 0;
-  let forwardedRecipient;
-  const tabs = new TabManager({
-    browserBackend: { createSession: async () => ({ page: {}, presenter: {}, close: async () => {}, isClosed: () => false }) },
-    createController: async ({ recipient }) => ({
-      recipient,
-      prepareDotEntry: async () => dotBinding,
-      inspectDotBinding: async () => dotBinding,
-      getUrl: async () => dotBinding.conversationUrl,
-      query: async ({ recipient: requested, recordDotSubmission }) => {
-        forwardedRecipient = requested;
-        calls++;
-        await recordDotSubmission({ state: 'unknown', userMessageId: null });
-        await recordDotSubmission({ state: 'submitted', userMessageId: 'fixture-user-turn' });
-        return {
-          text: 'DOT_STDIO_REPLY',
-          meta: { completionEvidence: {
-            source: 'dot-message', observedAt: Date.now(), dotBinding,
-            userMessageId: 'fixture-user-turn', providerMessageId: 'fixture-dot-turn',
-            authorDotId: dotBinding.dotId, replyToUserMessageId: 'fixture-user-turn', completed: true
-          } }
-        };
-      }
-    })
-  });
-  const defaultTabId = await tabs.createTab({ key: 'default', vendorId: 'chatgpt', url: 'https://chatgpt.com/' });
-  const api = await startHttpApi({
-    port: 0, token, serverId, tabs, defaultTabId, stateDir,
-    providerTabOperations: createProviderTabOperationLeases(),
-    getStatus: async () => ({ ok: true, url: 'https://chatgpt.com/' }),
-    getSettings: async () => ({ maxInflightQueries: 3, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0 })
-  });
-  t.after(async () => {
-    api.closeAllConnections();
-    await new Promise((resolve) => api.close(resolve));
-    await fs.rm(stateDir, { recursive: true, force: true });
-  });
-  await writeToken(token, stateDir);
-  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
-  const transport = new StdioClientTransport({
-    command: process.execPath, args: [serverPath, '--tool-profile', 'core'],
-    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir }, stderr: 'pipe'
-  });
-  const client = new Client({ name: 'dot-protocol-fixture', version: '1.0.0' }, { capabilities: {} });
-  try {
-    await client.connect(transport);
-    const listed = await client.listTools();
-    assert.ok(listed.tools.some(({ name }) => name === 'agentify_dot_query'));
-    const result = await client.callTool({ name: 'agentify_dot_query', arguments: { dotUrl, prompt: 'fixture prompt' } });
-    assert.equal(result.isError, undefined);
-    assert.deepEqual(result.content, [{ type: 'text', text: 'DOT_STDIO_REPLY' }]);
-    assert.deepEqual(forwardedRecipient, { kind: 'dot', dotUrl });
-    assert.deepEqual(result.structuredContent.meta.dotBinding, dotBinding);
-    assert.equal(JSON.stringify(result.structuredContent).includes('DOT_STDIO_REPLY'), false);
-    const saved = await client.callTool({ name: 'agentify_get_run', arguments: { runId: result.structuredContent.runId } });
-    assert.equal(saved.structuredContent.run.kind, 'query');
-    assert.equal(saved.structuredContent.run.dotSubmission.state, 'submitted');
-    assert.equal(saved.structuredContent.run.completionReceipt.kind, 'assistant-response');
-    assert.match(saved.content[0].text, /recipient=dot reply_status=message-only/);
-    for (const [name, options] of [
-      ['agentify_get_run', { includeOutputText: true }],
-      ['agentify_wait_run', { includeOutputText: true }]
-    ]) {
-      const read = await client.callTool({ name, arguments: { runId: result.structuredContent.runId, ...options } });
-      assert.equal(JSON.stringify(read).split('DOT_STDIO_REPLY').length - 1, 1);
-      assert.equal(Object.hasOwn(read.structuredContent, 'outputText'), false);
-    }
-    const bad = await client.callTool({ name: 'agentify_dot_query', arguments: { dotUrl, prompt: 'fixture prompt', dotBinding } });
-    assert.equal(bad.isError, true);
-    assert.equal(calls, 1);
-  } finally {
-    await client.close();
-  }
-});
-
 async function listedToolDefinitions(profile) {
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -368,7 +287,7 @@ function catalogVerificationFixture() {
 test('mcp server tools/list exposes only the selected core profile', async () => {
   const toolDefinitions = await listedToolDefinitions('core');
   const tools = toolDefinitions.map((tool) => tool.name);
-  assert.equal(tools.length, 12);
+  assert.equal(tools.length, 14);
   assert.ok(tools.includes('agentify_query'));
   assert.ok(tools.includes('agentify_wait_run'));
   assert.ok(tools.includes('agentify_download_conversation_artifacts'));

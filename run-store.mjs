@@ -106,12 +106,12 @@ function normalizeRun(input = {}) {
   const inputFinishedAt = normalizeTime(input.finishedAt);
   const archivedAt = normalizeTime(input.archivedAt);
   const status = normalizeRunStatus(input.status);
-  const hasDotData = Object.hasOwn(input, 'dotBinding') || Object.hasOwn(input, 'dotSubmission') || input.logicalRequest?.recipient?.kind === 'dot';
+  const hasDotData = Object.hasOwn(input, 'dotBinding') || Object.hasOwn(input, 'dotSubmission') || Object.hasOwn(input, 'dotCursor') || input.logicalRequest?.recipient?.kind === 'dot';
   if (hasDotData && input.recipient?.kind !== 'dot') throw new Error('invalid_dot_run');
   const recipient = input.recipient === undefined ? null : parseChatGptRecipient(input.recipient);
   const recipientFields = recipient?.kind === 'dot' ? parseDotRunFields(input) : {};
   if (recipient?.kind === 'dot' && status === 'success' && (
-    !recipientFields.dotBinding || recipientFields.dotSubmission.state !== 'submitted'
+    input.kind !== 'send' || !recipientFields.dotBinding || !recipientFields.dotCursor || recipientFields.dotSubmission.state !== 'submitted'
   )) throw new Error('invalid_dot_run');
   const finishedAt = isTerminalRunStatus(status) ? (inputFinishedAt || updatedAt) : null;
   const phase = normalizePhaseForStatus({ status, phase: input.phase, finishedAt });

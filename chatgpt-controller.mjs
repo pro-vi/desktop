@@ -3,7 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { CHATGPT_MODEL_INTENTS, normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-location.mjs';
-import { parseChatGptRecipient } from './chatgpt-recipient.mjs';
+import { parseChatGptRecipient, parseDotBinding, sameDotBinding, parseDotCursor, encodeDotCursor, parseDotMessageBatch } from './chatgpt-recipient.mjs';
+import { dotPageScript, parseDotPageObservation } from './chatgpt-dot-ui.mjs';
 import {
   completionEvidenceFor,
   isQualifiedCompletionEvidence
@@ -1044,6 +1045,106 @@ export class ChatGPTController {
 
   async getUrl() {
     return await this.page.getUrl();
+  }
+
+  async inspectDotPage(options = {}) {
+    if (this.recipient.kind !== 'dot') throw new Error('recipient_conflict');
+    return parseDotPageObservation(await this.#eval(dotPageScript(options)), { binding: options.binding || this.dotBinding || null });
+  }
+
+  async inspectDotBinding() {
+    return (await this.inspectDotPage()).binding;
+  }
+
+  async prepareDotEntry({ recipient = this.recipient, dotBinding = null, timeoutMs = 30_000 } = {}) {
+    const requested = parseChatGptRecipient(recipient);
+    if (requested.kind !== 'dot' || this.recipient.kind !== 'dot') throw new Error('recipient_conflict');
+    const expected = dotBinding ? parseDotBinding(dotBinding) : this.dotBinding || null;
+    const url = expected?.dotUrl || requested.dotUrl || 'https://chatgpt.com/';
+    const current = await this.getUrl();
+    if (current !== url) await this.page.navigate(url);
+    const deadline = Date.now() + timeoutMs;
+    let opened = !!expected || !!requested.dotUrl;
+    while (Date.now() < deadline) {
+      this.#throwIfStopRequested();
+      if (!opened) {
+        const entry = await this.#eval(dotPageScript({ action: 'open' }));
+        opened = entry?.state === 'opening';
+      }
+      if (opened) {
+        try {
+          const observation = await this.inspectDotPage({ binding: expected });
+          if (expected && !sameDotBinding(expected, observation.binding)) throw new Error('dot_binding_mismatch');
+          if (requested.dotUrl && new URL(requested.dotUrl).pathname !== new URL(observation.binding.dotUrl).pathname) throw new Error('dot_binding_mismatch');
+          this.dotBinding = observation.binding;
+          return observation.binding;
+        } catch (error) {
+          if (error.message !== 'dot_binding_unconfirmed') throw error;
+        }
+      }
+      await sleep(200);
+    }
+    throw new Error('dot_binding_unconfirmed');
+  }
+
+  async readDotMessages({ after = undefined, limit = 32, maxChars = 20_000, binding = this.dotBinding } = {}) {
+    if (!binding) throw new Error('dot_binding_unconfirmed');
+    const cursor = after === undefined ? null : parseDotCursor(after);
+    if (cursor && !sameDotBinding(cursor.binding, binding)) throw new Error('dot_binding_mismatch');
+    let observation;
+    const deadline = Date.now() + 2_000;
+    while (true) {
+      try {
+        observation = await this.inspectDotPage({ action: 'read', binding, ...(cursor ? { after: cursor.messageId } : {}), limit, maxChars });
+        break;
+      } catch (error) {
+        if (error.message !== 'dot_cursor_unavailable' || !cursor || Date.now() >= deadline) throw error;
+        await this.inspectDotPage({ action: 'history', binding });
+        await sleep(200);
+      }
+    }
+    const messages = observation.received;
+    if (!Array.isArray(messages)) throw new Error('dot_binding_unconfirmed');
+    const last = messages.at(-1)?.id ?? cursor?.messageId ?? observation.messages.filter((message) => message.deliveryState === '' && !message.deleted && !observation.unconfirmedRequestIds.includes(message.requestId || message.id)).at(-1)?.id ?? null;
+    return parseDotMessageBatch({ binding: observation.binding, messages, cursor: encodeDotCursor(observation.binding, last), hasMore: observation.hasMore });
+  }
+
+  async talkDot({ text, binding, timeoutMs = 30_000, recordDotSubmission, recordDotCursor } = {}) {
+    if (this.recipient.kind !== 'dot') throw new Error('recipient_conflict');
+    if (typeof text !== 'string' || !text.trim() || text.length > 200_000) throw new Error('invalid_dot_request');
+    if (typeof recordDotSubmission !== 'function' || typeof recordDotCursor !== 'function') throw new Error('invalid_dot_submission');
+    this.currentRun = { kind: 'send', requested: false };
+    try {
+      this.#throwIfStopRequested();
+      const before = await this.inspectDotPage({ binding });
+      if (before.draftChars !== 0 || before.uploadCount !== 0) throw new Error('dot_draft_conflict');
+      if (before.historyAfter !== null) throw new Error('dot_cursor_unavailable');
+      const canonical = before.messages.filter((message) => message.deliveryState === '' && !before.unconfirmedRequestIds.includes(message.requestId || message.id));
+      if (canonical.length !== before.messages.length) throw new Error('dot_delivery_unconfirmed');
+      const cursor = encodeDotCursor(before.binding, canonical.at(-1)?.id ?? null);
+      await recordDotCursor(cursor);
+      const requestId = crypto.randomUUID();
+      await recordDotSubmission({ state: 'unknown', userMessageId: null, requestId });
+      this.#throwIfStopRequested();
+      const submitted = await this.inspectDotPage({ action: 'submit', binding: before.binding, text, requestId });
+      if (submitted.submitted !== true) throw new Error('dot_delivery_unconfirmed');
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        this.#throwIfStopRequested();
+        const observation = await this.inspectDotPage({ binding: before.binding });
+        const matches = observation.messages.filter((message) => message.direction === 'outgoing' && message.requestId === requestId);
+        if (matches.length > 1) throw new Error('dot_delivery_unconfirmed');
+        const accepted = matches[0];
+        if (accepted && accepted.id !== requestId && accepted.deliveryState === '' && !observation.unconfirmedRequestIds.includes(requestId)) {
+          await recordDotSubmission({ state: 'submitted', userMessageId: accepted.id, requestId });
+          return { userMessageId: accepted.id, cursor };
+        }
+        await sleep(200);
+      }
+      throw new Error('dot_delivery_unconfirmed');
+    } finally {
+      this.currentRun = null;
+    }
   }
 
   #transcriptDependencySelector(dependency, fallback = null) {
