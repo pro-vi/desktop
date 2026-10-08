@@ -137,3 +137,13 @@ test('Dot empty reads retain the exact valid opaque cursor representation', asyn
   const cursor = Buffer.from(JSON.stringify({ messageId: null, binding })).toString('base64url');
   assert.equal((await controller.readDotMessages({ after: cursor })).cursor, cursor);
 });
+
+test('Dot empty-position cursor refuses missing older-history metadata', async () => {
+  const fixture = createNativeDotPage();
+  const controller = controllerFor(fixture);
+  await controller.prepareDotEntry();
+  fixture.state.before = undefined;
+  fixture.state.messages.push(fixture.incoming('visible'));
+  fixture.state.history = () => {};
+  await assert.rejects(controller.readDotMessages({ after: encodeDotCursor(binding) }), /dot_cursor_unavailable/);
+});

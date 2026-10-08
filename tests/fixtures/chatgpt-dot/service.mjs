@@ -20,6 +20,7 @@ export async function createDotServiceFixture({ native = createNativeDotPage(), 
     browserBackend: { createSession: async () => ({ page: native.page, presenter: {}, close: async () => {}, isClosed: () => false }) },
     createController: async ({ recipient }) => recipient.kind === 'dot' ? new ChatGPTController({ vendorId: 'chatgpt', recipient, page: native.page, selectors: {} }) : {
       getUrl: async () => 'https://chatgpt.com/c/fixture-chat',
+      send: async () => { native.state.chatInputCount++; return { sent: true, conversationUrl: 'https://chatgpt.com/c/fixture-chat' }; },
       query: async () => ({ text: 'ordinary Chat response', meta: { completionEvidence: { source: 'assistant-node', observedAt: Date.now() } } }),
       prepareChatEntry: async () => {}, ensureReady: async () => ({ ok: true })
     }

@@ -878,7 +878,8 @@ for (const [operation, description] of [
       }
       if (operation !== 'talk' || !data?.runId) throw error;
       const dot = parseDotRunFields(data);
-      return { content: [{ type: 'text', text: `Dot message delivery unconfirmed. runId=${data.runId} state=${dot.dotSubmission.state}. Check the recorded delivery before deciding what to send next; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code }, isError: true };
+      const status = dot.dotSubmission.state === 'submitted' ? (code === 'run_status_unconfirmed' ? 'Dot message delivered; final run status unconfirmed.' : `Dot message delivered; operation failed (${code}).`) : dot.dotSubmission.state === 'unknown' ? 'Dot message delivery unconfirmed.' : 'Dot message not submitted.';
+      return { content: [{ type: 'text', text: `${status} runId=${data.runId} state=${dot.dotSubmission.state}. Keep the recorded checkpoint; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code }, isError: true };
     }
   });
 }

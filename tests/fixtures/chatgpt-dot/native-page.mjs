@@ -3,7 +3,7 @@ import vm from 'node:vm';
 export const binding = Object.freeze({ dotUrl: 'https://chatgpt.com/dots/fixture-conversation', conversationId: 'fixture-conversation', roomId: 'fixture-room', peerAeonId: 'fixture-peer', accountKey: 'fixture-account' });
 
 export function createNativeDotPage({ settle = true, initial = [] } = {}) {
-  const state = { messages: [...initial], inputCount: 0, texts: [], draft: '', attachments: [], loaded: true, after: null, before: null, unconfirmed: [], roomId: binding.roomId, peer: binding.peerAeonId, account: binding.accountKey, beforeSubmit: null, history: null };
+  const state = { messages: [...initial], inputCount: 0, chatInputCount: 0, texts: [], draft: '', attachments: [], loaded: true, after: null, before: null, unconfirmed: [], roomId: binding.roomId, peer: binding.peerAeonId, account: binding.accountKey, beforeSubmit: null, history: null };
   const editor = { get textContent() { return state.draft; }, getBoundingClientRect: () => ({ width: 20, height: 20 }), closest: () => null };
   const services = {
     conversations: { timeline: () => ({ getSnapshot: () => ({ messages: state.messages, loaded: state.loaded, cursors: { after: state.after, before: state.before } }) }) },

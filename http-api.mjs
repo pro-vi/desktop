@@ -14,7 +14,6 @@ import {
   parseDotOperationRequest,
   parseDotCursor,
   parseDotMessageBatch,
-  encodeDotCursor,
   parseDotSubmission,
   parseDotRunFields,
   sameDotBinding
@@ -1154,6 +1153,13 @@ export function startHttpApi({
     return key ? normalizePersistedChatGptKeyMeta(keyMetaByKey[key]) : null;
   }
 
+  const assertChatTarget = async (body, requestUrl) => {
+    await projectsReady;
+    const key = body?.key ? String(body.key).trim() : null;
+    const tabId = (body?.tabId ? String(body.tabId).trim() : null) || getTabIdFromUrl(requestUrl);
+    if ((key && getPersistedKeyMeta(key)?.recipient?.kind === 'dot') || (tabId && getTabMeta(tabs, tabId)?.recipient?.kind === 'dot')) throw new Error('recipient_conflict');
+  };
+
   // Per-route tool usage: call count, error count, and cumulative response
   // bytes per HTTP route, persisted to tool-usage.json so how agents use the
   // API stays measurable across restarts without transcripts. responseBytes
@@ -1916,8 +1922,7 @@ export function startHttpApi({
     projectUrl,
     imageGeneration,
     modeIntent,
-    modelIntent,
-    recipient = undefined
+    modelIntent
   }) => ({
     prompt: String(prompt || ''),
     promptPrefix: String(promptPrefix || ''),
@@ -1939,7 +1944,6 @@ export function startHttpApi({
     imageGeneration: !!imageGeneration,
     modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null }),
     modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
-    ...(recipient?.kind === 'dot' ? { recipient } : {})
   });
 
   const logicalResearchRequest = ({
@@ -3093,15 +3097,18 @@ export function startHttpApi({
     return runsSnapshot({ includeArchived, limit });
   };
 
-  const withDotTarget = async (body, operation, callback, { runId = null } = {}) => {
+  const withDotTarget = async (body, operation, callback, { expectedBinding = null } = {}) => {
     await projectsReady;
     const recipient = parseChatGptRecipient({ kind: 'dot', ...(body.dotUrl ? { dotUrl: body.dotUrl } : {}) });
     const key = body.key || derivedDotKey(recipient.dotUrl);
     const saved = getPersistedKeyMeta(key);
     if (Object.hasOwn(keyMetaByKey, key) && saved?.recipient?.kind !== 'dot') throw new Error('recipient_conflict');
     const cursor = body.after ? parseDotCursor(body.after) : null;
+    if (expectedBinding) expectedBinding = parseDotBinding(expectedBinding);
+    if (expectedBinding && saved?.dotBinding && !sameDotBinding(expectedBinding, saved.dotBinding)) throw new Error('dot_binding_mismatch');
+    if (expectedBinding && cursor && !sameDotBinding(expectedBinding, cursor.binding)) throw new Error('dot_binding_mismatch');
     if (cursor && saved?.dotBinding && !sameDotBinding(cursor.binding, saved.dotBinding)) throw new Error('dot_binding_mismatch');
-    const op = { id: runId || crypto.randomUUID(), kind: operation, source: requestSourceForBody(body), key, tabId: null, startedAt: Date.now(), phase: 'resolving_tab' };
+    const op = { id: crypto.randomUUID(), kind: operation, source: requestSourceForBody(body), key, tabId: null, startedAt: Date.now(), phase: 'resolving_tab' };
     const heldScopes = new Set();
     reserveOperationScopes({ heldScopes, scopes: [`key:${key}`], operation: op });
     let tabId = null;
@@ -3113,14 +3120,14 @@ export function startHttpApi({
       reserveOperationScopes({ heldScopes, scopes: scopesForListedTab(tabId), operation: op, tabId });
       const controller = tabs.getControllerById(tabId);
       if (operation === 'send') {
-        await createRunRecord({ ...op, status: 'running', vendorId: 'chatgpt', recipient, dotBinding: saved?.dotBinding || null, dotSubmission: initialDotSubmission(), dotCursor: null, logicalRequest: { operation: 'dot-talk', ...body }, materializedReplay: { text: body.text } });
+        await createRunRecord({ ...op, status: 'running', vendorId: 'chatgpt', recipient, dotBinding: expectedBinding || saved?.dotBinding || null, dotSubmission: initialDotSubmission(), dotCursor: null, logicalRequest: { operation: 'dot-talk', ...body }, materializedReplay: { text: body.text } });
         runCreated = true;
         setActiveQuery(tabId, { ...op, recipient, vendorId: 'chatgpt' });
       }
       return await runExclusive(controller, async () => {
         if (operation === 'send') assertProviderSendAllowed(op.id);
-        const binding = parseDotBinding(await controller.prepareDotEntry({ recipient, dotBinding: saved?.dotBinding || cursor?.binding || null, timeoutMs: Math.min(body.timeoutMs || 30_000, 30_000) }));
-        if ((saved?.dotBinding && !sameDotBinding(binding, saved.dotBinding)) || (cursor && !sameDotBinding(binding, cursor.binding))) throw new Error('dot_binding_mismatch');
+        const binding = parseDotBinding(await controller.prepareDotEntry({ recipient, dotBinding: expectedBinding || saved?.dotBinding || cursor?.binding || null, timeoutMs: Math.min(body.timeoutMs || 30_000, 30_000) }));
+        if ((expectedBinding && !sameDotBinding(binding, expectedBinding)) || (saved?.dotBinding && !sameDotBinding(binding, saved.dotBinding)) || (cursor && !sameDotBinding(binding, cursor.binding))) throw new Error('dot_binding_mismatch');
         if (operation === 'send') {
           reserveOperationScopes({ heldScopes, scopes: [dotConversationScope(binding)], operation: op, tabId });
           await patchRunRecord(op.id, { dotBinding: binding });
@@ -3131,7 +3138,11 @@ export function startHttpApi({
     } catch (error) {
       if (runCreated) {
         const outcome = outcomeFromError(error, op);
-        if (getRunRecordOrThrow(op.id).dotSubmission.state !== 'not-submitted') {
+        const submission = getRunRecordOrThrow(op.id).dotSubmission;
+        if (submission.state === 'submitted') {
+          outcome.label = 'Dot message delivered';
+          outcome.detail = 'The accepted message checkpoint is retained. Local observation ended without resubmission.';
+        } else if (submission.state === 'unknown') {
           outcome.label = 'Dot delivery unconfirmed';
           outcome.detail = 'The recorded delivery checkpoint is retained. Do not resend automatically.';
         }
@@ -3139,11 +3150,11 @@ export function startHttpApi({
         catch {
           unconfirmedRunTerminals.add(op.id);
           error = new Error('run_status_unconfirmed');
-          outcome.label = 'Dot run status unconfirmed';
+          outcome.label = submission.state === 'submitted' ? 'Dot message delivered; run status unconfirmed' : 'Dot run status unconfirmed';
           outcome.detail = 'The last durable delivery checkpoint is retained.';
         }
         setLastOutcome(tabId, outcome);
-        error.data = { ...(error.data || {}), runId: op.id, ...parseDotRunFields(getRunRecordOrThrow(op.id)) };
+        error.data = { ...(error.data || {}), runId: op.id, ...parseDotRunFields(runStore.get(op.id)) };
       }
       throw error;
     } finally {
@@ -3152,7 +3163,7 @@ export function startHttpApi({
     }
   };
 
-  const talkDotAction = async (body) => await withDotTarget(body, 'send', async ({ controller, binding, op, tabId, key }) => {
+  const talkDotAction = async (body, expectedBinding = null) => await withDotTarget(body, 'send', async ({ controller, binding, op, tabId, key }) => {
     const recordDotSubmission = async (value) => {
       assertProviderSendAllowed(op.id);
       const next = parseDotSubmission(value);
@@ -3175,7 +3186,7 @@ export function startHttpApi({
     await durableRunFinalizeFromOutcome(op.id, outcome);
     setLastOutcome(tabId, outcome);
     return { ok: true, runId: op.id, tabId, key, ...parseDotRunFields(getRunRecordOrThrow(op.id)) };
-  });
+  }, { expectedBinding });
 
   const readDotAction = async (body) => await withDotTarget(body, 'dot-read', async ({ controller, binding }) => parseDotMessageBatch(await controller.readDotMessages({ binding, after: body.after, limit: body.limit || 32, maxChars: body.maxChars || 20_000 })));
 
@@ -3189,7 +3200,7 @@ export function startHttpApi({
         if (!sameDotBinding(binding, fields.dotBinding)) throw new Error('dot_binding_mismatch');
         if (show) await onShow?.({ tabId });
         return { ok: true, tabId, run };
-      });
+      }, { expectedBinding: fields.dotBinding });
     }
     const savedMeta = getPersistedKeyMeta(run.key);
     const imageGeneration = !!run?.logicalRequest?.imageGeneration;
@@ -3264,7 +3275,7 @@ export function startHttpApi({
       if (fields.dotSubmission.state === 'submitted') return { ok: true, runId: original.id, ...fields };
       if (fields.dotSubmission.state !== 'not-submitted') throw new Error('dot_delivery_unconfirmed');
       if (!original.materializedReplay?.text) throw new Error('run_not_retryable');
-      return await talkDotAction(parseDotOperationRequest({ key: original.key, ...(fields.dotBinding ? { dotUrl: fields.dotBinding.dotUrl } : {}), text: original.materializedReplay.text, ...(timeoutMs ? { timeoutMs } : {}), source }, 'talk', { allowSource: true }));
+      return await talkDotAction(parseDotOperationRequest({ key: original.key, ...(fields.dotBinding ? { dotUrl: fields.dotBinding.dotUrl } : {}), text: original.materializedReplay.text, ...(timeoutMs ? { timeoutMs } : {}), source }, 'talk', { allowSource: true }), fields.dotBinding);
     }
     const savedMeta = getPersistedKeyMeta(original.key);
     const imageGeneration = !!original?.logicalRequest?.imageGeneration;
@@ -3992,6 +4003,7 @@ export function startHttpApi({
 
       if (url.pathname === '/navigate' && req.method === 'POST') {
         const body = await parseBody(req);
+        await assertChatTarget(body, url);
         const to = String(body.url || '').trim();
         if (!to) return sendJson(res, 400, { error: 'missing_url' });
         const { scope, scopes: initialScopes } = requestOperationScopes(body, { requestUrl: url });
@@ -4027,6 +4039,7 @@ export function startHttpApi({
 
       if (url.pathname === '/ensure-ready' && req.method === 'POST') {
         const body = await parseBody(req);
+        await assertChatTarget(body, url);
         const timeoutMs = positiveIntOr(body.timeoutMs, 10 * 60_000, 30 * 60_000);
         const tabId = await resolveTab({ tabs, defaultTabId, body, url, showTabsByDefault: governor.showTabsByDefault, createIfMissing: true, vendors });
         const controller = tabs.getControllerById(tabId);
@@ -4038,6 +4051,7 @@ export function startHttpApi({
         await projectsReady;
         await runsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
+        await assertChatTarget(body, url);
         if (parseChatGptRecipient(body?.recipient).kind !== 'chat') throw new Error('recipient_conflict');
         const timeoutMs = researchTimeoutMs(body.timeoutMs, 45 * 60_000);
         const prompt = String(body.prompt || '');
@@ -4274,11 +4288,11 @@ export function startHttpApi({
           catch (error) {
             if (error.message !== 'tab_busy') throw error;
           }
-          if (batch?.messages.length || batch?.hasMore) return sendJson(res, 200, batch);
           if (Date.now() >= deadline) {
             const cursor = parseDotCursor(body.after);
             return sendJson(res, 200, parseDotMessageBatch({ binding: cursor.binding, messages: [], cursor: body.after, hasMore: false, timedOut: true }));
           }
+          if (batch?.messages.length || batch?.hasMore) return sendJson(res, 200, batch);
           await new Promise((resolve) => {
             const timer = setTimeout(finish, Math.min(200, Math.max(1, deadline - Date.now())));
             function finish() { clearTimeout(timer); abortController.signal.removeEventListener('abort', finish); resolve(); }
@@ -4451,8 +4465,7 @@ export function startHttpApi({
               projectUrl,
               imageGeneration,
               modeIntent,
-              modelIntent,
-              recipient
+              modelIntent
             })
           });
           runCreated = true;
@@ -4691,6 +4704,7 @@ export function startHttpApi({
         await projectsReady;
         await runsReady;
         const body = await parseBody(req, { maxBytes: 5_000_000 });
+        await assertChatTarget(body, url);
         if (parseChatGptRecipient(body?.recipient).kind !== 'chat') throw new Error('recipient_conflict');
         const timeoutMs = positiveIntOr(body.timeoutMs, 3 * 60_000, 30 * 60_000);
         const text = String(body.text || '');
@@ -5020,6 +5034,7 @@ export function startHttpApi({
       if (url.pathname === '/read-page' && req.method === 'POST') {
         await projectsReady;
         const body = await parseBody(req);
+        await assertChatTarget(body, url);
         const maxChars = positiveIntOr(body.maxChars, 200_000, 1_000_000);
         const { scope, scopes: initialScopes } = requestOperationScopes(body, { requestUrl: url });
         const op = {
@@ -5100,6 +5115,7 @@ export function startHttpApi({
       if (url.pathname === '/read-conversation' && req.method === 'POST') {
         await projectsReady;
         const body = await parseBody(req);
+        await assertChatTarget(body, url);
         const maxChars = positiveIntOr(body.maxChars, 200_000, 1_000_000);
         // Entry by URL stays read-only: prepareChatEntry validates the target and
         // navigates, and never touches the composer or submit path, so capturing a

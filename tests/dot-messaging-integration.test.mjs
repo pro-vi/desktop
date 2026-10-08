@@ -157,3 +157,130 @@ test('Dot sends through different keys serialize by native room until delivery s
   assert.equal((await next).status, 200);
   assert.deepEqual(native.state.texts, ['first', 'after settlement']);
 });
+
+test('Dot HTTP wait rejects a capture that completes after its deadline', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  const initial = await fixture.call('/dot/read', {});
+  const evaluate = fixture.native.page.evaluate;
+  fixture.native.page.evaluate = async (script) => {
+    if (script.includes('"action":"read"')) {
+      await pause(50);
+      fixture.native.state.messages.push(fixture.native.incoming('after-deadline'));
+    }
+    return await evaluate(script);
+  };
+  const waited = await fixture.call('/dot/wait', { after: initial.data.cursor, timeoutMs: 5 });
+  assert.equal(waited.data.timedOut, true);
+  assert.deepEqual(waited.data.messages, []);
+  assert.equal(waited.data.cursor, initial.data.cursor);
+});
+
+test('Dot caller deadline survives a response that blocks timer delivery', async () => {
+  const cursor = encodeDotCursor(binding);
+  const result = await waitForDotMessages({ conn: {}, body: { after: cursor, timeoutMs: 5 }, request: async () => {
+    const started = Date.now(); while (Date.now() - started < 15) {}
+    return { binding, messages: [{ id: 'late', sender: 'dot', text: 'late', createdAt: '', hasAttachments: false, taskCardOnly: false }], cursor: encodeDotCursor(binding, 'late'), hasMore: false };
+  } });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.cursor, cursor);
+});
+
+test('Dot pre-input retry preserves the run binding when key persistence failed', async (t) => {
+  const native = createNativeDotPage();
+  let fixture = await createDotServiceFixture({ native });
+  t.after(() => fixture.close({ remove: true }));
+  const keyFile = `${fixture.stateDir}/projects.json`;
+  await fs.mkdir(keyFile);
+  const rejected = await fixture.call('/dot/talk', { text: 'original target' });
+  assert.equal(rejected.status, 500);
+  assert.equal(native.state.inputCount, 0);
+  const runs = await fixture.call('/runs/list', {});
+  const original = runs.data.runs[0];
+  assert.equal(original.dotSubmission.state, 'not-submitted');
+  assert.equal(original.dotBinding.accountKey, binding.accountKey);
+  await fs.rmdir(keyFile);
+  const stateDir = fixture.stateDir;
+  await fixture.close({ remove: false });
+  native.state.account = 'changed-account';
+  fixture = await createDotServiceFixture({ native, stateDir });
+  for (const route of ['/runs/open', '/runs/retry']) {
+    const retried = await fixture.call(route, { runId: original.id });
+    assert.equal(retried.data.error, 'dot_binding_mismatch');
+  }
+  assert.equal(native.state.inputCount, 0);
+});
+
+test('Dot after-input storage failure returns its recovery handle and cannot replay', async (t) => {
+  const native = createNativeDotPage();
+  let fixture = await createDotServiceFixture({ native });
+  t.after(() => fixture.close({ remove: true }));
+  const evaluate = native.page.evaluate;
+  let broken = false;
+  native.page.evaluate = async (script) => {
+    const result = await evaluate(script);
+    if (!broken && script.includes('"action":"submit"')) {
+      broken = true;
+      await fs.rename(`${fixture.stateDir}/runs`, `${fixture.stateDir}/saved-runs`);
+      await fs.writeFile(`${fixture.stateDir}/runs`, 'fail checkpoint after native input');
+    }
+    return result;
+  };
+  const talk = await fixture.call('/dot/talk', { text: 'uncertain checkpoint' });
+  assert.equal(talk.status, 503);
+  assert.equal(native.state.inputCount, 1);
+  assert.equal(typeof talk.data.data.runId, 'string');
+  assert.equal(talk.data.data.dotSubmission.state, 'unknown');
+  assert.equal(typeof talk.data.data.dotCursor, 'string');
+  await fs.unlink(`${fixture.stateDir}/runs`);
+  await fs.rename(`${fixture.stateDir}/saved-runs`, `${fixture.stateDir}/runs`);
+  const stateDir = fixture.stateDir;
+  await fixture.close({ remove: false });
+  fixture = await createDotServiceFixture({ native, stateDir });
+  const retry = await fixture.call('/runs/retry', { runId: talk.data.data.runId });
+  assert.equal(retry.data.error, 'dot_delivery_unconfirmed');
+  assert.equal(native.state.inputCount, 1);
+});
+
+test('Ordinary requests cannot replace an expired saved Dot key with Chat', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  await fixture.call('/dot/read', {});
+  const dot = fixture.tabs.listTabs().find((tab) => tab.key === 'personal-dot');
+  await fixture.tabs.closeTab(dot.id);
+  const count = fixture.tabs.listTabs().length;
+  for (const route of ['/query', '/send', '/research', '/navigate', '/ensure-ready', '/read-page', '/read-conversation']) {
+    const result = await fixture.call(route, { key: 'personal-dot', text: 'Chat request', prompt: 'Chat request', url: 'https://chatgpt.com/' });
+    assert.equal(result.data.error, 'recipient_conflict', route);
+    assert.equal(fixture.tabs.listTabs().length, count, route);
+  }
+  assert.equal(fixture.native.state.chatInputCount, 0);
+  assert.equal((await fixture.call('/dot/read', {})).status, 200);
+});
+
+for (const checkpoint of ['unknown', 'submitted']) {
+  test(`Dot MCP storage failure preserves the ${checkpoint} delivery checkpoint`, async (t) => {
+    const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+    const client = await fixture.connect(); t.after(() => client.close());
+    await fixture.call('/dot/read', {});
+    const tab = fixture.tabs.listTabs().find((row) => row.key === 'personal-dot');
+    const controller = fixture.tabs.getControllerById(tab.id);
+    const breakStorage = async () => {
+      await fs.rename(`${fixture.stateDir}/runs`, `${fixture.stateDir}/saved-runs`);
+      await fs.writeFile(`${fixture.stateDir}/runs`, 'fail final persistence');
+    };
+    if (checkpoint === 'submitted') {
+      const inspect = controller.inspectDotBinding.bind(controller);
+      controller.inspectDotBinding = async () => { const observed = await inspect(); await breakStorage(); return observed; };
+    } else {
+      const evaluate = fixture.native.page.evaluate;
+      fixture.native.page.evaluate = async (script) => { const result = await evaluate(script); if (script.includes('"action":"submit"')) await breakStorage(); return result; };
+    }
+    const result = await client.callTool({ name: 'agentify_dot_talk', arguments: { text: 'MCP checkpoint failure' } });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error, 'run_status_unconfirmed');
+    assert.equal(result.structuredContent.dotSubmission.state, checkpoint);
+    assert.equal(typeof result.structuredContent.runId, 'string');
+    assert.equal(fixture.native.state.inputCount, 1);
+    if (checkpoint === 'submitted') assert.match(result.content[0].text, /message delivered; final run status unconfirmed/);
+    else assert.match(result.content[0].text, /delivery unconfirmed/);
+  });
+}

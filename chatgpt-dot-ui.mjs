@@ -65,6 +65,7 @@ function observeDotPage(options) {
   const composerState = services.composer?.state?.getSnapshot?.();
   if (!snapshot || snapshot.loaded !== true || !Array.isArray(snapshot.messages) || !record(snapshot.cursors) || !Object.hasOwn(snapshot.cursors, 'after') || (snapshot.cursors.after !== null && typeof snapshot.cursors.after !== 'string') || !record(composerState) || !Array.isArray(composerState.unconfirmedSends)) return { state: 'unconfirmed' };
   const unconfirmed = composerState.unconfirmedSends.flatMap((entry) => entry?.request?.roomId === room.id && typeof entry.request.requestId === 'string' ? [entry.request.requestId] : []);
+  const unconfirmedIds = new Set(unconfirmed);
   const messages = [];
   for (const message of snapshot.messages) {
     if (!record(message) || typeof message.id !== 'string' || message.roomId !== room.id || typeof message.deliveryState !== 'string') return { state: 'unconfirmed' };
@@ -105,13 +106,13 @@ function observeDotPage(options) {
     if (snapshot.cursors.after !== null) return { state: 'cursor-unavailable' };
     let start = 0;
     if (options.after !== null && options.after !== undefined) {
-      const anchor = messages.findIndex((message) => message.id === options.after && message.deliveryState === '' && !unconfirmed.includes(message.requestId || message.id));
+      const anchor = messages.findIndex((message) => message.id === options.after && message.deliveryState === '' && !unconfirmedIds.has(message.requestId || message.id));
       if (anchor < 0) return { state: 'cursor-unavailable' };
       start = anchor + 1;
     }
-    if (options.after === null && snapshot.cursors.before != null) return { state: 'cursor-unavailable' };
+    if (options.after === null && (!Object.hasOwn(snapshot.cursors, 'before') || snapshot.cursors.before !== null)) return { state: 'cursor-unavailable' };
     const remaining = messages.slice(start).filter((message) => message.direction === 'incoming' && !message.deleted);
-    if (remaining.some((message) => message.deliveryState !== '' || unconfirmed.includes(message.requestId || message.id))) return { state: 'unconfirmed' };
+    if (remaining.some((message) => message.deliveryState !== '' || unconfirmedIds.has(message.requestId || message.id))) return { state: 'unconfirmed' };
     let candidates = remaining;
     if (options.after === undefined) candidates = candidates.slice(-options.limit);
     let chars = 0;
@@ -166,9 +167,10 @@ export function parseDotPageObservation(value, { binding = null } = {}) {
     if (typeof value.submitted !== 'boolean') fail();
     result.submitted = value.submitted;
   }
+  const unconfirmed = new Set(value.unconfirmedRequestIds);
   if (Object.hasOwn(value, 'received')) {
     if (!Array.isArray(value.received) || typeof value.hasMore !== 'boolean') fail();
-    if (value.received.some((message) => !messages.some((native) => native.id === message?.id && native.direction === 'incoming' && native.deliveryState === '' && !native.deleted && !value.unconfirmedRequestIds.includes(native.requestId || native.id)))) fail();
+    if (value.received.some((message) => !messages.some((native) => native.id === message?.id && native.direction === 'incoming' && native.deliveryState === '' && !native.deleted && !unconfirmed.has(native.requestId || native.id)))) fail();
     result.received = value.received;
     result.hasMore = value.hasMore;
   }

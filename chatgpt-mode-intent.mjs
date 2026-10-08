@@ -64,6 +64,7 @@ export function resolveChatGptChatProfile({
   savedMeta = null
 } = {}) {
   const normalizedSavedMeta = normalizePersistedChatGptKeyMeta(savedMeta);
+  if (normalizedSavedMeta.recipient?.kind === 'dot') throw new Error('recipient_conflict');
   const normalizedModelIntent = normalizeChatGptModelIntent(modelIntent, { fallback: null });
   const resolved = resolveChatGptLocation({
     chatUrl: trimOrNull(chatUrl),

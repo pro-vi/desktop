@@ -18,7 +18,7 @@ export async function waitForDotMessages({ conn, body, signal, request = request
       const response = Number.isFinite(remaining) ? await Promise.race([running, new Promise((resolve) => {
         timer = setTimeout(() => { expired = true; controller.abort(); resolve(null); }, remaining);
       })]) : await running;
-      if (expired) return { binding: input.binding, messages: [], cursor: body.after, hasMore: false, timedOut: true };
+      if (expired || Date.now() >= deadline) return { binding: input.binding, messages: [], cursor: body.after, hasMore: false, timedOut: true };
       const batch = parseDotMessageBatch(response);
       if (!sameDotBinding(input.binding, batch.binding)) throw new Error('dot_binding_mismatch');
       if (batch.messages.length || batch.hasMore) return batch;
