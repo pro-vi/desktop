@@ -1156,8 +1156,9 @@ export function startHttpApi({
   const assertChatTarget = async (body, requestUrl) => {
     await projectsReady;
     const key = body?.key ? String(body.key).trim() : null;
-    const tabId = (body?.tabId ? String(body.tabId).trim() : null) || getTabIdFromUrl(requestUrl);
-    if ((key && getPersistedKeyMeta(key)?.recipient?.kind === 'dot') || (tabId && getTabMeta(tabs, tabId)?.recipient?.kind === 'dot')) throw new Error('recipient_conflict');
+    const tabId = advisoryTabIdForRequest({ tabs, defaultTabId, body, url: requestUrl, vendors });
+    const keyedTab = key ? (tabs.listTabs?.() || []).find((row) => row?.key === key) : null;
+    if ((key && getPersistedKeyMeta(key)?.recipient?.kind === 'dot') || (keyedTab?.recipient?.kind === 'dot') || (tabId && getTabMeta(tabs, tabId)?.recipient?.kind === 'dot')) throw new Error('recipient_conflict');
   };
 
   // Per-route tool usage: call count, error count, and cumulative response

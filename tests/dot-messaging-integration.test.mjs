@@ -284,3 +284,21 @@ for (const checkpoint of ['unknown', 'submitted']) {
     else assert.match(result.content[0].text, /delivery unconfirmed/);
   });
 }
+
+test('Ordinary key-only requests reject a live Dot tab after failed key persistence', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  const keyFile = `${fixture.stateDir}/projects.json`;
+  await fs.mkdir(keyFile);
+  assert.equal((await fixture.call('/dot/talk', { text: 'prepare target' })).status, 500);
+  await fs.rmdir(keyFile);
+  const dot = fixture.tabs.listTabs().find((tab) => tab.key === 'personal-dot');
+  assert.equal(dot.recipient.kind, 'dot');
+  for (const route of ['/query', '/send', '/research', '/navigate', '/ensure-ready', '/read-page', '/read-conversation']) {
+    const result = await fixture.call(route, { key: 'personal-dot', text: 'ordinary request', prompt: 'ordinary request', url: 'https://chatgpt.com/c/fixture-chat' });
+    assert.equal(result.data.error, 'recipient_conflict', route);
+    assert.equal(await fixture.native.page.getUrl(), binding.dotUrl, route);
+  }
+  assert.equal(fixture.native.state.inputCount, 0);
+  assert.equal(fixture.native.state.chatInputCount, 0);
+  assert.equal((await fixture.call('/dot/read', {})).status, 200);
+});
