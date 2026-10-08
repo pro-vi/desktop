@@ -40,7 +40,8 @@ test('run-store: Dot identity and delivery survive summary, restart, and interru
   for (const fields of [
     { dotBinding, dotSubmission: { state: 'unknown', userMessageId: null, requestId: 'fixture-request' } },
     { recipient: { kind: 'chat' }, dotBinding },
-    { logicalRequest: { recipient } }
+    { logicalRequest: { recipient } },
+    { logicalRequest: { operation: 'dot-talk', text: 'fixture' }, materializedReplay: { text: 'fixture' } }
   ]) {
     await assert.rejects(restarted.create({ id: 'lost-dot-recipient', kind: 'send', status: 'running', ...fields }), /invalid_dot_run/);
   }

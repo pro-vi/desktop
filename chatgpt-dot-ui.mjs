@@ -3,10 +3,10 @@ import { parseDotBinding, sameDotBinding } from './chatgpt-recipient.mjs';
 // Observed on 2026-10-07 with ChatGPT messaging asset
 // 166137.5a625a2847.js. Component names are minified and are not selectors.
 export function dotPageScript(options = {}) {
-  return `(${observeDotPage.toString()})(${JSON.stringify(options)})`;
+  return `(${runDotPageOperation.toString()})(${JSON.stringify(options)})`;
 }
 
-function observeDotPage(options) {
+function runDotPageOperation(options) {
   const visible = (node) => {
     const rect = node.getBoundingClientRect();
     const style = getComputedStyle(node);

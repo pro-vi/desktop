@@ -87,7 +87,7 @@ test('Dot checkpoint disk failure prevents the native input through the service'
   let broken = false;
   fixture.native.page.evaluate = async (script) => {
     const result = await original(script);
-    if (!broken && script.includes('observeDotPage') && !script.includes('"action"')) {
+    if (!broken && script.includes('runDotPageOperation') && !script.includes('"action"')) {
       broken = true;
       await fs.rename(`${fixture.stateDir}/runs`, `${fixture.stateDir}/saved-runs`);
       await fs.writeFile(`${fixture.stateDir}/runs`, 'prevent run checkpoint');
