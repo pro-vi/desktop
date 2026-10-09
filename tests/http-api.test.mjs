@@ -2105,6 +2105,7 @@ test('http-api: status surfaces active query runtime and stop can cancel it', as
 });
 
 test('http-api: status surfaces source, phase, blocked state, and last outcome for runs', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-runtime-status-'));
   let releaseQuery = null;
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -2132,11 +2133,16 @@ test('http-api: status surfaces source, phase, blocked state, and last outcome f
     tabs,
     defaultTabId: 't0',
     serverId: 'sid-test',
-    stateDir: '/tmp',
+    stateDir,
     getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
     getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
   });
-  t.after(() => server.close());
+  t.after(async () => {
+    releaseQuery?.();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(stateDir, { recursive: true, force: false });
+  });
   const port = server.address().port;
 
   const qPromise = req({
@@ -4905,6 +4911,7 @@ test('http-api: unkeyed run reopen and retry prefer the recorded tab over anothe
 });
 
 test('http-api: same-tab query/send requests are rejected while a run is already active', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-active-tab-'));
   let releaseQuery = null;
   const controller = {
     runExclusive: async (fn) => await fn(),
@@ -4930,11 +4937,16 @@ test('http-api: same-tab query/send requests are rejected while a run is already
     tabs,
     defaultTabId: 't0',
     serverId: 'sid-test',
-    stateDir: '/tmp',
+    stateDir,
     getSettings: async () => ({ maxInflightQueries: 5, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
     getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
   });
-  t.after(() => server.close());
+  t.after(async () => {
+    releaseQuery?.();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(stateDir, { recursive: true, force: false });
+  });
   const port = server.address().port;
 
   const q1 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'first' } });
@@ -8824,6 +8836,7 @@ test('http-api: ensure-ready timeout maps to 408 with details', async (t) => {
 });
 
 test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-active-slots-'));
   let started = 0;
   let release;
   const gate = new Promise((r) => (release = r));
@@ -8862,16 +8875,20 @@ test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) =
     tabs,
     defaultTabId: 't0',
     serverId: 'sid-test',
-    stateDir: '/tmp',
+    stateDir,
     getStatus: async () => ({ ok: true }),
     getSettings: async () => ({ maxInflightQueries: 1, maxQueriesPerMinute: 999, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false })
   });
-  t.after(() => server.close());
+  t.after(async () => {
+    release();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(stateDir, { recursive: true, force: false });
+  });
   const port = server.address().port;
 
   const q1 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q1', prompt: 'hi' } });
-  // Give the server a moment to enter the provider-slot lease.
-  for (let i = 0; i < 50 && started === 0; i++) await new Promise((r) => setTimeout(r, 5));
+  await waitFor(() => started === 1);
 
   const q2 = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'hi2' } });
   assert.equal(q2.res.status, 429);
