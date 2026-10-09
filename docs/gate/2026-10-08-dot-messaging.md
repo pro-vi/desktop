@@ -62,3 +62,24 @@ The revised plan remains active. Final exact-head tests and the stamped fixture
 receipt are emitted by the build handoff; exact-SHA CI remains a publication
 requirement. The architecture decision is recorded in
 [ADR 0016](../adr/0016-separate-dot-delivery-from-message-observation.md).
+
+## Additional local verification (2026-10-09)
+
+The native draft check accepts an absent room entry only in a confirmed Map
+whose empty value matches the visible editor. Missing Maps, malformed entries,
+and foreign drafts still reject submission. Fresh casting and invariance
+rechecks were clear for `8a3ae2d..26d1782`. The pinned asset fallback occurs in
+`renderComposerControls.onTranscriptInsert`; it is not direct editor-render proof.
+
+The three ordinary Chat fixtures now own separate state directories. An owned
+delayed-resolution HTTP probe showed unchecked admission could reverse which
+request took the provider slot (`[429,200]`); checked admission preserved the
+intended first request (`[200,429]`). This establishes the scheduling mechanism,
+not its frequency in the earlier failed run.
+
+A delayed usage write reproduced cleanup residue after HTTP close. At `d54117f`,
+shutdown and owned fixtures await queued persistence before completion or removal.
+The real HTTP/filesystem regression blocks that write, verifies shutdown remains
+pending, then checks durable counts and absence of directory recreation. A broken
+flush produced exactly one intended assertion failure. The affected failure-mode
+recheck is clear; Electron process exit and provider behavior remain unverified.
