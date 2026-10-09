@@ -38,17 +38,19 @@ function runDotPageOperation(options) {
   };
   const accountKeys = [...new Set(ancestors(personal[0]).flatMap((props) => typeof props.accountKey === 'string' && props.accountKey ? [props.accountKey] : []))];
   if (accountKeys.length !== 1) return { state: 'unconfirmed' };
-  const conversationId = decodeURIComponent(route[1]);
   const contexts = [];
   for (const main of [...document.querySelectorAll('main')].filter(visible)) {
     const path = ancestors(main);
-    if (!path.some((props) => props.conversationId === conversationId)) continue;
     const props = path.find((props) => record(props.room) && props.room.id === props.roomId && record(props.services));
-    if (props) contexts.push({ main, ...props });
+    if (!props) continue;
+    const conversationIds = [...new Set(path.flatMap((entry) => entry.roomId === props.room.id && typeof entry.conversationId === 'string' && entry.conversationId ? [entry.conversationId] : []))];
+    if (conversationIds.length !== 1) return { state: 'unconfirmed' };
+    contexts.push({ main, ...props, conversationId: conversationIds[0] });
   }
-  const distinct = new Map(contexts.map((context) => [context.room.id, context]));
+  const distinct = new Map(contexts.map((context) => [JSON.stringify([context.conversationId, context.room.id, context.room.aeon_id]), context]));
   if (distinct.size !== 1) return { state: 'unconfirmed' };
   const context = [...distinct.values()][0];
+  const conversationId = context.conversationId;
   const room = context.room;
   if (typeof room.id !== 'string' || typeof room.aeon_id !== 'string' || !Array.isArray(room.members)) return { state: 'unconfirmed' };
   const peers = room.members.filter((member) => member?.aeon_id === room.aeon_id);

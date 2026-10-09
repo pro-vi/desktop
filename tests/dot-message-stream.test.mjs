@@ -39,6 +39,7 @@ test('Dot binding retains distinct conversation, room, peer, and account identit
   }
   assert.throws(() => parseDotBinding({ ...binding, dotUrl: 'https://chatgpt.com/c/fixture-conversation' }), /invalid_dot_binding/);
   assert.throws(() => parseDotBinding({ ...binding, accountKey: null }), /invalid_dot_binding/);
+  assert.deepEqual(parseDotBinding({ ...binding, dotUrl: 'https://chatgpt.com/dots/fixture-route' }), { ...binding, dotUrl: 'https://chatgpt.com/dots/fixture-route' });
 });
 
 test('Dot operation schemas preserve text bytes and refuse caller observation stamps', () => {

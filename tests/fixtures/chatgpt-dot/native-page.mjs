@@ -24,7 +24,7 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
   const scroller = { scrollHeight: 200, clientHeight: 100, scrollTo: () => state.history?.() };
   const main = { ...visible, querySelectorAll: (selector) => selector === '*' ? [scroller] : [editor] };
   const location = { origin: 'https://chatgpt.com', pathname: '/dots/fixture-conversation', href: binding.dotUrl };
-  const context = vm.createContext({ Map, Set, Date, location, getComputedStyle: (node) => ({ display: 'block', visibility: 'visible', overflowY: node === scroller ? 'auto' : 'visible' }), document: { querySelectorAll: (selector) => selector === 'main' ? [main] : [sidebar] } });
+  const context = vm.createContext({ Map, Set, Date, location, getComputedStyle: (node) => ({ display: 'block', visibility: 'visible', overflowY: node === scroller ? 'auto' : 'visible' }), document: { querySelectorAll: (selector) => selector === 'main' ? state.mainNodes || [main] : [sidebar] } });
   const updateProps = () => {
     const props = { conversationId: binding.conversationId, roomId: state.roomId, room: { id: state.roomId, aeon_id: state.peer, members: [{ id: 'fixture-peer-member', aeon_id: state.peer }, { id: 'fixture-owner', aeon_id: null }] }, services };
     main.__reactProps$fixture = props;
@@ -35,7 +35,7 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
   };
   const page = {
     getUrl: async () => location.href,
-    navigate: async (url) => { location.href = url; location.pathname = new URL(url).pathname; },
+    navigate: async (url) => { const destination = state.navigateRedirect || url; location.href = destination; location.pathname = new URL(destination).pathname; },
     evaluate: async (script) => {
       if (script.includes('"action":"submit"')) state.beforeSubmit?.();
       updateProps();
@@ -43,5 +43,5 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
     }
   };
   const incoming = (id, text = id, extra = {}) => ({ id, text, roomId: state.roomId, senderId: 'fixture-peer-member', senderAeonId: state.peer, self: false, role: 'user', requestId: '', deliveryState: '', createdAt: '2026-10-08T00:00:00Z', attachments: [], ...extra });
-  return { state, page, incoming, services };
+  return { state, page, incoming, services, location, main };
 }

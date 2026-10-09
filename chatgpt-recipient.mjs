@@ -88,7 +88,7 @@ export function parseDotBinding(value) {
   fields(input, ['dotUrl', 'conversationId', 'roomId', 'peerAeonId', 'accountKey'], [], 'invalid_dot_binding');
   const dotUrl = parseDotUrl(input.dotUrl);
   const conversationId = text(input.conversationId, 'invalid_dot_binding');
-  if (new URL(dotUrl).pathname !== `/dots/${encodeURIComponent(conversationId)}`) throw invalid('invalid_dot_binding');
+  if (!/^\/dots\/[^/]+$/.test(new URL(dotUrl).pathname)) throw invalid('invalid_dot_binding');
   return Object.freeze({
     dotUrl,
     conversationId,

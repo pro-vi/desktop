@@ -22,6 +22,55 @@ test('Dot native adapter discovers personal context without display names', asyn
   assert.equal(fixture.state.inputCount, 0);
 });
 
+test('Dot identifies the native conversation when its URL uses another route ID', async () => {
+  const fixture = createNativeDotPage();
+  fixture.location.pathname = '/dots/fixture-route';
+  fixture.location.href = 'https://chatgpt.com/dots/fixture-route';
+  const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot', dotUrl: fixture.location.href }, page: fixture.page, selectors: {} });
+  assert.deepEqual(await controller.prepareDotEntry(), { ...binding, dotUrl: fixture.location.href });
+  const delivered = await talk(controller, { binding: { ...binding, dotUrl: fixture.location.href } });
+  assert.equal(delivered.result.userMessageId, 'accepted-1');
+});
+
+test('Dot accepts a conversation locator redirected to its canonical personal route', async () => {
+  const fixture = createNativeDotPage();
+  fixture.location.href = 'https://chatgpt.com/';
+  fixture.location.pathname = '/';
+  fixture.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-route';
+  const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot', dotUrl: binding.dotUrl }, page: fixture.page, selectors: {} });
+  assert.deepEqual(await controller.prepareDotEntry(), { ...binding, dotUrl: fixture.state.navigateRedirect });
+  assert.equal(fixture.state.inputCount, 0);
+});
+
+test('Dot rejects an unrelated locator redirected to the personal route', async () => {
+  const fixture = createNativeDotPage();
+  fixture.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-route';
+  const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot', dotUrl: 'https://chatgpt.com/dots/unrelated' }, page: fixture.page, selectors: {} });
+  await assert.rejects(controller.prepareDotEntry(), /dot_binding_mismatch/);
+  assert.equal(fixture.state.inputCount, 0);
+});
+
+for (const reversed of [false, true]) {
+  test(`Dot rejects conflicting visible native conversations in ${reversed ? 'reversed' : 'original'} order`, async () => {
+    const fixture = createNativeDotPage();
+    const controller = controllerFor(fixture);
+    await controller.prepareDotEntry();
+    const props = { ...fixture.main.__reactProps$fixture, conversationId: 'conflicting-conversation' };
+    const other = { ...fixture.main, __reactProps$fixture: props, __reactFiber$fixture: { memoizedProps: props, return: null } };
+    fixture.state.mainNodes = reversed ? [other, fixture.main] : [fixture.main, other];
+    await assert.rejects(controller.inspectDotBinding(), /dot_binding_unconfirmed/);
+    assert.equal(fixture.state.inputCount, 0);
+  });
+}
+
+test('Dot accepts duplicated identical native contexts', async () => {
+  const fixture = createNativeDotPage();
+  const controller = controllerFor(fixture);
+  await controller.prepareDotEntry();
+  fixture.state.mainNodes = [fixture.main, { ...fixture.main }];
+  assert.deepEqual(await controller.inspectDotBinding(), binding);
+});
+
 test('Dot native prepared send persists request identity before input and returns delivery only', async () => {
   const fixture = createNativeDotPage();
   const controller = controllerFor(fixture);

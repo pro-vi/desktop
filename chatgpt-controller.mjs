@@ -1075,7 +1075,10 @@ export class ChatGPTController {
         try {
           const observation = await this.runDotPageOperation({ binding: expected });
           if (expected && !sameDotBinding(expected, observation.binding)) throw new Error('dot_binding_mismatch');
-          if (requested.dotUrl && new URL(requested.dotUrl).pathname !== new URL(observation.binding.dotUrl).pathname) throw new Error('dot_binding_mismatch');
+          if (requested.dotUrl) {
+            const requestedPath = new URL(requested.dotUrl).pathname;
+            if (requestedPath !== new URL(observation.binding.dotUrl).pathname && requestedPath !== `/dots/${encodeURIComponent(observation.binding.conversationId)}`) throw new Error('dot_binding_mismatch');
+          }
           this.dotBinding = observation.binding;
           return observation.binding;
         } catch (error) {
