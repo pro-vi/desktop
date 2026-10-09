@@ -1,8 +1,9 @@
 # Dot messaging local gate
 
-The local messaging implementation is reviewable. Actual personal Dot producer,
-getter, timeline, and acknowledgement behavior remains unverified; no provider
-message was sent by this build.
+The local gate checks sent no provider messages. A subsequent scoped exchange
+passed through the production desktop and MCP path; see
+[the live verification](../probes/2026-10-09-dot-live-messaging.md).
+The remaining fixture and provider evidence limits are recorded below.
 
 ## Scope and reviewers
 

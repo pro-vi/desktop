@@ -2,7 +2,7 @@
 title: Talk, read, and wait with personal Dot
 objective: Coding agents can exchange messages with personal Dot and follow its incoming messages.
 type: feat
-status: active
+status: completed
 builder: cold
 date: 2026-10-08
 origin: conversation

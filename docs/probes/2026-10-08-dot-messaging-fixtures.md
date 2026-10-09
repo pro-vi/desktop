@@ -1,7 +1,8 @@
 # Dot messaging local verification
 
-Status: local transport and native-page fixtures pass. The actual personal Dot
-exchange remains unverified; no provider message was sent by these checks.
+Status: local transport and native-page fixtures pass. These checks sent no
+provider messages. The subsequent [live exchange](2026-10-09-dot-live-messaging.md)
+verified current talk/read/wait behavior through the production desktop.
 
 The interface is three explicit core-profile tools: `agentify_dot_talk`,
 `agentify_dot_read`, and `agentify_dot_wait`. Delivery acknowledges one outgoing

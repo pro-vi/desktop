@@ -455,9 +455,10 @@ npm run start -- --chrome-binary "/Applications/Google Chrome.app/Contents/MacOS
 
 ### Personal Dot messages
 
-The three Dot tools are available in the core MCP profile. Their local fixtures
-pass; the actual provider send/read/wait exchange is still awaiting scoped live
-verification. ChatGPT's native messaging getters are private and can change.
+The three Dot tools are available in the core MCP profile. Live talk/read/wait
+passed on `05a9f8b` through the production Electron 39.6.0 backend on 2026-10-09.
+See [the provider verification](docs/probes/2026-10-09-dot-live-messaging.md).
+ChatGPT's native messaging getters are private and can change.
 
 1. Call `agentify_dot_talk` with `{ "text": "your exact message" }`.
 2. Use its returned `dotCursor` as `after` in `agentify_dot_read`.
@@ -492,7 +493,7 @@ uploads, and task-management controls are outside these tools.
 Run `node scripts/e2e-mcp-dot-messaging.mjs` for the isolated native-page,
 HTTP/storage/stdio, restart, and Electron DOM fixtures. It sends no provider
 message. See [the verification report](docs/probes/2026-10-08-dot-messaging-fixtures.md)
-for the live checks still required.
+for the fixture coverage and provider evidence limits.
 
 ## Transcript Library V0
 
