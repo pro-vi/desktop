@@ -84,7 +84,10 @@ function runDotPageOperation(options) {
   }
   const metadata = messages.map(({ native, ...message }) => message);
   const editors = [...context.main.querySelectorAll('[contenteditable="true"][role="textbox"]')].filter(visible);
-  const nativeDraft = composerState.drafts instanceof Map ? composerState.drafts.get(room.id)?.text : undefined;
+  const drafts = composerState.drafts;
+  const nativeDraft = drafts instanceof Map
+    ? drafts.has(room.id) ? drafts.get(room.id)?.text : ''
+    : undefined;
   const attachments = typeof services.composer.getAttachmentDraft === 'function' ? services.composer.getAttachmentDraft(room.id) : null;
   const draftChars = editors.length === 1 && typeof nativeDraft === 'string' && editors[0].textContent === nativeDraft ? nativeDraft.length : null;
   const uploadCount = Array.isArray(attachments) ? attachments.length : null;

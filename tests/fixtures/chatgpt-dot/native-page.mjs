@@ -43,5 +43,5 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
     }
   };
   const incoming = (id, text = id, extra = {}) => ({ id, text, roomId: state.roomId, senderId: 'fixture-peer-member', senderAeonId: state.peer, self: false, role: 'user', requestId: '', deliveryState: '', createdAt: '2026-10-08T00:00:00Z', attachments: [], ...extra });
-  return { state, page, incoming };
+  return { state, page, incoming, services };
 }

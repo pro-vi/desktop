@@ -42,6 +42,29 @@ test('Dot checkpoint failure prevents the native send', async () => {
   assert.equal(fixture.state.inputCount, 0);
 });
 
+test('Dot accepts an absent room draft in a confirmed native map', async () => {
+  const fixture = createNativeDotPage();
+  const snapshot = fixture.services.composer.state.getSnapshot;
+  fixture.services.composer.state.getSnapshot = () => ({ ...snapshot(), drafts: new Map() });
+  await talk(controllerFor(fixture));
+  assert.equal(fixture.state.inputCount, 1);
+});
+
+for (const [name, drafts] of [
+  ['missing draft map', undefined],
+  ['malformed room draft', new Map([[binding.roomId, {}]])],
+  ['undefined room draft', new Map([[binding.roomId, undefined]])],
+  ['different native draft', new Map([[binding.roomId, { text: 'foreign' }]])]
+]) {
+  test(`Dot rejects ${name} without input`, async () => {
+    const fixture = createNativeDotPage();
+    const snapshot = fixture.services.composer.state.getSnapshot;
+    fixture.services.composer.state.getSnapshot = () => ({ ...snapshot(), drafts });
+    await assert.rejects(talk(controllerFor(fixture)), /dot_draft_conflict/);
+    assert.equal(fixture.state.inputCount, 0);
+  });
+}
+
 for (const change of ['draft', 'uploads', 'room', 'account']) {
   test(`Dot final native guard rejects changed ${change} before submission`, async () => {
     const fixture = createNativeDotPage();
