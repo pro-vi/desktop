@@ -39,7 +39,12 @@ export async function createDotServiceFixture({ native = createNativeDotPage(), 
     await client.connect(transport);
     return client;
   };
-  const close = async ({ remove = ownsDirectory } = {}) => { api.closeAllConnections(); await new Promise((resolve) => api.close(resolve)); if (remove) await fs.rm(stateDir, { recursive: true, force: false }); };
+  const close = async ({ remove = ownsDirectory } = {}) => {
+    api.closeAllConnections();
+    await new Promise((resolve) => api.close(resolve));
+    await api.flushToolUsage();
+    if (remove) await fs.rm(stateDir, { recursive: true, force: false });
+  };
   return { native, tabs, api, call, connect, close, stateDir, binding };
 }
 

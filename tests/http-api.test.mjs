@@ -2141,6 +2141,7 @@ test('http-api: status surfaces source, phase, blocked state, and last outcome f
     releaseQuery?.();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    await server.flushToolUsage();
     await fs.rm(stateDir, { recursive: true, force: false });
   });
   const port = server.address().port;
@@ -4945,6 +4946,7 @@ test('http-api: same-tab query/send requests are rejected while a run is already
     releaseQuery?.();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    await server.flushToolUsage();
     await fs.rm(stateDir, { recursive: true, force: false });
   });
   const port = server.address().port;
@@ -6478,6 +6480,57 @@ test('http-api: a base-URL keyed tab restores only its own conversation and repo
   assert.equal(restored.data.servedUrl, conversationUrl);
   assert.equal(restored.data.text, 'restored conversation text');
   assert.deepEqual(navigated, [conversationUrl]);
+});
+
+test('http-api: shutdown waits for pending usage persistence before state cleanup', { timeout: 5_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-usage-shutdown-'));
+  const usageFile = path.join(stateDir, 'tool-usage.json');
+  let releaseWrite;
+  let notifyWrite;
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  const writeStarted = new Promise((resolve) => { notifyWrite = resolve; });
+  const writeFile = fs.writeFile;
+  fs.writeFile = async (file, ...args) => {
+    if (typeof file === 'string' && file.startsWith(path.join(stateDir, '.tool-usage.json.'))) {
+      notifyWrite();
+      await writeGate;
+    }
+    return await writeFile(file, ...args);
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0, token: 'fixture', serverId: 'fixture', stateDir,
+    tabs: { listTabs: () => [] }, defaultTabId: 't0',
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(async () => {
+    releaseWrite();
+    fs.writeFile = writeFile;
+    if (server.listening) {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+    await server.flushToolUsage();
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const result = await req({ port: server.address().port, token: 'fixture', method: 'GET', pth: '/status' });
+  assert.equal(result.res.status, 200);
+  let closed = false;
+  server.closeAllConnections();
+  const closing = new Promise((resolve) => server.close(async () => {
+    await server.flushToolUsage();
+    closed = true;
+    resolve();
+  }));
+  await writeStarted;
+  assert.equal(closed, false);
+  releaseWrite();
+  await closing;
+  const persisted = JSON.parse(await fs.readFile(usageFile, 'utf8'));
+  assert.equal(persisted.counts['/status'].count, 1);
+  await fs.rm(stateDir, { recursive: true, force: false });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await assert.rejects(fs.access(stateDir), { code: 'ENOENT' });
 });
 
 test('http-api: usage endpoint counts per-route calls with outcomes and persists across restart', async (t) => {
@@ -8883,6 +8936,7 @@ test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) =
     release();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    await server.flushToolUsage();
     await fs.rm(stateDir, { recursive: true, force: false });
   });
   const port = server.address().port;

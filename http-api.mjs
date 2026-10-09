@@ -1186,19 +1186,22 @@ export function startHttpApi({
       }
     })
     .catch(() => {});
-  // Flushes are debounced and the timer is unref'd: a burst of responses
-  // costs one disk write, and a pending flush never keeps the process (or a
-  // test teardown) alive.
+  // Debounce bursts; shutdown drains any pending write.
   let toolUsageFlushTimer = null;
-  const scheduleToolUsageFlush = () => {
-    if (toolUsageFlushTimer) return;
-    toolUsageFlushTimer = setTimeout(() => {
+  const flushToolUsage = async () => {
+    if (toolUsageFlushTimer) {
+      clearTimeout(toolUsageFlushTimer);
       toolUsageFlushTimer = null;
       toolUsageWriteQueue = toolUsageWriteQueue
         .catch(() => {})
         .then(() => atomicWriteFile(toolUsagePath, `${JSON.stringify(toolUsage, null, 2)}\n`, { mode: 0o600 }))
         .catch(() => {});
-    }, 250);
+    }
+    await toolUsageWriteQueue;
+  };
+  const scheduleToolUsageFlush = () => {
+    if (toolUsageFlushTimer) return;
+    toolUsageFlushTimer = setTimeout(() => { void flushToolUsage(); }, 250);
     toolUsageFlushTimer.unref?.();
   };
   const recordToolUsage = (route, statusCode, responseBytes) => {
@@ -5594,7 +5597,11 @@ export function startHttpApi({
       }, idleTabSweepMs)
     : null;
   idleTabSweep?.unref?.();
-  server.once('close', () => clearInterval(idleTabSweep));
+  server.flushToolUsage = flushToolUsage;
+  server.once('close', () => {
+    clearInterval(idleTabSweep);
+    void flushToolUsage();
+  });
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);

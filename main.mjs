@@ -867,7 +867,10 @@ async function main() {
           done?.();
           return;
         }
-        server.close(() => done?.());
+        server.close(async () => {
+          await server.flushToolUsage();
+          done?.();
+        });
       } catch {
         done?.();
       }
