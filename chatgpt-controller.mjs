@@ -218,6 +218,26 @@ function chatgptComposerSurface({ document, prompt, visible, isSelected }) {
   return { active: false, action: 'none', reason: 'chat_surface_unconfirmed' };
 }
 
+// ChatGPT web observed 2026-10-10 clips long user turns until Show more is
+// expanded. Read the expanded DOM; a preview is not a complete message.
+async function expandChatGptUserMessages(nodes) {
+  const buttons = nodes.flatMap((node) => Array.from(node.querySelectorAll?.('button[aria-expanded="false"]') || [])
+    .filter((button) => button.getAttribute('aria-expanded') === 'false' &&
+      String(button.textContent || '').trim().toLowerCase() === 'show more'));
+  if (!buttons.length) return { ok: true, expanded: false };
+  try {
+    for (const button of buttons) button.click();
+  } catch {
+    return { ok: false, expanded: false };
+  }
+  const deadline = performance.now() + 1_000;
+  while (buttons.some((button) => button.getAttribute('aria-expanded') !== 'true')) {
+    if (performance.now() >= deadline || nodes.some((node) => node.isConnected === false)) return { ok: false, expanded: false };
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return { ok: nodes.every((node) => node.isConnected !== false), expanded: true };
+}
+
 function extractChatGptTranscriptMessageText(node) {
   if (!node || typeof node !== 'object') return '';
   const childNodes = node.childNodes;
@@ -1525,6 +1545,7 @@ export class ChatGPTController {
       const artifactNamedButtonSelector = ${JSON.stringify(artifactNamedButtonSelector)};
       const artifactSelectorsAvailable = !!artifactDownloadSelector && !!artifactNamedButtonSelector;
       const transcriptTextForNode = ${extractChatGptTranscriptMessageText.toString()};
+      const expandUserMessages = ${expandChatGptUserMessages.toString()};
       const messageRole = ${chatgptMessageRole.toString()};
       const messageId = ${chatgptMessageId.toString()};
       const cardName = ${chatgptFileCardName.toString()};
@@ -1826,7 +1847,7 @@ export class ChatGPTController {
           conversationArtifacts.set(identity, observation);
         }
       };
-      const readMessages = () => {
+      const readMessages = async () => {
         observeTurnOwnerShells();
         const records = Array.from(document.querySelectorAll(messageSelector))
           .map((node) => {
@@ -1856,6 +1877,19 @@ export class ChatGPTController {
             };
           })
           .filter(Boolean);
+        // Retain every observed part before expansion can change the layout
+        // and unmount another message, including a part whose text is absent.
+        const users = records.filter((message) => message.role === 'user');
+        const expansion = await expandUserMessages(users.map((message) => message.node));
+        if (!expansion.ok) mappedInputInvalid = true;
+        if (expansion.ok && expansion.expanded) {
+          for (const message of users) {
+            const text = transcriptTextForNode(message.node);
+            const invalid = typeof text !== 'string' || text.length > maxTurnTextChars || text.includes('\\u0000');
+            if (invalid) mappedInputInvalid = true;
+            message.text = invalid ? '' : text;
+          }
+        }
         const assistantRecordsByOwner = new Map();
         for (const message of records) {
           if (String(message.role || '').trim().toLowerCase() !== 'assistant') continue;
@@ -2526,7 +2560,7 @@ export class ChatGPTController {
           // Search-unit content fills in over network time, not a frame.
           if (searchUnitMarkup) await wait(150);
           else await settleProviderObservation();
-          const observedWindow = readMessages();
+          const observedWindow = await readMessages();
           result = merge(observedWindow, direction);
           if (resultHasStableObservedWindow(result)) return result;
         }
@@ -2610,7 +2644,7 @@ export class ChatGPTController {
         return ranked.every(({ overflow }) => overflow <= 1) ? ranked[0]?.node || null : null;
       };
 
-      const initial = readMessages();
+      const initial = await readMessages();
       windowCount += 1;
       if (!initial.length || mappedInputInvalid) {
         const generationActiveAfter = generationIsActive();
@@ -2675,7 +2709,7 @@ export class ChatGPTController {
           const areaMoved = searchUnitMarkup ? stepMessageArea(edgeMessage('up'), 'up') : false;
           if (!searchUnitMarkup) firstMessage.scrollIntoView({ block: 'end', behavior: 'instant' });
           await settle();
-          let result = merge(readMessages(), 'prepend', { allowTextRefresh: true });
+          let result = merge(await readMessages(), 'prepend', { allowTextRefresh: true });
           result = await confirmStableWindow('prepend', result);
           const afterTop = firstMessage.isConnected ? firstMessage.getBoundingClientRect().top : Number.NaN;
           const moved = searchUnitMarkup
@@ -2718,7 +2752,7 @@ export class ChatGPTController {
           const areaMoved = searchUnitMarkup ? stepMessageArea(edgeMessage('down'), 'down') : false;
           if (!searchUnitMarkup) lastMessage.scrollIntoView({ block: 'start', behavior: 'instant' });
           await settle();
-          let result = merge(readMessages(), 'append');
+          let result = merge(await readMessages(), 'append');
           result = await confirmStableWindow('append', result);
           const afterTop = lastMessage.isConnected ? lastMessage.getBoundingClientRect().top : Number.NaN;
           const moved = searchUnitMarkup
@@ -2761,7 +2795,7 @@ export class ChatGPTController {
             if (anchor) {
               anchor.scrollIntoView({ block, behavior: 'instant' });
               await wait(120 + (retry * 80));
-              const anchored = merge(readMessages(), direction);
+              const anchored = merge(await readMessages(), direction);
               if ((anchored.ok && (anchored.added > 0 || movedInDirection())) ||
                   (!anchored.ok && anchored.failure !== 'no-overlap')) return anchored;
             }
@@ -2771,7 +2805,7 @@ export class ChatGPTController {
             if (Math.abs(bridgeTop - previousScrollTop) <= 0.5) break;
             scroller.scrollTop = bridgeTop;
             await wait(120 + (retry * 80));
-            const bridged = merge(readMessages(), direction);
+            const bridged = merge(await readMessages(), direction);
             if ((bridged.ok && (bridged.added > 0 || movedInDirection())) ||
                 (!bridged.ok && bridged.failure !== 'no-overlap')) return bridged;
           }
@@ -2804,7 +2838,7 @@ export class ChatGPTController {
             }
             await settle();
             const attemptedScrollTop = scroller.scrollTop;
-            let result = merge(readMessages(), 'prepend', { allowTextRefresh: true });
+            let result = merge(await readMessages(), 'prepend', { allowTextRefresh: true });
             if (!result.ok && result.failure === 'no-overlap') {
               result = await recoverDisjointWindow('prepend', previousScrollTop, attemptedScrollTop);
             }
@@ -3152,7 +3186,7 @@ export class ChatGPTController {
               downwardNavigationPasses += 1;
             }
             if (restoredGapPosition.adjusted) {
-              let result = merge(readMessages(), 'append');
+              let result = merge(await readMessages(), 'append');
               result = await confirmStableWindow('append', result);
               if (!result.ok) {
                 if (!reason) reason = 'ambiguous_message_overlap';
@@ -3167,7 +3201,7 @@ export class ChatGPTController {
               if (Math.abs(recoveryTop - top) > 0.5) {
                 scroller.scrollTop = recoveryTop;
                 await (downwardSearchUpper !== null ? settleGapScan() : settle());
-                let result = merge(readMessages(), 'append');
+                let result = merge(await readMessages(), 'append');
                 result = await confirmStableWindow('append', result);
                 if (!result.ok) {
                   if (!reason) reason = 'ambiguous_message_overlap';
@@ -3178,7 +3212,7 @@ export class ChatGPTController {
               }
               if (reason) break;
               await settle();
-              let result = merge(readMessages(), 'append');
+              let result = merge(await readMessages(), 'append');
               if (!result.ok && result.failure === 'no-overlap') {
                 result = await recoverDisjointWindow('append', top, scroller.scrollTop);
               }
@@ -3207,7 +3241,7 @@ export class ChatGPTController {
             scroller.scrollTop = requestedScrollTop;
             await (scanningProviderGap ? settleGapScan() : settle());
             const attemptedScrollTop = scroller.scrollTop;
-            let result = merge(readMessages(), 'append');
+            let result = merge(await readMessages(), 'append');
             if (!result.ok && result.failure === 'no-overlap') {
               result = await recoverDisjointWindow('append', top, attemptedScrollTop);
             }
@@ -5838,10 +5872,12 @@ export class ChatGPTController {
   async #readPromptDelivery(prompt) {
     let timeoutId = null;
     const recorded = await Promise.race([
-      this.#eval(`(() => {
+      this.#eval(`(async () => {
+        const expandUserMessages = ${expandChatGptUserMessages.toString()};
         const turns = document.querySelectorAll('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"]');
         const last = turns[turns.length - 1];
-        return last ? String(last.textContent || '') : null;
+        if (!last || !(await expandUserMessages([last])).ok) return null;
+        return String(last.textContent || '');
       })()`).catch(() => null),
       new Promise((resolve) => {
         timeoutId = setTimeout(() => resolve(null), PROMPT_DELIVERY_READ_TIMEOUT_MS);
@@ -5851,15 +5887,18 @@ export class ChatGPTController {
     const core = letterCore(recorded);
     const missing = String(prompt || '')
       .split('\n')
-      .filter((line) => letterCore(line) && !core.includes(letterCore(line)));
+      .map((text, index) => ({ text, lineNumber: index + 1 }))
+      .filter(({ text }) => letterCore(text) && !core.includes(letterCore(text)));
     return {
       checked: true,
       complete: missing.length === 0,
       missingLineCount: missing.length,
-      firstMissingLine: missing.length ? clipText(missing[0], 160) : null,
+      firstMissingLine: missing.length ? clipText(missing[0].text, 160) : null,
+      firstMissingLineNumber: missing[0]?.lineNumber ?? null,
+      lastMissingLineNumber: missing.at(-1)?.lineNumber ?? null,
       // The full bounded list, so a lost-line pattern is answerable from the
       // run record alone instead of only the page that was live at the time.
-      missingLines: missing.slice(0, 10).map((line) => clipText(line, 160))
+      missingLines: missing.slice(0, 10).map(({ text }) => clipText(text, 160))
     };
   }
 

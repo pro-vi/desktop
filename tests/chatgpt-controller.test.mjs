@@ -409,7 +409,8 @@ function slidingConversationPage(messages, {
   turnOwnerNodesForTop = null,
   onAnimationFrame = null,
   scrollTopAfterAnimationFrame = null,
-  performanceNow = () => 0
+  performanceNow = () => 0,
+  buttonsForMessage = () => []
 } = {}) {
   let scrollTop = initialStart * rowHeight;
   let visibleStart = initialStart;
@@ -446,8 +447,8 @@ function slidingConversationPage(messages, {
         matches(selector) {
           return selector === '[data-message-author-role]';
         },
-        querySelectorAll() {
-          return [];
+        querySelectorAll(selector) {
+          return selector.startsWith('button') ? buttonsForMessage(message, index) : [];
         },
         get parentElement() {
           return scroller;
@@ -9669,6 +9670,38 @@ test('chatgpt-controller: an id-less empty compound part stays partial after it 
   ]);
 });
 
+test('chatgpt-controller: expanding a prompt cannot erase an unread assistant part', async () => {
+  let expanded = false;
+  const toggle = {
+    get textContent() { return expanded ? 'Show less' : 'Show more'; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(expanded) : null; },
+    click() { expanded = true; }
+  };
+  const sharedTurnOwner = {
+    getAttribute(name) { return name === 'data-testid' ? 'conversation-turn-2' : null; }
+  };
+  const messages = [
+    { role: 'user', text: 'Opening prompt' },
+    { role: 'assistant', text: '' },
+    { role: 'assistant', text: 'Populated part of the shared turn' },
+    { role: 'user', text: 'Follow-up prompt' },
+    { role: 'assistant', text: 'Final reply' }
+  ];
+  const page = slidingConversationPage(messages, {
+    windowSize: messages.length,
+    initialStart: 0,
+    providerIds: false,
+    providerOrdinalForMessage: (_message, index) => index <= 1 ? index + 1 : index,
+    turnOwnerForMessage: (_message, index) => index === 1 || index === 2 ? sharedTurnOwner : null,
+    visibleIndicesForTop: () => expanded ? [0, 2, 3, 4] : [0, 1, 2, 3, 4],
+    buttonsForMessage: (_message, index) => index === 0 ? [toggle] : []
+  });
+  const capture = await new ChatGPTController({ page, selectors: {} }).captureConversation({ maxCaptureBytes: 100_000 });
+  assert.equal(expanded, true);
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'conversation_message_text_unavailable');
+});
+
 test('chatgpt-controller: review regression reconciles a provider-identified leading compound part before lock', async () => {
   let windowReads = 0;
   const sharedTurnOwner = {
@@ -10602,7 +10635,7 @@ const BRIEF_WITH_PLACEHOLDERS = [
   'H2. Therefore `pause` can be removed.'
 ].join('\n');
 
-async function queryWithRecordedUserTurn(userTurn) {
+async function queryWithRecordedUserTurn(userTurn, prompt = BRIEF_WITH_PLACEHOLDERS) {
   const realNow = Date.now;
   let fakeNow = 3_500_000;
   Date.now = () => {
@@ -10637,7 +10670,7 @@ async function queryWithRecordedUserTurn(userTurn) {
           };
         }
         if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
-        if (js.includes('[data-message-author-role="user"]')) return await userTurn();
+        if (js.includes('[data-message-author-role="user"]')) return await userTurn(js);
         throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
       },
       async getUrl() { return 'https://chatgpt.com/c/delivery-check'; },
@@ -10657,11 +10690,75 @@ async function queryWithRecordedUserTurn(userTurn) {
         assistantMessage: '[data-message-author-role="assistant"]'
       }
     });
-    return await controller.query({ prompt: BRIEF_WITH_PLACEHOLDERS, timeoutMs: 20_000 });
+    return await controller.query({ prompt, timeoutMs: 20_000 });
   } finally {
     Date.now = realNow;
   }
 }
+
+function collapsedUserMessage(text, { expands = true } = {}) {
+  let expanded = false;
+  let clicked = false;
+  const toggle = {
+    get textContent() { return expanded ? 'Show less' : 'Show more'; },
+    getAttribute(name) { return name === 'aria-expanded' ? String(expanded) : null; },
+    click() { clicked = true; }
+  };
+  const node = {
+    isConnected: true,
+    get textContent() { return expanded ? text : text.slice(0, 10_238); },
+    querySelectorAll(selector) {
+      return selector.startsWith('button') ? [toggle] : [];
+    }
+  };
+  return {
+    node,
+    toggle,
+    settle() { if (clicked && expands) expanded = true; },
+    get clicked() { return clicked; }
+  };
+}
+
+function readUserMessageDom(message) {
+  let now = 0;
+  return (js) => vm.runInNewContext(js, {
+    document: { querySelectorAll: () => [message.node] },
+    performance: { now: () => now },
+    setTimeout(callback, ms) {
+      now += ms;
+      message.settle();
+      callback();
+    }
+  });
+}
+
+const LONG_DELIVERY_PROMPT = Array.from({ length: 81 }, (_, index) =>
+  `Line ${index + 1}: ${'Preserve this distinct prompt line through collapsed rendering. '.repeat(2)}`
+).join('\n');
+
+test('chatgpt-controller: delivery reads the full collapsed user message', async () => {
+  const message = collapsedUserMessage(LONG_DELIVERY_PROMPT);
+  const result = await queryWithRecordedUserTurn(readUserMessageDom(message), LONG_DELIVERY_PROMPT);
+  assert.equal(message.clicked, true);
+  assert.equal(result.meta.promptDelivery.checked, true);
+  assert.equal(result.meta.promptDelivery.complete, true);
+  assert.equal(result.meta.promptDelivery.missingLineCount, 0);
+});
+
+test('chatgpt-controller: failed user-message expansion leaves delivery unchecked', async () => {
+  const message = collapsedUserMessage(LONG_DELIVERY_PROMPT, { expands: false });
+  const result = await queryWithRecordedUserTurn(readUserMessageDom(message), LONG_DELIVERY_PROMPT);
+  assert.deepEqual(result.meta.promptDelivery, { checked: false });
+});
+
+test('chatgpt-controller: actual missing tail reports its full line span beyond the preview cap', async () => {
+  const prompt = Array.from({ length: 25 }, (_, i) => `Unique prompt line ${i + 1} ends here.`).join('\n');
+  const result = await queryWithRecordedUserTurn(async () => prompt.split('\n').slice(0, 12).join('\n'), prompt);
+  assert.equal(result.meta.promptDelivery.missingLineCount, 13);
+  assert.equal(result.meta.promptDelivery.missingLines.length, 10);
+  assert.equal(result.meta.promptDelivery.firstMissingLineNumber, 13);
+  assert.equal(result.meta.promptDelivery.lastMissingLineNumber, 25);
+});
 
 test('chatgpt-controller: a line missing from the user turn ChatGPT recorded is reported on the result', async () => {
   const recorded = BRIEF_WITH_PLACEHOLDERS.split('\n').filter((line) => !line.includes('verifiable judgment')).join(' ');
@@ -10677,7 +10774,7 @@ test('chatgpt-controller: a line missing from the user turn ChatGPT recorded is 
 test('chatgpt-controller: markdown rendering and page labels in the recorded user turn are not missing lines', async () => {
   const rendered = BRIEF_WITH_PLACEHOLDERS.replace(/`/g, '').replace(/^\s*- /gm, '• ').replace('H2.', 'Copy code H2.');
   const result = await queryWithRecordedUserTurn(async () => rendered);
-  assert.deepEqual(result.meta.promptDelivery, { checked: true, complete: true, missingLineCount: 0, firstMissingLine: null, missingLines: [] });
+  assert.deepEqual(result.meta.promptDelivery, { checked: true, complete: true, missingLineCount: 0, firstMissingLine: null, firstMissingLineNumber: null, lastMissingLineNumber: null, missingLines: [] });
 });
 
 test('chatgpt-controller: a user turn that cannot be read leaves delivery unchecked without blocking the result', async () => {
@@ -10812,7 +10909,9 @@ function searchUnitConversationPage(messages, {
   loadDelayMs = 1_500,
   loadsLandInIdleWaits = false,
   hydratingEvaluations = 0,
-  textForRead = (message) => message.text
+  textForRead = (message) => message.text,
+  buttonsForMessage = () => [],
+  onWait = () => {}
 } = {}) {
   let now = 0;
   let loaded = Math.min(initialLoaded, messages.length);
@@ -10895,7 +10994,7 @@ function searchUnitConversationPage(messages, {
         return { top, bottom: top + rowHeight, height: rowHeight, width: 700 };
       },
       contains: () => false,
-      querySelectorAll: () => [],
+      querySelectorAll: (selector) => selector.startsWith('button') ? buttonsForMessage(message) : [],
       get innerText() {
         const reads = (readCounts.get(index) || 0) + 1;
         readCounts.set(index, reads);
@@ -10952,6 +11051,7 @@ function searchUnitConversationPage(messages, {
         performance: { now: () => now },
         setTimeout: (callback, ms) => {
           now += Number(ms) || 0;
+          onWait(ms);
           // A pending chunk arrives during an idle wait, not a re-read's
           // short settle: the capture next sees it only after its next step.
           if (loadsLandInIdleWaits && Number(ms) >= 250 && loadAt !== null) loadAt = Math.min(loadAt, now);
@@ -11072,4 +11172,36 @@ test('chatgpt-controller: capture waits for a hydrating conversation before reso
 
   assert.equal(capture.status, 'complete');
   assert.equal(capture.rawTurns.length, 6);
+});
+
+
+test('controller: transcript expands collapsed user messages encountered during scrolling', async () => {
+  const folded = collapsedUserMessage(LONG_DELIVERY_PROMPT);
+  const messages = Array.from({ length: 20 }, (_, index) => ({
+    id: `folded-thread-${index}`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: index === 2 ? LONG_DELIVERY_PROMPT : `Message ${index}`
+  }));
+  const page = searchUnitConversationPage(messages, {
+    textForRead: (message) => message.id === 'folded-thread-2' ? folded.node.textContent : message.text,
+    buttonsForMessage: (message) => message.id === 'folded-thread-2' ? [folded.toggle] : [],
+    onWait: () => folded.settle()
+  });
+  const capture = await (await searchUnitController(page)).captureConversation({ maxCaptureBytes: 100_000 });
+  assert.equal(capture.status, 'complete');
+  assert.equal(folded.clicked, true);
+  assert.equal(capture.rawTurns.find((turn) => turn.providerMessageId === 'folded-thread-2').text, LONG_DELIVERY_PROMPT);
+});
+
+test('controller: transcript cannot report complete when a user message stays collapsed', async () => {
+  const folded = collapsedUserMessage(LONG_DELIVERY_PROMPT, { expands: false });
+  const messages = [{ id: 'folded-user', role: 'user', text: LONG_DELIVERY_PROMPT }, { id: 'reply', role: 'assistant', text: 'Reply' }];
+  const page = searchUnitConversationPage(messages, {
+    textForRead: (message) => message.role === 'user' ? folded.node.textContent : message.text,
+    buttonsForMessage: (message) => message.role === 'user' ? [folded.toggle] : [],
+    onWait: () => folded.settle()
+  });
+  const capture = await (await searchUnitController(page)).captureConversation({ maxCaptureBytes: 100_000 });
+  assert.equal(capture.status, 'partial');
+  assert.equal(capture.reason, 'compatibility_drift');
 });

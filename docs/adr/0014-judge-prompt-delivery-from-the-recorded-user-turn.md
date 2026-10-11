@@ -11,7 +11,7 @@ A 41-line brief loses one of its bullets on the way to ChatGPT, every time (4 of
 
 ## Decision
 
-After a query completes, read the last user turn ChatGPT recorded and check that each prompt line's letters and digits appear in it. Record `promptDelivery: { checked, complete, missingLineCount, firstMissingLine }` on the result and the run record. Add a `prompt_delivery_incomplete` text line to `agentify_query` and `agentify_wait_run`. Report, do not fail. A user turn that cannot be read within 2 seconds is `checked: false` and never blocks the result.
+After a query completes, read the last user turn ChatGPT recorded and check that each prompt line's letters and digits appear in it. Expand a collapsed user message before reading it. Record `promptDelivery: { checked, complete, missingLineCount, firstMissingLine, firstMissingLineNumber, lastMissingLineNumber, missingLines }` on the result and the run record. Line numbers are one-based positions in the original prompt; the first/last positions bound the missing lines without claiming every intervening line is missing. Keep the text preview bounded to ten lines. Add a `prompt_delivery_incomplete` text line to `agentify_query` and `agentify_wait_run`. Report, do not fail. A user turn that cannot be read within 2 seconds is `checked: false` and never blocks the result. Expansion gets at most 1 second within that budget. Transcript capture uses the same expansion before reading each window and remains partial if expansion fails.
 
 ## Rationale
 
@@ -30,14 +30,18 @@ Negative:
 
 - The check reports the loss; it cannot prevent it.
 - A loss inside a single line is not detected.
-- A user turn the page renders truncated would report `complete: false` falsely.
+- Expansion depends on the provider's user-message control. If it stops working, delivery is unchecked and transcript capture is partial.
 - The user-turn selector is a new submit dependency (`controller-dom-051` in `chatgpt-compatibility.json`).
 
 ## Revisit Triggers
 
 - The trigger is isolated and can be avoided client-side: prevention may join or replace reporting.
-- Real runs report `complete: false` where the prompt did arrive, for example on long user turns the page collapses.
+- Real runs report a false missing line despite expanding the recorded user message.
 - ChatGPT changes the user-turn DOM, and `controller-dom-051` observations start failing.
+
+## Evidence update — 2026-10-10
+
+A collapsed user message produced a false incomplete-delivery report and a clipped transcript on `45f4dcbc`. Expanding its native Show more control revealed every prompt line. The initial read-only checks in the [collapsed-message probe](../probes/2026-10-10-collapsed-user-message-read.md) verified the delivery reader and repeated transcript capture without another provider send. The report also records the subsequent live acceptance checks.
 
 ## References
 

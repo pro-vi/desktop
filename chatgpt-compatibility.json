@@ -2058,6 +2058,14 @@
     "dependency": "composer-surface-choice",
     "reason": "provider-visible surface choices confirm Chat when the switcher is present; an existing conversation instead requires its Chat composer label",
     "selector": "button, [role=\"tab\"], [role=\"switch\"]"
+  },
+  {
+    "id": "controller-dom-061",
+    "capabilityId": "transcript",
+    "kind": "dependency",
+    "dependency": "user-message-expansion",
+    "reason": "the provider-visible user message expander lets delivery checks and transcript capture expand the recorded user message through its scoped Show more control before reading its full text",
+    "selector": "button[aria-expanded=\"false\"]"
   }
 ]
 }
