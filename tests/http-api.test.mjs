@@ -2872,23 +2872,35 @@ test('http-api: explicit model intent fails if controller returns without confir
   assert.equal(runs.data.runs[0]?.modelIntent, 'gpt-5.4-pro');
 });
 
-test('http-api: query fails closed when actual mode used downgrades from requested mode', async (t) => {
+test('http-api: response verification controls downgrade errors and saved-answer notices', async (t) => {
+  for (const scenario of [
+    { name: 'bound downgrade', expectedStatus: 409 },
+    { name: 'captured URL survives an unavailable later URL', capturedUrl: true, rejectUrl: true, expectedStatus: 409 },
+    { name: 'unbound metadata clears mode claims and reports unverified', capturedUrl: true, wrongEvidence: true, expectedStatus: 200 }
+  ]) await t.test(scenario.name, async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-downgrade-'));
+  let urlReads = 0;
   const controller = {
     runExclusive: async (fn) => await fn(),
     query: async ({ modeIntent }) => {
       assert.equal(modeIntent, 'extended-pro');
       return {
-        text: 'prompt echo\nInstant\nChatGPT can make mistakes. Check important info.',
+        text: 'The completed answer.',
         codeBlocks: [],
         meta: {
-          modeUsed: 'instant',
-          actualModeIntent: 'instant',
-          actualModeSource: 'page_footer'
+          providerMessageId: 'downgraded-answer',
+          modeUsed: 'thinking',
+          actualModeIntent: 'thinking',
+          actualModeSource: 'response_metadata',
+          conversationUrl: scenario.capturedUrl ? 'https://chatgpt.com/c/mode-downgraded' : null,
+          modeVerification: 'observed',
+          degradedFrom: { modeIntent: 'extended-pro' },
+          responseModeEvidence: { source: 'response_metadata', conversationId: scenario.wrongEvidence ? 'another-conversation' : 'mode-downgraded', providerMessageId: 'downgraded-answer', modelSlug: 'gpt-6-thinking', requestedModelSlug: 'gpt-5-6-pro' },
+          completionEvidence: { version: 1, source: 'assistant-node', observedAt: Date.now() }
         }
       };
     },
-    getUrl: async () => 'https://chatgpt.com/c/mode-downgraded'
+    getUrl: async () => { urlReads++; if (scenario.rejectUrl) throw new Error('browser_url_unavailable'); return 'https://chatgpt.com/c/mode-downgraded'; }
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
@@ -2925,16 +2937,40 @@ test('http-api: query fails closed when actual mode used downgrades from request
     pth: '/query',
     body: { prompt: 'must stay pro', source: 'mcp', modeIntent: 'extended-pro' }
   });
-  assert.equal(response.res.status, 409);
-  assert.equal(response.data.error, 'mode_intent_activation_failed');
-  assert.equal(response.data.data?.reason, 'mode_intent_downgrade_detected');
-  assert.equal(response.data.data?.state?.activeIntent, 'instant');
+  assert.equal(response.res.status, scenario.expectedStatus);
+  if (scenario.expectedStatus === 409) {
+    assert.equal(response.data.error, 'mode_intent_activation_failed');
+    assert.equal(response.data.data?.reason, 'mode_intent_downgrade_detected');
+    assert.equal(response.data.data?.state?.activeIntent, 'thinking');
+  }
+  if (scenario.rejectUrl) assert.equal(urlReads, 0);
+  const outputManifest = response.data.data?.outputManifest || response.data.result?.meta?.outputManifest;
+  assert.ok(outputManifest?.responsePath);
+  assert.equal(await fs.readFile(outputManifest.responsePath, 'utf8'), 'The completed answer.\n');
+  assert.equal(outputManifest.responseModeEvidence?.modelSlug || null, scenario.wrongEvidence ? null : 'gpt-6-thinking');
 
   const runs = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: { includeArchived: true } });
   assert.equal(runs.res.status, 200);
-  assert.equal(runs.data.runs[0]?.status, 'error');
-  assert.equal(runs.data.runs[0]?.phase, 'failed');
+  assert.equal(runs.data.runs[0]?.status, scenario.wrongEvidence ? 'success' : 'error');
+  assert.equal(runs.data.runs[0]?.phase, scenario.wrongEvidence ? 'completed' : 'failed');
   assert.equal(runs.data.runs[0]?.modeIntent, 'extended-pro');
+  assert.equal(runs.data.runs[0]?.modeUsed, scenario.wrongEvidence ? null : 'thinking');
+  assert.deepEqual(runs.data.runs[0]?.degradedFrom, scenario.wrongEvidence ? null : { modeIntent: 'extended-pro' });
+  assert.equal(runs.data.runs[0]?.outputManifest.responsePath, outputManifest.responsePath);
+  if (scenario.wrongEvidence) {
+    assert.ok(runs.data.runs[0]?.completionReceipt);
+    assert.equal(outputManifest.modeVerification, 'unverified');
+    assert.match(runs.data.runs[0]?.label, /mode unverified/);
+    assert.equal(response.data.result.meta.modeVerification, 'unverified');
+    assert.equal(response.data.result.meta.actualModeIntent, null);
+    assert.equal(response.data.result.meta.actualModeLabel, null);
+    assert.equal(response.data.result.meta.actualModeSource, null);
+    assert.equal(response.data.result.meta.responseModeEvidence, null);
+  } else assert.equal(runs.data.runs[0]?.completionReceipt, null);
+  const waited = await req({ port, token: 'secret', method: 'POST', pth: '/runs/wait', body: { runId: runs.data.runs[0].id, includeOutputText: true } });
+  assert.equal(waited.data.run.status, scenario.wrongEvidence ? 'success' : 'error');
+  assert.equal(waited.data.outputText, 'The completed answer.\n');
+  });
 });
 
 test('http-api: runs list/get/archive expose durable query history', async (t) => {

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
+import { readChatGptResponseMode } from './chatgpt-response-mode.mjs';
 
 import {
   DEEP_RESEARCH_IFRAME_SELECTOR,
@@ -405,6 +406,16 @@ class ChromeCdpPageAdapter {
 
   isClosed() {
     return this.closed;
+  }
+
+  async readResponseMode(options) {
+    return await readChatGptResponseMode({
+      ...options,
+      sendCommand: (method, params) => this.client.send(method, params, this.sessionId),
+      subscribe: (method, handler) => this.client.on(method, (params, sessionId) => {
+        if (sessionId === this.sessionId) handler(params);
+      })
+    });
   }
 
   async initialize({ userAgent } = {}) {

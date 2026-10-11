@@ -2,6 +2,7 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import electron from 'electron';
+import { readChatGptResponseMode } from './chatgpt-response-mode.mjs';
 
 import {
   DEEP_RESEARCH_IFRAME_SELECTOR,
@@ -175,6 +176,20 @@ class ElectronPageAdapter {
 
   async getUrl() {
     return this.win.webContents.getURL();
+  }
+
+  async readResponseMode(options) {
+    return await this.#withDebugger(async (debuggerClient) => await readChatGptResponseMode({
+      ...options,
+      sendCommand: (method, params) => debuggerClient.sendCommand(method, params),
+      subscribe: (method, handler) => {
+        const listener = (_event, observedMethod, params, sessionId) => {
+          if (!sessionId && observedMethod === method) handler(params);
+        };
+        debuggerClient.on('message', listener);
+        return () => debuggerClient.removeListener('message', listener);
+      }
+    }));
   }
 
   async beginNavigationGuard(matchesUrl) {

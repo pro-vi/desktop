@@ -176,6 +176,42 @@ class MockDownloadItem {
   }
 }
 
+test('electron-browser-backend: response metadata is scoped to the window and debugger listeners are released', async () => {
+  let window;
+  let bodyReads = 0;
+  const listeners = new Set();
+  class ResponseWindow extends MockBrowserWindow {
+    constructor() {
+      super();
+      window = this;
+      this.webContents.debugger.on = (_name, handler) => listeners.add(handler);
+      this.webContents.debugger.removeListener = (_name, handler) => listeners.delete(handler);
+      this.webContents.debugger.sendCommand = async (method) => {
+        if (method === 'Page.reload') {
+          for (const sessionId of ['foreign-window', undefined]) {
+            for (const handler of listeners) handler({}, 'Network.responseReceived', { requestId: sessionId || 'owned', response: { status: 200, url: 'https://chatgpt.com/backend-api/conversations/response' } }, sessionId);
+            for (const handler of listeners) handler({}, 'Network.loadingFinished', { requestId: sessionId || 'owned' }, sessionId);
+          }
+        }
+        if (method === 'Network.getResponseBody') {
+          bodyReads++;
+          return { body: JSON.stringify({ conversation_id: 'response', messages: [{ id: 'answer', author: { role: 'assistant' }, metadata: { model_slug: 'gpt-5-6-pro' } }] }) };
+        }
+        return {};
+      };
+    }
+    async loadURL(url) { this.currentUrl = url; }
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: ResponseWindow });
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/c/response' });
+  const evidence = await page.readResponseMode({ conversationUrl: 'https://chatgpt.com/c/response', providerMessageId: 'answer' });
+  assert.equal(evidence.modelSlug, 'gpt-5-6-pro');
+  assert.equal(bodyReads, 1);
+  assert.equal(listeners.size, 0);
+  assert.equal(window.debuggerAttached, false);
+  await backend.dispose();
+});
+
 test('electron-browser-backend: createSession destroys window if loadURL fails', async () => {
   let createdWindow = null;
   class TestBrowserWindow extends MockBrowserWindow {

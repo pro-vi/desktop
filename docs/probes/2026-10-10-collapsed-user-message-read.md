@@ -96,7 +96,14 @@ The footer parser is byte-identical to `origin/main` at `45f4dcbc`; executing
 both copies on those captured page strings returns `thinking`, label `Medium`.
 Mode inference happens before the new prompt-expansion read. These observations
 do not establish which model generated the earlier answers or why the page
-changed mode. This remains a pending investigation in `BACKLOG.md`.
+changed mode. This was unresolved at the time of this probe.
+
+Read-only metadata checks on 2026-10-11 subsequently confirmed that each exact
+short answer used `gpt-5-6-pro`. The footer inference was a false mode detection;
+see [response-mode verification](2026-10-11-response-mode-metadata.md). Fresh
+public mode checks subsequently passed. Overall query acceptance still fails
+because a concurrent diagram request recorded an earlier prompt; the linked
+response-mode probe records both results.
 
 The general three-successful-Pro-requests acceptance condition did not pass.
 The long-prompt delivery and transcript correction did pass. No extra provider

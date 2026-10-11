@@ -103,6 +103,43 @@ async function createDownloadTestPage() {
   return { page: session.page, calls, listeners, emit };
 }
 
+test('chrome-cdp-backend: response metadata ignores other page sessions and removes its listeners', async () => {
+  const listeners = new Map();
+  let bodyReads = 0;
+  const client = {
+    connected: true,
+    ws: {},
+    on(method, handler) {
+      listeners.set(method, [...(listeners.get(method) || []), handler]);
+      return () => listeners.set(method, listeners.get(method).filter((item) => item !== handler));
+    },
+    async send(method) {
+      if (method === 'Target.createTarget') return { targetId: 'target-response' };
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-response' };
+      if (method === 'Browser.getWindowForTarget') return { windowId: 1 };
+      if (method === 'Page.reload') {
+        for (const sessionId of ['foreign', 'session-response']) {
+          for (const handler of listeners.get('Network.responseReceived')) handler({ requestId: sessionId, response: { status: 200, url: 'https://chatgpt.com/backend-api/conversations/response' } }, sessionId);
+          for (const handler of listeners.get('Network.loadingFinished')) handler({ requestId: sessionId }, sessionId);
+        }
+      }
+      if (method === 'Network.getResponseBody') {
+        bodyReads++;
+        return { body: JSON.stringify({ conversation_id: 'response', messages: [{ id: 'answer', author: { role: 'assistant' }, metadata: { model_slug: 'gpt-5-6-pro' } }] }) };
+      }
+      return {};
+    }
+  };
+  const backend = new ChromeCdpBrowserBackend({ stateDir: os.tmpdir() });
+  backend.started = true;
+  backend.client = client;
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/c/response' });
+  const evidence = await page.readResponseMode({ conversationUrl: 'https://chatgpt.com/c/response', providerMessageId: 'answer' });
+  assert.equal(evidence.modelSlug, 'gpt-5-6-pro');
+  assert.equal(bodyReads, 1);
+  assert.ok([...listeners.values()].every((group) => group.length === 0));
+});
+
 test('chrome-cdp-backend: pending commands reject when websocket closes', async () => {
   const ws = new MockWebSocket();
   const conn = new ChromeCdpConnection('ws://example.test/devtools/browser/1', {

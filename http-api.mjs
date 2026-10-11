@@ -19,6 +19,7 @@ import {
   sameDotBinding
 } from './chatgpt-recipient.mjs';
 import { parseCompletionEvidence } from './chatgpt-completion-evidence.mjs';
+import { modeIntentForResponseModelSlug, responseModeEvidenceForMessage } from './chatgpt-response-mode.mjs';
 import { parseChatGptCompatibilityStatus } from './chatgpt-compatibility.mjs';
 import {
   normalizeChatGptModelIntent,
@@ -1818,13 +1819,18 @@ export function startHttpApi({
       const targetIntent = detail?.targetIntent ? String(detail.targetIntent) : null;
       const activeIntent = detail?.state?.activeIntent ? String(detail.state.activeIntent) : null;
       if (detail?.reason === 'mode_intent_downgrade_detected') {
+        const savedAnswer = detail.outputManifest?.responsePath ? ' The answer was saved.' : '';
         return {
           ...base,
           status: 'error',
           label: 'ChatGPT mode downgraded',
           detail: targetIntent && activeIntent
-            ? `ChatGPT mode intent requested ${targetIntent}, but the completed response reported ${activeIntent}.`
-            : 'ChatGPT completed the response in a different mode than requested.'
+            ? `ChatGPT mode intent requested ${targetIntent}, but the completed response used ${activeIntent}.${savedAnswer}`
+            : `ChatGPT completed the response in a different mode than requested.${savedAnswer}`,
+          conversationUrl: detail.conversationUrl || null,
+          modeUsed: activeIntent,
+          degradedFrom: { modeIntent: targetIntent },
+          outputManifest: detail.outputManifest || null
         };
       }
       const label = detail?.state?.label ? trimPreview(detail.state.label, 60) : null;
@@ -2005,10 +2011,11 @@ export function startHttpApi({
     throw err;
   };
 
-  const queryUsageForResult = ({ result, modeIntent = null, modelIntent = null, activeQuery = null } = {}) => {
+  const queryUsageForResult = ({ result, conversationUrl, modeIntent = null, modelIntent = null, activeQuery = null } = {}) => {
     const resultMeta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
     const modelProvenance = activeQuery?.modelIntentProvenance || null;
-    const modeUsed = normalizeChatGptModeIntent(resultMeta.modeUsed || resultMeta.actualModeIntent, { fallback: null });
+    const responseModeEvidence = responseModeEvidenceForMessage(resultMeta.responseModeEvidence, { conversationUrl, providerMessageId: resultMeta.providerMessageId });
+    const modeUsed = modeIntentForResponseModelSlug(responseModeEvidence?.resolvedModelSlug || responseModeEvidence?.modelSlug);
     const modelUsed = normalizeChatGptModelIntent(
       resultMeta.modelUsed ||
         resultMeta.actualModelIntent ||
@@ -2016,35 +2023,41 @@ export function startHttpApi({
         (modelIntent ? modelProvenance?.requestedIntent || modelIntent : null),
       { fallback: null }
     );
-    const degradedFrom = resultMeta.degradedFrom && typeof resultMeta.degradedFrom === 'object'
-      ? JSON.parse(JSON.stringify(resultMeta.degradedFrom))
+    const targetIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
+    const degradedFrom = responseModeEvidence && targetIntent && modeUsed && modeUsed !== targetIntent
+      ? { modeIntent: targetIntent }
       : null;
     return {
       modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null }),
       modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
       modeUsed,
       modelUsed,
-      degradedFrom
+      degradedFrom,
+      responseModeEvidence,
+      modeVerification: responseModeEvidence && modeUsed ? 'observed' : resultMeta.modeVerification != null || resultMeta.responseModeEvidence != null ? 'unverified' : null
     };
   };
 
-  const assertNoModeDowngrade = ({ modeIntent, result } = {}) => {
+  const assertNoModeDowngrade = ({ modeIntent, result, conversationUrl, outputManifest } = {}) => {
     const targetIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
     if (!targetIntent) return;
     const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
-    const modeUsed = normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null });
-    const actualModeSource = String(meta.actualModeSource || '').trim();
-    if (!modeUsed || modeUsed === targetIntent || actualModeSource !== 'page_footer') return;
+    const evidence = responseModeEvidenceForMessage(meta.responseModeEvidence, { conversationUrl, providerMessageId: meta.providerMessageId });
+    const modeUsed = modeIntentForResponseModelSlug(evidence?.resolvedModelSlug || evidence?.modelSlug);
+    if (!modeUsed || modeUsed === targetIntent) return;
     const err = new Error('mode_intent_activation_failed');
     err.data = {
       reason: 'mode_intent_downgrade_detected',
       targetIntent,
+      conversationUrl,
+      outputManifest,
       state: {
         activeIntent: modeUsed,
         actualMode: {
           intent: modeUsed,
           label: meta.actualModeLabel || null,
-          source: actualModeSource || null
+          source: 'response_metadata',
+          modelSlug: evidence.resolvedModelSlug || evidence.modelSlug
         }
       }
     };
@@ -2350,7 +2363,7 @@ export function startHttpApi({
       tabKey: tabMeta?.key || null,
       vendorId: tabMeta?.vendorId || null
     });
-    const usage = queryUsageForResult({ result, modeIntent, modelIntent, activeQuery });
+    const usage = queryUsageForResult({ result, conversationUrl, modeIntent, modelIntent, activeQuery });
     const responsePath = await writeQueryResponseFile({ outDir, text: result?.text || '' });
     const metadataPath = path.join(outDir, 'metadata.json');
     await atomicWriteFile(
@@ -2367,6 +2380,8 @@ export function startHttpApi({
         modeUsed: usage.modeUsed || null,
         modelUsed: usage.modelUsed || null,
         degradedFrom: usage.degradedFrom || null,
+        responseModeEvidence: usage.responseModeEvidence,
+        modeVerification: usage.modeVerification,
         completionEvidence: { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
         responsePath,
         capturedAt: new Date().toISOString()
@@ -2399,17 +2414,19 @@ export function startHttpApi({
         }
       ]
     });
-    return {
+    const outputManifest = {
       dir: outDir,
       responsePath,
       metadataPath,
       modeUsed: usage.modeUsed || null,
       modelUsed: usage.modelUsed || null,
       degradedFrom: usage.degradedFrom || null,
+      responseModeEvidence: usage.responseModeEvidence,
+      modeVerification: usage.modeVerification,
       // Transcript publication state persisted with the manifest: `pending`
       // means the detached post-query publication owes this run a terminal
       // state; `not_applicable` means no publication will run.
-      ...(transcriptState ? { transcript: { state: transcriptState } } : {}),
+      ...(transcriptState ? { transcript: { state: usage.degradedFrom ? 'not_applicable' : transcriptState } } : {}),
       files: artifacts.map((item) => ({
         id: item.id,
         path: item.path,
@@ -2419,6 +2436,8 @@ export function startHttpApi({
         role: item?.meta?.role || null
       }))
     };
+    assertNoModeDowngrade({ modeIntent, result, conversationUrl, outputManifest });
+    return outputManifest;
   };
 
   const completionReceiptForManifest = async ({ kind, outputManifest, conversationUrl = null } = {}) => {
@@ -2543,21 +2562,25 @@ export function startHttpApi({
   const successOutcomeForResult = ({ result, op, conversationUrl, outputManifest = null, completionReceipt = null }) => {
     const now = Date.now();
     const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+    const modeUsage = Object.hasOwn(outputManifest || {}, 'modeUsed') ? outputManifest : meta;
     // The delivery check reports, never fails the run (ADR 0014); the label is
     // the one line every read path shows, so it carries the incompleteness.
     const promptIncomplete = meta.promptDelivery?.checked === true && meta.promptDelivery.complete === false;
+    const notices = [];
+    if (promptIncomplete) notices.push('prompt incomplete');
+    if (modeUsage.modeVerification === 'unverified') notices.push('mode unverified');
     return {
       status: 'success',
-      label: promptIncomplete ? 'Response received (prompt incomplete)' : 'Response received',
+      label: `Response received${notices.length ? ` (${notices.join('; ')})` : ''}`,
       detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
       conversationUrl: conversationUrl || null,
       source: op?.source || 'http',
       kind: op?.kind || 'query',
       finishedAt: now,
       durationMs: Math.max(0, now - Number(op?.startedAt || now)),
-      modeUsed: outputManifest?.modeUsed || normalizeChatGptModeIntent(meta.modeUsed || meta.actualModeIntent, { fallback: null }),
+      modeUsed: normalizeChatGptModeIntent(modeUsage.modeUsed || modeUsage.actualModeIntent, { fallback: null }),
       modelUsed: outputManifest?.modelUsed || normalizeChatGptModelIntent(meta.modelUsed || meta.actualModelIntent, { fallback: null }),
-      degradedFrom: outputManifest?.degradedFrom || (meta.degradedFrom && typeof meta.degradedFrom === 'object' ? meta.degradedFrom : null),
+      degradedFrom: modeUsage.degradedFrom && typeof modeUsage.degradedFrom === 'object' ? modeUsage.degradedFrom : null,
       recovery: parseResponseRecovery(result?.recovery),
       outputManifest: outputManifest || null,
       completionReceipt,
@@ -3480,13 +3503,12 @@ export function startHttpApi({
             modelIntent: originalModelIntent,
             durableObservation: true
           });
-          const servedUrl = typeof controller.getUrl === 'function'
+          const servedUrl = extractConversationUrl(queryResult?.meta?.conversationUrl) || (typeof controller.getUrl === 'function'
             ? await controller.getUrl().catch(() => originalConversationUrl || null)
-            : originalConversationUrl || null;
+            : originalConversationUrl || null);
           return { result: queryResult, conversationUrl: servedUrl };
         });
         const result = execution.result;
-        assertNoModeDowngrade({ modeIntent: originalModeIntent, result });
         const activeQuery = activeQueries.get(tabId);
         assertConfirmedModelIntent({ modelIntent: originalModelIntent, activeQuery });
         const conversationUrl = execution.conversationUrl;
@@ -3526,6 +3548,11 @@ export function startHttpApi({
           meta: {
             ...(result?.meta && typeof result.meta === 'object' ? result.meta : {}),
             modeUsed: outputManifest.modeUsed || null,
+            actualModeIntent: outputManifest.modeUsed || null,
+            actualModeLabel: outputManifest.modeUsed ? result?.meta?.actualModeLabel || null : null,
+            actualModeSource: outputManifest.responseModeEvidence ? 'response_metadata' : null,
+            responseModeEvidence: outputManifest.responseModeEvidence,
+            modeVerification: outputManifest.modeVerification,
             modelUsed: outputManifest.modelUsed || null,
             degradedFrom: outputManifest.degradedFrom || null,
             outputManifest,
@@ -4543,16 +4570,15 @@ export function startHttpApi({
                   modelIntent,
                   durableObservation: true
                 });
-                const servedUrl = typeof controller.getUrl === 'function'
+                const servedUrl = extractConversationUrl(queryResult?.meta?.conversationUrl) || (typeof controller.getUrl === 'function'
                   ? await controller.getUrl().catch(() => null)
-                  : null;
+                  : null);
                 return { result: queryResult, conversationUrl: servedUrl };
               });
               const result = execution.result;
-              assertNoModeDowngrade({ modeIntent, result });
               const activeQuery = activeQueries.get(tabId);
               assertConfirmedModelIntent({ modelIntent, activeQuery });
-              // Capture conversation URL after successful query
+              // Keep the conversation URL associated with the captured answer.
               const conversationUrl = execution.conversationUrl;
               if (entryTarget?.kind === 'shared-snapshot' && !extractConversationUrl(conversationUrl)) {
                 const error = new Error('shared_chat_materialization_failed');
@@ -4599,6 +4625,11 @@ export function startHttpApi({
                 meta: {
                   ...(result?.meta && typeof result.meta === 'object' ? result.meta : {}),
                   modeUsed: outputManifest.modeUsed || null,
+                  actualModeIntent: outputManifest.modeUsed || null,
+                  actualModeLabel: outputManifest.modeUsed ? result?.meta?.actualModeLabel || null : null,
+                  actualModeSource: outputManifest.responseModeEvidence ? 'response_metadata' : null,
+                  responseModeEvidence: outputManifest.responseModeEvidence,
+                  modeVerification: outputManifest.modeVerification,
                   modelUsed: outputManifest.modelUsed || null,
                   degradedFrom: outputManifest.degradedFrom || null,
                   outputManifest,

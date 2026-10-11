@@ -9,6 +9,7 @@ import { ChatGPTController, chatgptMessageId, chatgptMessageRole, defaultReconci
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
 import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 import { createProviderCompatibilityBridge, loadChatGptCompatibilityProfile } from '../chatgpt-compatibility.mjs';
+import { readChatGptResponseMode } from '../chatgpt-response-mode.mjs';
 
 function readyState() {
   return {
@@ -2313,6 +2314,10 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
     total + Buffer.byteLength(turn.role) + Buffer.byteLength(turn.text) + Buffer.byteLength(turn.providerMessageId), 0);
   let captureCalls = 0;
   const page = {
+    async readResponseMode({ providerMessageId }) {
+      assert.equal(providerMessageId, 'answer-1');
+      return { source: 'response_metadata', conversationId: 'reconcile-recovered', providerMessageId, modelSlug: 'gpt-5-6-pro', requestedModelSlug: 'gpt-5-6-pro' };
+    },
     async navigate() {},
     async evaluate(js) {
       if (js.includes('const hasTurnstile')) return readyState();
@@ -2352,9 +2357,6 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
           artifactInventory: { status: 'complete', items: [] }
         };
       }
-      if (js.includes('recovery-page-mode')) {
-        return 'Recovered exact assistant response\nPro\nChatGPT can make mistakes. Check important info.';
-      }
       if (js.includes('fallbackMainText')) {
         return {
           stop: true,
@@ -2384,6 +2386,7 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
   };
   const controller = new ChatGPTController({
     page,
+    vendorId: 'chatgpt',
     selectors: {
       promptTextarea: '#prompt-textarea',
       sendButton: 'button[data-testid="send-button"]',
@@ -2404,7 +2407,8 @@ test('chatgpt-controller: final structured reconciliation recovers a selector-mi
     assert.equal(result.meta.recoveredBy, 'structured_conversation_capture');
     assert.equal(result.meta.count, 2);
     assert.equal(result.meta.modeUsed, 'extended-pro');
-    assert.equal(result.meta.modeVerification, 'observed_after_recovery');
+    assert.equal(result.meta.modeVerification, 'observed');
+    assert.equal(result.meta.responseModeEvidence.providerMessageId, 'answer-1');
     assert.equal(result.meta.completionEvidence?.source, 'structured-recovery');
     assert.deepEqual(result.recovery, {
       status: 'complete',
@@ -5007,6 +5011,7 @@ test('chatgpt-controller: query does not click mode controls when the requested 
 
   const controller = new ChatGPTController({
     page,
+    vendorId: 'chatgpt',
     selectors: {
       promptTextarea: '#prompt-textarea',
       sendButton: 'button[data-testid="send-button"]',
@@ -5022,7 +5027,8 @@ test('chatgpt-controller: query does not click mode controls when the requested 
   });
 
   assert.equal(result.text, 'Done');
-  assert.equal(result.meta?.modeUsed, 'thinking');
+  assert.equal(result.meta?.modeUsed, null);
+  assert.equal(result.meta?.modeVerification, 'unverified');
   assert.equal(modeChecks, 1);
   assert.equal(pointerEvents.filter((item) => item.startsWith('down:')).length, 2);
 });
@@ -5089,7 +5095,13 @@ test('chatgpt-controller: query fails closed when mode intent cannot be confirme
   }
 });
 
-test('chatgpt-controller: query fails closed when actual response footer reports Instant after Extended Pro confirmation', async () => {
+test('chatgpt-controller: response mode comes from its message metadata rather than the next prompt setting', async (t) => {
+  for (const [modelSlug, expectedMode, stalledCommand, unavailableUrl] of [
+    ['gpt-5-6-pro', 'extended-pro'], ['gpt-6-thinking', 'thinking'], [null, null],
+    ['gpt-5-6-pro', 'extended-pro', null, true],
+    ...['Network.enable', 'Page.reload', 'Network.getResponseBody', 'Network.disable'].map((command) => ['gpt-5-6-pro', null, command])
+  ]) {
+    await t.test(unavailableUrl ? 'captured answer does not need another URL read' : stalledCommand ? `stalled ${stalledCommand}` : modelSlug || 'metadata unavailable', async () => {
   const realNow = Date.now;
   let fakeNow = 7_500_000;
   Date.now = () => {
@@ -5099,8 +5111,43 @@ test('chatgpt-controller: query fails closed when actual response footer reports
 
   let modeChecks = 0;
   let sendAttempted = false;
-  const instantPageText = 'agentify\nInstant\nChatGPT can make mistakes. Check important info.';
+  const instantPageText = 'Answer received\nChatGPT can make mistakes. Check important info.\nLatest response\nMedium';
+  let metadataRead = false;
+  let readerStarted;
+  let releaseCommand;
+  let metadataOperation;
+  let terminationCalls = 0;
+  let urlReads = 0;
+  let verificationStarted;
+  const beganVerification = new Promise((resolve) => { verificationStarted = resolve; });
+  const enteredReader = new Promise((resolve) => { readerStarted = resolve; });
+  const blockedCommand = new Promise((resolve) => { releaseCommand = resolve; });
   const page = {
+    async readResponseMode({ conversationUrl, providerMessageId }) {
+      metadataRead = true;
+      assert.equal(conversationUrl, 'https://chatgpt.com/c/instant-mode-run');
+      assert.equal(providerMessageId, 'answer-message');
+      readerStarted();
+      if (stalledCommand) {
+        const handlers = new Map();
+        metadataOperation = readChatGptResponseMode({
+          conversationUrl, providerMessageId, timeoutMs: 5,
+          subscribe(method, handler) { handlers.set(method, handler); return () => handlers.delete(method); },
+          async sendCommand(method) {
+            if (method === stalledCommand) return await blockedCommand;
+            if (method === 'Page.reload') {
+              handlers.get('Network.responseReceived')({ requestId: 'owned', response: { status: 200, url: 'https://chatgpt.com/backend-api/conversations/instant-mode-run' } });
+              handlers.get('Network.loadingFinished')({ requestId: 'owned' });
+            }
+            if (method === 'Network.getResponseBody') return { body: JSON.stringify({ conversation_id: 'instant-mode-run', messages: [{ id: providerMessageId, author: { role: 'assistant' }, metadata: { model_slug: modelSlug } }] }) };
+            return {};
+          }
+        });
+        return await metadataOperation;
+      }
+      return modelSlug ? { source: 'response_metadata', conversationId: 'instant-mode-run', providerMessageId, modelSlug, requestedModelSlug: 'gpt-5-6-pro' } : null;
+    },
+    async terminateEvaluation() { terminationCalls++; },
     async navigate() {},
     async evaluate(js) {
       if (js.includes('const hasTurnstile')) return readyState();
@@ -5139,6 +5186,7 @@ test('chatgpt-controller: query fails closed when actual response footer reports
           hasRegenerate: false,
           isThinking: false,
           pageText: instantPageText,
+          providerMessageId: 'answer-message',
           currentUrl: 'https://chatgpt.com/c/instant-mode-run'
         };
       }
@@ -5148,6 +5196,8 @@ test('chatgpt-controller: query fails closed when actual response footer reports
       throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
     },
     async getUrl() {
+      urlReads++;
+      if (unavailableUrl) await blockedCommand;
       return 'https://chatgpt.com/c/instant-mode-run';
     },
     async sendKey() {},
@@ -5160,6 +5210,9 @@ test('chatgpt-controller: query fails closed when actual response footer reports
 
   const controller = new ChatGPTController({
     page,
+    vendorId: 'chatgpt',
+    navigationTimeoutMs: stalledCommand || unavailableUrl ? 5 : 30_000,
+    responseSettlementTimeoutMs: 1,
     selectors: {
       promptTextarea: '#prompt-textarea',
       sendButton: 'button[data-testid="send-button"]',
@@ -5168,23 +5221,49 @@ test('chatgpt-controller: query fails closed when actual response footer reports
     }
   });
 
+  let request;
+  let cutoff;
   try {
-    await assert.rejects(
-      controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro' }),
-      (error) => {
-        assert.equal(error?.message, 'mode_intent_activation_failed');
-        assert.equal(error?.data?.reason, 'mode_intent_downgrade_detected');
-        assert.equal(error?.data?.targetIntent, 'extended-pro');
-        assert.equal(error?.data?.state?.activeIntent, 'instant');
-        return true;
-      }
-    );
+    request = controller.runExclusive(async () => await controller.query({ prompt: 'agentify', timeoutMs: 20_000, modeIntent: 'extended-pro', onProgress: (progress) => { if (progress.phase === 'verifying_response_mode') verificationStarted(); } }));
+    let queued;
+    let queuedEntered = false;
+    if (stalledCommand) {
+      await enteredReader;
+      queued = controller.runExclusive(async () => { queuedEntered = true; });
+      queued.catch(() => {});
+    }
+    if (unavailableUrl) await beganVerification;
+    const result = unavailableUrl
+      ? await Promise.race([request, new Promise((resolve) => { cutoff = setTimeout(() => resolve(null), 100); })])
+      : await request;
+    assert.ok(result, 'the captured answer returns without a later browser URL read');
+    if (unavailableUrl) assert.equal(urlReads, 0);
+    assert.equal(result.meta.modeUsed, expectedMode);
+    assert.equal(result.meta.actualModeSource, expectedMode ? 'response_metadata' : null);
+    assert.equal(result.meta.responseModeEvidence?.modelSlug || null, expectedMode ? modelSlug : null);
+    assert.deepEqual(result.meta.degradedFrom || null, expectedMode === 'thinking' ? { modeIntent: 'extended-pro' } : null);
+    assert.equal(result.text, instantPageText);
+    assert.equal(metadataRead, true);
+    if (stalledCommand) {
+      await assert.rejects(queued, (error) => error.code === 'tab_busy');
+      assert.equal(queuedEntered, false);
+      assert.equal(terminationCalls, 0);
+      releaseCommand({ body: JSON.stringify({ conversation_id: 'instant-mode-run', messages: [{ id: 'answer-message', author: { role: 'assistant' }, metadata: { model_slug: modelSlug } }] }) });
+      await metadataOperation;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(await controller.runExclusive(async () => 'released'), 'released');
+    }
   } finally {
+    clearTimeout(cutoff);
+    releaseCommand({});
+    await request?.catch(() => {});
     Date.now = realNow;
   }
 
   assert.equal(modeChecks >= 1, true);
   assert.equal(sendAttempted, true);
+    });
+  }
 });
 
 test('chatgpt-controller: query fails closed when model intent cannot be confirmed', async () => {

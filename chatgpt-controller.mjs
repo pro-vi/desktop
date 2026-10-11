@@ -10,6 +10,7 @@ import {
   isQualifiedCompletionEvidence
 } from './chatgpt-completion-evidence.mjs';
 import { providerConversationIdFromOwnedLocation } from './conversation-identity.mjs';
+import { modeIntentForResponseModelSlug, responseModeEvidenceForMessage } from './chatgpt-response-mode.mjs';
 import { evaluateChatGptAnchor } from './chatgpt-compatibility-resolver.mjs';
 import { DEEP_RESEARCH_IFRAME_SELECTOR } from './deep-research-target.mjs';
 import {
@@ -29,7 +30,6 @@ import {
   CHATGPT_MODE_PICKER_PRIMITIVES_JS,
   CHATGPT_MODEL_INTENT_META,
   CHATGPT_MODEL_PICKER_PRIMITIVES_JS,
-  modeIntentForLabel,
   modeIntentLabelLooksUsable,
   modelIntentLabelLooksUsable,
   shouldTrackPendingModeTrigger,
@@ -405,58 +405,6 @@ function extractConversationUrl(value) {
   } catch {
     return /\/c\/[^/?#]+/.test(text) ? text : null;
   }
-}
-
-function inferModeIntentFromFooterText(value) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-  const lower = text.toLowerCase();
-  const footerIndex = Math.max(
-    lower.lastIndexOf('chatgpt can make mistakes'),
-    lower.lastIndexOf('check important info')
-  );
-  const start = footerIndex >= 0 ? Math.max(0, footerIndex - 320) : Math.max(0, text.length - 480);
-  const end = footerIndex >= 0 ? Math.min(text.length, footerIndex + 220) : text.length;
-  const scope = text.slice(start, end);
-  const candidates = [];
-  // "Thinking effort" is the composer's slider control label, not a report of the
-  // mode that answered, and it renders after the footer disclaimer in main's text.
-  const modeLabelPattern = /\b(?:extended\s*pro|pro\s*extended|thinking(?!\s+effort\b)|reasoning|medium|instant|fast)\b|\bpro\b(?!\s+standard\b)/gi;
-  for (const match of scope.matchAll(modeLabelPattern)) {
-    const label = match[0] || '';
-    const intent = modeIntentForLabel(label);
-    if (!intent) continue;
-    candidates.push({
-      intent,
-      label,
-      index: Number.isFinite(match.index) ? match.index : 0
-    });
-  }
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => b.index - a.index);
-  const best = candidates[0];
-  return {
-    intent: best.intent,
-    label: best.label,
-    source: footerIndex >= 0 ? 'page_footer' : 'page_tail'
-  };
-}
-
-function inferActualModeIntent({ text = '', pageText = '' } = {}) {
-  return inferModeIntentFromFooterText(pageText) || inferModeIntentFromFooterText(text);
-}
-
-function buildModeIntentDowngradeError({ requestedIntent, modeUsed, actualMode } = {}) {
-  const err = new Error('mode_intent_activation_failed');
-  err.data = {
-    reason: 'mode_intent_downgrade_detected',
-    targetIntent: requestedIntent || null,
-    state: {
-      activeIntent: modeUsed || null,
-      actualMode: actualMode || null
-    }
-  };
-  return err;
 }
 
 function buildResearchMeta({ activated = false, error = null, tabId = null, conversationUrl = null, debug = null } = {}) {
@@ -995,7 +943,7 @@ export class ChatGPTController {
     }
   }
 
-  async #runResponseObservationWithDeadline(operation, timeoutMs) {
+  async #runResponseObservationWithDeadline(operation, timeoutMs, { terminateEvaluation = true } = {}) {
     let timeoutId = null;
     let expired = false;
     let termination = Promise.resolve();
@@ -1005,7 +953,7 @@ export class ChatGPTController {
       timeoutId = setTimeout(() => {
         expired = true;
         this.quarantineExclusiveUntil(running);
-        termination = this.#settleCaptureTermination();
+        if (terminateEvaluation) termination = this.#settleCaptureTermination();
         const error = new Error('response_observation_deadline');
         error.code = 'response_observation_deadline';
         reject(error);
@@ -7409,7 +7357,6 @@ export class ChatGPTController {
           }).filter(c => c.text);
           return { codeBlocks: codes };
         })()`);
-        const actualMode = inferActualModeIntent({ text: txt, pageText });
         // Qualify the surface this completion came from. Error surfaces carry
         // no evidence (they are not final output); fallback page text without
         // an assistant node is not a qualified surface either — only image
@@ -7428,11 +7375,12 @@ export class ChatGPTController {
             count: snap?.count || 0,
             hasError: !!snap?.hasError,
             providerMessageId: snap?.providerMessageId || null,
+            conversationUrl,
             nodeBasis: snap?.nodeBasis || 'verbatim',
-            modeUsed: actualMode?.intent || null,
-            actualModeIntent: actualMode?.intent || null,
-            actualModeLabel: actualMode?.label || null,
-            actualModeSource: actualMode?.source || null,
+            modeUsed: null,
+            actualModeIntent: null,
+            actualModeLabel: null,
+            actualModeSource: null,
             completionEvidence: completionEvidenceFor(completionSource)
           }
         };
@@ -7485,17 +7433,6 @@ export class ChatGPTController {
                 advanced: true
               };
             } else {
-            let actualMode = null;
-            try {
-              const pageText = await this.#runResponseObservationWithDeadline(
-                async () => await this.#eval(`(() => {
-                  // recovery-page-mode
-                  return ((document.querySelector('main') || document.body)?.innerText || '').trim();
-                })()`),
-                Math.min(effectiveRecoveryTimeoutMs, 5_000)
-              );
-              actualMode = inferActualModeIntent({ text: recoveredText, pageText: String(pageText || '') });
-            } catch {}
             return {
               text: recoveredText,
               codeBlocks: [],
@@ -7509,11 +7446,13 @@ export class ChatGPTController {
                 count: assistants.length,
                 hasError: false,
                 recoveredBy: 'structured_conversation_capture',
-                modeVerification: actualMode ? 'observed_after_recovery' : 'unverified_after_recovery',
-                modeUsed: actualMode?.intent || null,
-                actualModeIntent: actualMode?.intent || null,
-                actualModeLabel: actualMode?.label || null,
-                actualModeSource: actualMode?.source || null,
+                modeVerification: 'unverified_after_recovery',
+                providerMessageId: finalAssistant.providerMessageId || null,
+                conversationUrl: capture.conversationUrl || conversationUrl,
+                modeUsed: null,
+                actualModeIntent: null,
+                actualModeLabel: null,
+                actualModeSource: null,
                 completionEvidence: completionEvidenceFor('structured-recovery')
               }
             };
@@ -7606,25 +7545,34 @@ export class ChatGPTController {
         result.meta = { ...(result.meta || {}), promptDelivery: await this.#readPromptDelivery(prompt) };
       }
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
-      const modeUsed = normalizeChatGptModeIntent(result?.meta?.modeUsed || result?.meta?.actualModeIntent, { fallback: null });
-      const actualModeSource = String(result?.meta?.actualModeSource || '');
-      if (requestedModeIntent && modeUsed && modeUsed !== requestedModeIntent && actualModeSource === 'page_footer') {
-        await this.#emitProgress({
-          phase: 'mode_intent_mismatch',
-          modeIntent: requestedModeIntent,
-          modeUsed,
-          degradedFrom: { modeIntent: requestedModeIntent }
-        });
-        throw buildModeIntentDowngradeError({
-          requestedIntent: requestedModeIntent,
-          modeUsed,
-          actualMode: {
-            intent: modeUsed,
-            label: result?.meta?.actualModeLabel || null,
-            source: result?.meta?.actualModeSource || null
-          }
-        });
+      let responseModeEvidence = null;
+      if (this.vendorId === 'chatgpt' && !imageGeneration && result?.meta?.providerMessageId && typeof this.page.readResponseMode === 'function') {
+        await this.#emitProgress({ phase: 'verifying_response_mode' });
+        const conversationUrl = result.meta.conversationUrl;
+        const observation = await this.#runResponseObservationWithDeadline(
+          async () => await this.page.readResponseMode({
+            conversationUrl,
+            providerMessageId: result.meta.providerMessageId,
+            timeoutMs: this.navigationTimeoutMs
+          }),
+          this.navigationTimeoutMs,
+          { terminateEvaluation: false }
+        ).catch(() => null);
+        responseModeEvidence = responseModeEvidenceForMessage(observation, { conversationUrl, providerMessageId: result.meta.providerMessageId });
       }
+      const modeUsed = modeIntentForResponseModelSlug(responseModeEvidence?.resolvedModelSlug || responseModeEvidence?.modelSlug);
+      const degradedFrom = requestedModeIntent && modeUsed && modeUsed !== requestedModeIntent ? { modeIntent: requestedModeIntent } : null;
+      result.meta = {
+        ...result.meta,
+        modeUsed,
+        actualModeIntent: modeUsed,
+        actualModeLabel: modeUsed === 'extended-pro' ? 'Pro' : modeUsed === 'thinking' ? 'Thinking' : modeUsed === 'instant' ? 'Instant' : null,
+        actualModeSource: responseModeEvidence ? 'response_metadata' : null,
+        modeVerification: this.vendorId === 'chatgpt' && !imageGeneration ? modeUsed ? 'observed' : 'unverified' : null,
+        responseModeEvidence,
+        degradedFrom
+      };
+      await this.#emitProgress({ phase: degradedFrom ? 'mode_intent_mismatch' : modeUsed ? 'response_mode_verified' : 'response_mode_unverified', modeUsed, degradedFrom });
       return result;
     } finally {
       if (this.currentRun === run) this.currentRun = null;
