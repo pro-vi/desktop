@@ -150,3 +150,24 @@ The final local `npm test` run passed: 1,022 tests, zero failures or skips.
 The invariant and failure-mode reviewers rechecked the repaired dependencies
 with independent probes and found no remaining issue in those scopes. The
 separate wrong-prompt defect still prevents overall query acceptance.
+
+## Composer replacement — 2026-10-12
+
+Checked with Electron 39.6.0 on the ChatGPT page observed on 2026-10-12. The page build identifier was not captured. The production controller changed from base `66eaac2`; the controller source digest is `b0ccb0eb18cf3515b02d2dcc7702d20ca4049ef6ce574e527470ff48f20c6587`.
+
+An inherited draft could extend above the viewport. On the base controller, a composer click at (436, -177) removed editor focus after Pro selection. Clearing and insertion then left the inherited text in place. Send accepted that nonempty text. A matching native reproduction captured the inherited prompt in the request body; the original reported run did not record its focus events.
+
+The controller now clips the click to the viewport, resolves and focuses the current editor after pointer input, and checks the ordinary replacement path's staged text before Send. Textarea values retain exact text after line-ending normalization. Rich editor text folds rendered whitespace while preserving ordered words and punctuation. Focus or staging failures return HTTP 409 without a success receipt. Inline research selection retains its existing insertion path.
+
+### Verification
+
+- The original regression cases failed on the base controller and pass after the repair. The repository suite passed 1,033 tests. The affected prompt cases passed again after removing an unused test-fixture option.
+- Native checks cover an inherited draft followed by Pro selection, and prompt entry overlapping across two windows.
+- Each captured request containing prompt text requested Pro and contained the intended replacement prompt exactly after removing the automatic Markdown wrapper around a known URL.
+- Owned-window POSTs were intercepted at the Fetch request stage and failed locally. Failure commands were acknowledged and corresponding network failures were observed. A local server control showed the blocker prevented delivery while its unblocked control reached the server.
+- The successful runs started with an empty default composer. The probe now refuses every nonempty default draft; controlled checks cover unknown content and content matching earlier probes. Owned test drafts were cleared and owned windows closed.
+- Execution-time records identify the loaded controller class, native driver, Electron binary, fixture digest, and source files. Those source files remained unchanged throughout each run.
+
+### Evidence limits
+
+These native checks exercise the real controller and Electron input against ChatGPT. Full public MCP response completion and retry remain unverified after this repair. No new provider answer was generated, and provider billing was not independently measured. The network error did not match the probe's literal blocked-error flag; explicit failure acknowledgments and subsequent failure events support the interception claim.

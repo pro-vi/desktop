@@ -5759,6 +5759,131 @@ test('chatgpt-controller: image-generation queries do not treat loader canvases 
   }
 });
 
+function composerInputPage({
+  textarea = false,
+  remountOnClick = false,
+  refuseFocus = false,
+  discardInput = false,
+  flattenLines = false,
+  transformInput = (text) => text
+} = {}) {
+  let draft = 'Old draft from another request';
+  let selected = false;
+  const clicks = [];
+  const keyTargets = [];
+  const document = { activeElement: { tagName: 'BODY' } };
+  const makeEditor = () => ({
+    isContentEditable: !textarea,
+    disabled: false,
+    readOnly: false,
+    get value() { return draft; },
+    get innerText() { return textarea ? draft : draft.replace(/\n/g, '\n\n'); },
+    get textContent() { return draft; },
+    getAttribute(name) {
+      return { 'aria-label': 'Message ChatGPT', role: 'textbox', contenteditable: textarea ? null : 'true' }[name] ?? null;
+    },
+    matches(selector) { return textarea && /textarea/.test(selector); },
+    contains(node) { return node === this; },
+    focus() { if (!refuseFocus) document.activeElement = this; },
+    getBoundingClientRect() { return { x: 418, y: -195, width: 553, height: 728 }; }
+  });
+  let editor = makeEditor();
+  document.querySelectorAll = () => [editor];
+  return {
+    clicks,
+    keyTargets,
+    get draft() { return draft; },
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) {
+        return vm.runInNewContext(js, {
+          document,
+          window: {
+            innerWidth: 1100,
+            innerHeight: 768,
+            getComputedStyle: () => ({ display: 'block', visibility: 'visible' })
+          }
+        });
+      }
+      if (js.includes('already_generating')) throw new Error('reached_send_boundary');
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async sendKey(key, options = {}) {
+      keyTargets.push(document.activeElement === editor);
+      if (document.activeElement !== editor || discardInput) return;
+      if (key === 'A' && options.modifiers?.some((value) => ['meta', 'control'].includes(value))) selected = true;
+      if (key === 'Backspace' && selected) { draft = ''; selected = false; }
+      if (key === 'Return' && options.modifiers?.includes('shift')) draft += flattenLines ? ' ' : '\n';
+    },
+    async insertText(text) {
+      if (document.activeElement === editor && !discardInput) draft += transformInput(text);
+    },
+    async moveMouse() {},
+    async mouseDown() {},
+    async mouseUp(x, y) {
+      clicks.push({ x, y });
+      // Closing a mode popup can blur or replace the editor.
+      document.activeElement = { tagName: 'BODY' };
+      if (remountOnClick) editor = makeEditor();
+    }
+  };
+}
+
+function composerInputController(page) {
+  return new ChatGPTController({ page, selectors: { promptTextarea: '[role="textbox"]' } });
+}
+
+test('chatgpt-controller: prompt replacement clicks inside the viewport and refocuses the current editor', async () => {
+  const page = composerInputPage({ remountOnClick: true });
+  await assert.rejects(composerInputController(page).send({ text: 'The intended request' }), /reached_send_boundary/);
+  assert.equal(page.draft, 'The intended request');
+  assert.ok(page.keyTargets.every(Boolean), 'every typing key must reach the current editor');
+  assert.ok(page.clicks.every(({ x, y }) => x >= 0 && x < 1100 && y >= 0 && y < 768));
+});
+
+test('chatgpt-controller: prompt replacement rejects an editor that refuses focus', async () => {
+  const page = composerInputPage({ refuseFocus: true });
+  await assert.rejects(composerInputController(page).send({ text: 'The intended request' }), /prompt_focus_failed/);
+  assert.equal(page.keyTargets.length, 0);
+});
+
+test('chatgpt-controller: prompt replacement rejects a nonempty inherited draft when input is ignored', async () => {
+  const page = composerInputPage({ discardInput: true });
+  await assert.rejects(composerInputController(page).send({ text: 'The intended request' }), (error) => {
+    assert.equal(error.message, 'prompt_staging_failed');
+    assert.equal(JSON.stringify(error.data).includes(page.draft), false);
+    return true;
+  });
+});
+
+test('chatgpt-controller: prompt replacement rejects changed punctuation despite identical letters and digits', async () => {
+  const page = composerInputPage({ transformInput: (text) => text.replace('+', '-') });
+  await assert.rejects(composerInputController(page).send({ text: '1+2' }), /prompt_staging_failed/);
+});
+
+test('chatgpt-controller: prompt replacement accepts rich-editor paragraph spacing', async () => {
+  const page = composerInputPage();
+  await assert.rejects(composerInputController(page).send({ text: 'First paragraph\n\nSecond paragraph' }), /reached_send_boundary/);
+  assert.equal(page.draft.replace(/\s+/gu, ' ').trim(), 'First paragraph Second paragraph');
+});
+
+test('chatgpt-controller: prompt replacement rejects flattened lines', async () => {
+  const page = composerInputPage({ textarea: true, flattenLines: true });
+  await assert.rejects(composerInputController(page).send({ text: 'First line\nSecond line' }), /prompt_staging_failed/);
+});
+
+test('chatgpt-controller: prompt replacement rejects missing indentation on the first line', async () => {
+  const page = composerInputPage({ textarea: true, transformInput: (text) => text === ' ' ? '' : text });
+  await assert.rejects(composerInputController(page).send({ text: '  code' }), /prompt_staging_failed/);
+});
+
+test('chatgpt-controller: prompt replacement checks textarea values', async () => {
+  const page = composerInputPage({ textarea: true });
+  await assert.rejects(composerInputController(page).send({ text: 'The intended request' }), /reached_send_boundary/);
+  assert.equal(page.draft, 'The intended request');
+});
+
 test('chatgpt-controller: send fails when the prompt never stages in the active composer', async () => {
   const page = {
     async navigate() {},

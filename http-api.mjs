@@ -164,6 +164,7 @@ function mapErrorToHttp(error) {
   if (msg === 'attachment_upload_failed') return { code: 409, body: { error: 'attachment_upload_failed', data: error?.data || null } };
   if (msg === 'attachment_upload_stalled') return { code: 409, body: { error: 'attachment_upload_stalled', data: error?.data || null } };
   if (msg === 'missing_staged_prompt') return { code: 409, body: { error: 'missing_staged_prompt', data: error?.data || null } };
+  if (msg === 'prompt_focus_failed' || msg === 'prompt_staging_failed') return { code: 409, body: { error: msg, data: error?.data || null } };
   if (msg === 'send_not_triggered') return { code: 409, body: { error: 'send_not_triggered', data: error?.data || null } };
   if (msg === 'shared_chat_materialization_failed') return { code: 409, body: { error: 'shared_chat_materialization_failed', data: error?.data || null } };
   if (msg === 'conversation-not-live-bound') return { code: 409, body: { error: 'conversation-not-live-bound' } };
@@ -1752,6 +1753,16 @@ export function startHttpApi({
         status: 'error',
         label: 'Prompt not staged',
         detail: 'The prompt never appeared in the active composer.'
+      };
+    }
+    if (message === 'prompt_focus_failed' || message === 'prompt_staging_failed') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Prompt not sent',
+        detail: message === 'prompt_focus_failed'
+          ? 'The composer could not receive typing input. No prompt was sent.'
+          : 'The composer text did not match the requested prompt. No prompt was sent.'
       };
     }
     if (message === 'send_not_triggered') {

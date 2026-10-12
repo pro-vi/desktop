@@ -8889,6 +8889,51 @@ test('http-api: query rejects unknown vendor hint', async (t) => {
   assert.equal(r.data.error, 'invalid_vendor');
 });
 
+test('http-api: composer focus and staging failures return conflicts without success receipts', async (t) => {
+  for (const errorCode of ['prompt_focus_failed', 'prompt_staging_failed']) {
+    await t.test(errorCode, async (t) => {
+      const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-composer-failure-'));
+      t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+      const controller = {
+        runExclusive: async (fn) => await fn(),
+        query: async () => {
+          const error = new Error(errorCode);
+          error.data = { expectedChars: 21, stagedChars: 28 };
+          throw error;
+        },
+        getUrl: async () => 'https://chatgpt.com/'
+      };
+      const tabs = {
+        listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
+        ensureTab: async () => 't0',
+        getControllerById: () => controller
+      };
+      const server = await startHttpApi({
+        providerTabOperations: createProviderTabOperationLeases(),
+        port: 0,
+        token: 'test-token',
+        tabs,
+        defaultTabId: 't0',
+        stateDir,
+        getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100 }),
+        getStatus: async () => ({ ok: true })
+      });
+      t.after(() => server.close());
+      const port = server.address().port;
+      const response = await req({ port, token: 'test-token', method: 'POST', pth: '/query', body: { prompt: 'The intended request' } });
+      assert.equal(response.res.status, 409);
+      assert.equal(response.data.error, errorCode);
+      const runs = await req({ port, token: 'test-token', method: 'POST', pth: '/runs/list', body: {} });
+      assert.equal(runs.data.runs.length, 1);
+      assert.equal(runs.data.runs[0].status, 'error');
+      assert.equal(runs.data.runs[0].completionReceipt ?? null, null);
+      const status = await req({ port, token: 'test-token', method: 'GET', pth: '/status' });
+      assert.equal(status.data.runtime.lastOutcomes[0].label, 'Prompt not sent');
+      assert.match(status.data.runtime.lastOutcomes[0].detail, /No prompt was sent\./);
+    });
+  }
+});
+
 test('http-api: ensure-ready timeout maps to 408 with details', async (t) => {
   const controller = {
     runExclusive: async (fn) => await fn(),

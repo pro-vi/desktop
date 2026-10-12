@@ -5727,10 +5727,10 @@ export class ChatGPTController {
     );
   }
 
-  async #focusPromptImpl({ phase = null, clickPrompt = true } = {}) {
+  async #focusPromptImpl({ phase = null, clickPrompt = true, expectedPrompt = null } = {}) {
     if (phase) await this.#emitProgress({ phase });
     const sel = JSON.stringify(this.selectors.promptTextarea);
-    const ok = await this.#eval(`(() => {
+    const focusScript = `(() => {
       const visible = (n) => {
         const r = n.getBoundingClientRect();
         const style = window.getComputedStyle(n);
@@ -5783,9 +5783,31 @@ export class ChatGPTController {
       }
       if (!el) return { ok:false, error:'missing_prompt_textarea' };
       el.focus();
+      if (document.activeElement !== el && !el.contains(document.activeElement)) {
+        return { ok:false, error:'prompt_focus_failed' };
+      }
+      const expectedPrompt = ${JSON.stringify(expectedPrompt)};
+      if (expectedPrompt !== null) {
+        const usesValue = el.matches('textarea, input');
+        const staged = usesValue
+          ? String(el.value || '')
+          : String(el.innerText || el.textContent || '');
+        // Check values exactly; fold layout whitespace only in rendered rich text.
+        const normalize = usesValue
+          ? (text) => text.replace(/\\r\\n?/g, '\\n')
+          : (text) => text.replace(/\\s+/gu, ' ').trim();
+        if (normalize(staged) !== normalize(expectedPrompt)) {
+          return { ok:false, error:'prompt_staging_failed', expectedChars:expectedPrompt.length, stagedChars:staged.length };
+        }
+      }
       const r = el.getBoundingClientRect();
-      return { ok:true, rect: { x: r.x, y: r.y, w: r.width, h: r.height } };
-    })()`);
+      const x = Math.max(0, r.x);
+      const y = Math.max(0, r.y);
+      const right = Math.min(window.innerWidth, r.x + r.width);
+      const bottom = Math.min(window.innerHeight, r.y + r.height);
+      return { ok:true, rect: { x, y, w: Math.max(0, right - x), h: Math.max(0, bottom - y) } };
+    })()`;
+    let ok = await this.#eval(focusScript);
     if (!ok?.ok) {
       const err = new Error(ok?.error || 'type_failed');
       err.data = ok;
@@ -5793,9 +5815,16 @@ export class ChatGPTController {
     }
 
     if (clickPrompt && ok?.rect?.w > 0 && ok?.rect?.h > 0) {
-      const cx = Math.round(ok.rect.x + Math.min(ok.rect.w - 6, 18));
-      const cy = Math.round(ok.rect.y + Math.min(ok.rect.h - 6, 18));
+      const cx = Math.floor(ok.rect.x + ok.rect.w / 2);
+      const cy = Math.floor(ok.rect.y + ok.rect.h / 2);
       await this.#clickAt(cx, cy);
+      // Re-resolve after pointer input so typing reaches the current editor.
+      ok = await this.#eval(focusScript);
+      if (!ok?.ok) {
+        const err = new Error(ok?.error || 'type_failed');
+        err.data = ok;
+        throw err;
+      }
     }
 
     return ok;
@@ -5811,6 +5840,7 @@ export class ChatGPTController {
     await this.#sendKey('Backspace');
     await sleep(jitter(25, 80));
     await this.#typeHuman(prompt);
+    await this.#focusPrompt({ clickPrompt: false, expectedPrompt: prompt });
   }
 
   // ChatGPT has received a prompt with one line missing while its composer
