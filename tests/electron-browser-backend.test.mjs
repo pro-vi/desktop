@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 
 import { ElectronBrowserBackend } from '../electron-browser-backend.mjs';
 
@@ -470,6 +471,52 @@ test('electron-browser-backend: insertText uses native webContents.insertText wh
   await session.page.insertText('hello');
 
   assert.equal(inserted, 'hello');
+});
+
+test('electron-browser-backend: select-all shortcut uses the native editing command', async () => {
+  const actions = [];
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor() {
+      super();
+      this.webContents.selectAll = () => actions.push('selectAll');
+      this.webContents.sendInputEvent = (event) => actions.push(event);
+    }
+    async loadURL() {}
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/' });
+  await page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
+  assert.deepEqual(actions, ['selectAll']);
+  await backend.dispose();
+});
+
+test('electron-browser-backend: Shift+Return inserts a textarea newline but preserves rich-editor key events', async (t) => {
+  for (const tagName of ['TEXTAREA', 'DIV', 'INPUT']) {
+    await t.test(tagName, async () => {
+      const events = [];
+      const inserted = [];
+      class OkBrowserWindow extends MockBrowserWindow {
+        constructor() {
+          super();
+          this.webContents.executeJavaScript = async (script) => vm.runInNewContext(script, {
+            document: { activeElement: { tagName } }
+          });
+          this.webContents.insertText = async (text) => inserted.push(text);
+          this.webContents.sendInputEvent = (event) => events.push(event);
+        }
+        async loadURL() {}
+      }
+      const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+      const { page } = await backend.createSession({ url: 'https://chatgpt.com/' });
+      await page.sendKey('Return', { modifiers: ['shift'] });
+      assert.deepEqual(inserted, tagName === 'TEXTAREA' ? ['\n'] : []);
+      assert.deepEqual(events, tagName === 'TEXTAREA' ? [] : [
+        { type: 'keyDown', keyCode: 'Return', modifiers: ['shift'] },
+        { type: 'keyUp', keyCode: 'Return', modifiers: ['shift'] }
+      ]);
+      await backend.dispose();
+    });
+  }
 });
 
 test('electron-browser-backend: waitForDownload resolves completed will-download items', async (t) => {

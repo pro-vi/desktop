@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 
 import { ensureToken, writeState } from '../state.mjs';
 import { ensureDesktopRunning, normalizeDesktopStatus, requestJson } from '../mcp-lib.mjs';
@@ -147,4 +149,132 @@ test('mcp-lib: ensureDesktopRunning resolves bundled electron relative to deskto
   } finally {
     process.chdir(originalCwd);
   }
+});
+
+test('mcp-lib: relaunch retries after a lock-denied launcher exits normally', async (t) => {
+  const dir = await tempDir();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  let launcher;
+  t.after(async () => {
+    if (launcher?.exitCode === null) {
+      launcher.kill();
+      await once(launcher, 'exit');
+    }
+  });
+  await fs.writeFile(path.join(dir, 'token.txt'), 't\n');
+  await writeState({ port: 12345, serverId: 'sid-old' }, dir);
+  let running = false;
+  let spawned = 0;
+  const healthyFetch = makeFetch({ getServerId: () => 'sid-new' });
+  const conn = await ensureDesktopRunning({
+    stateDir: dir,
+    timeoutMs: 3000,
+    fetchImpl: (...args) => {
+      if (!running) throw new Error('connection_refused');
+      return healthyFetch(...args);
+    },
+    spawnImpl: () => {
+      spawned += 1;
+      if (spawned === 1) {
+        launcher = spawn(process.execPath, ['-e', 'process.exit(0)']);
+        return launcher;
+      }
+      assert.equal(launcher.exitCode, 0);
+      running = true;
+      void writeState({ port: 12345, serverId: 'sid-new' }, dir);
+      return { unref() {} };
+    }
+  });
+  assert.equal(spawned, 2);
+  assert.equal(conn.serverId, 'sid-new');
+});
+
+test('mcp-lib: an unresponsive live launcher times out without spawning a competitor', async (t) => {
+  const dir = await tempDir();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'token.txt'), 't\n');
+  await writeState({ port: 12345, serverId: 'sid-old' }, dir);
+  let spawned = 0;
+  let launcher;
+  t.after(async () => {
+    if (launcher?.exitCode === null) {
+      launcher.kill();
+      await once(launcher, 'exit');
+    }
+  });
+  await assert.rejects(() => ensureDesktopRunning({
+    stateDir: dir,
+    timeoutMs: 700,
+    fetchImpl: async () => { throw new Error('connection_refused'); },
+    spawnImpl: () => {
+      spawned += 1;
+      launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+      return launcher;
+    }
+  }), { message: 'desktop_start_timeout' });
+  assert.equal(spawned, 1);
+});
+
+test('mcp-lib: a failed launcher is not repeatedly respawned', async (t) => {
+  const dir = await tempDir();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  let spawned = 0;
+  await assert.rejects(() => ensureDesktopRunning({
+    stateDir: dir,
+    timeoutMs: 700,
+    fetchImpl: async () => { throw new Error('connection_refused'); },
+    spawnImpl: () => {
+      spawned += 1;
+      return { exitCode: 1, unref() {} };
+    }
+  }), { message: 'desktop_start_timeout' });
+  assert.equal(spawned, 1);
+});
+
+test('mcp-lib: a stale PID belonging to another process does not block startup', async (t) => {
+  const dir = await tempDir();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'token.txt'), 't\n');
+  await writeState({ port: 12345, serverId: 'sid-live', pid: process.pid }, dir);
+  let spawned = 0;
+  let running = false;
+  const healthyFetch = makeFetch({ getServerId: () => 'sid-new' });
+  const conn = await ensureDesktopRunning({
+    stateDir: dir,
+    timeoutMs: 1000,
+    fetchImpl: (...args) => {
+      if (!running) throw new Error('connection_refused');
+      return healthyFetch(...args);
+    },
+    spawnImpl: () => {
+      spawned += 1;
+      running = true;
+      void writeState({ port: 12345, serverId: 'sid-new' }, dir);
+      return { unref() {} };
+    }
+  });
+  assert.equal(spawned, 1);
+  assert.equal(conn.serverId, 'sid-new');
+});
+
+test('mcp-lib: connection validation shares the startup deadline', async (t) => {
+  const dir = await tempDir();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'token.txt'), 't\n');
+  await writeState({ port: 12345, serverId: 'sid-live', pid: process.pid }, dir);
+  let aborted = false;
+  await assert.rejects(() => ensureDesktopRunning({
+    stateDir: dir,
+    timeoutMs: 80,
+    fetchImpl: async (_url, { signal } = {}) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve({ ok: false, json: async () => ({}) }), 2000);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        aborted = true;
+        reject(signal.reason);
+      }, { once: true });
+    }),
+    spawnImpl: () => { throw new Error('must_not_spawn'); }
+  }), { message: 'desktop_start_timeout' });
+  assert.equal(aborted, true);
 });

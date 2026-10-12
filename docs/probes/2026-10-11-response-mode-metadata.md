@@ -171,3 +171,22 @@ The controller now clips the click to the viewport, resolves and focuses the cur
 ### Evidence limits
 
 These native checks exercise the real controller and Electron input against ChatGPT. Full public MCP response completion and retry remain unverified after this repair. No new provider answer was generated, and provider billing was not independently measured. The network error did not match the probe's literal blocked-error flag; explicit failure acknowledgments and subsequent failure events support the interception claim.
+
+## Native editing and immediate restart — 2026-10-12
+
+Checked with Electron 39.6.0 from base `66e3cf3`. The patched source digests are `a8b42efbc3c3ad77e989ddc665014d880f7d2d10b8a36c9acbefcc7b43dac32c` for `electron-browser-backend.mjs` and `65296cd1f18ae71412d457f254c59e05b5b0552ee4dbaeacd7f720c43210648f` for `mcp-lib.mjs`.
+
+On an owned native textarea, synthetic Command+A did not select the draft and Shift+Return did not insert a newline. The production controller rejected the resulting text with `prompt_staging_failed` before Send. The Electron adapter now uses the native select-all command for the platform shortcut and native newline insertion for a focused textarea. Rich text editors retain their Shift+Return key events.
+
+An immediate relaunch also failed after public shutdown: the old Electron process still held its single-instance lock, the newly launched process failed to acquire it and exited successfully, and the launcher waited on stale state until its deadline. The launcher now retries after the process it spawned exits normally before the API is ready. It checks for a healthy server before each launch attempt. A live launcher is not duplicated and a launcher that exits with an error is not repeatedly spawned. Retained PIDs are not used as ownership proof. Connection validation and startup share one deadline.
+
+### Verification
+
+- Regression checks cover normal launcher exit, an unresponsive live launcher, a failed launcher, a stale PID belonging to another process, and health-check cancellation. The native editing regressions failed on the base source and pass on the patched source. The repository suite and targeted launcher checks passed.
+- The actual production controller staged both a 22-character multiline prompt and a 680-character multiline prompt through the native Electron adapter. Exact textarea values matched without trimming. Owned rich-editor fixtures preserved text and their newline handlers. No editing method was replaced by the probe. Send was intercepted at the local controller boundary.
+- A fresh public stdio MCP process exercised shutdown followed immediately by status twice. In both cases the old process was alive when shutdown returned. Status succeeded after 7,878 ms and 6,376 ms, respectively, with different process and server identities. Observed launchers exited normally before each successful replacement launch. The probe inserted no process-exit wait. The final app returned a visible, unblocked composer after public ensure-ready.
+- No provider prompts were sent by these editing and restart checks. The normal desktop entry remains running. Existing MCP clients load the changed launcher after their MCP server process restarts.
+
+### Evidence limits
+
+The editing checks use owned local textarea and rich-editor fixtures. They prove native staging, not a fresh ChatGPT answer on this revision. Earlier public Pro retry and Thinking query checks ran on `66e3cf3` before these adapter and launcher changes. The older connector wait failure's original error content was not retained, so its cause remains unknown.

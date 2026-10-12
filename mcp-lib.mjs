@@ -29,15 +29,15 @@ async function loadConnection({ stateDir }) {
   return { baseUrl: `http://127.0.0.1:${state.port}`, token, serverId: state.serverId || null };
 }
 
-async function validateConn({ conn, fetchImpl }) {
+async function validateConn({ conn, fetchImpl, signal }) {
   // 1) Health: ensures something is listening, and optionally matches serverId.
-  const health = await fetchImpl(`${conn.baseUrl}/health`);
+  const health = await fetchImpl(`${conn.baseUrl}/health`, { signal });
   const healthData = await health.json().catch(() => ({}));
   if (!health.ok) return { ok: false, reason: 'health_not_ok' };
   if (conn.serverId && healthData?.serverId && conn.serverId !== healthData.serverId) return { ok: false, reason: 'server_id_mismatch' };
 
   // 2) Authenticated status: ensures token matches and the server is ours.
-  const status = await fetchImpl(`${conn.baseUrl}/status`, { headers: { authorization: `Bearer ${conn.token}` } });
+  const status = await fetchImpl(`${conn.baseUrl}/status`, { headers: { authorization: `Bearer ${conn.token}` }, signal });
   const statusData = await status.json().catch(() => ({}));
   if (!status.ok) return { ok: false, reason: 'status_not_ok', status: status.status };
   if (statusData?.error === 'unauthorized') return { ok: false, reason: 'unauthorized' };
@@ -78,10 +78,12 @@ export async function ensureDesktopRunning({
   timeoutMs = 30_000,
   showTabs = false
 }) {
+  const deadline = Date.now() + timeoutMs;
+  const signal = AbortSignal.timeout(timeoutMs);
   const conn = await loadConnection({ stateDir });
   if (conn) {
     try {
-      const v = await validateConn({ conn, fetchImpl });
+      const v = await validateConn({ conn, fetchImpl, signal });
       if (v.ok) return conn;
     } catch {
       // fallthrough to spawn
@@ -106,26 +108,33 @@ export async function ensureDesktopRunning({
   }
   if (!(await fileExists(entry))) throw new Error('missing_desktop_entry');
 
-  spawnImpl(electronBin, [entry], {
-    detached: true,
-    stdio: 'ignore',
-    env: {
-      ...process.env,
-      AGENTIFY_DESKTOP_STATE_DIR: stateDir,
-      ...(showTabs ? { AGENTIFY_DESKTOP_SHOW_TABS: 'true' } : {})
-    }
-  })?.unref?.();
-
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  let spawned = false;
+  let launcher;
+  while (Date.now() < deadline) {
     const c = await loadConnection({ stateDir });
     if (c) {
       try {
-        const v = await validateConn({ conn: c, fetchImpl });
+        const v = await validateConn({ conn: c, fetchImpl, signal });
         if (v.ok) return c;
       } catch {}
     }
-    await sleep(300);
+    if (Date.now() >= deadline) break;
+    // Lock denial exits normally. Retry after that launcher exits, since
+    // shutdown can close HTTP before Electron releases its instance lock.
+    if (!spawned || launcher?.exitCode === 0) {
+      launcher = spawnImpl(electronBin, [entry], {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          AGENTIFY_DESKTOP_STATE_DIR: stateDir,
+          ...(showTabs ? { AGENTIFY_DESKTOP_SHOW_TABS: 'true' } : {})
+        }
+      });
+      spawned = true;
+      launcher?.unref?.();
+    }
+    await sleep(Math.max(0, Math.min(300, deadline - Date.now())));
   }
   throw new Error('desktop_start_timeout');
 }

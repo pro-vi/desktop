@@ -238,6 +238,16 @@ class ElectronPageAdapter {
     // Callers use DOM key names; sendInputEvent takes accelerator names, which
     // spell the arrow keys Up/Down/Left/Right (Home and End are the same).
     key = ELECTRON_KEY_NAMES[key] || key;
+    const primaryModifier = process.platform === 'darwin' ? 'meta' : 'control';
+    if (key === 'A' && modifiers.length === 1 && modifiers[0] === primaryModifier) {
+      wc.selectAll();
+      return;
+    }
+    if (key === 'Return' && modifiers.length === 1 && modifiers[0] === 'shift'
+      && await wc.executeJavaScript("document.activeElement?.tagName === 'TEXTAREA'", true)) {
+      await wc.insertText('\n');
+      return;
+    }
     wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
     const hasCommandModifier = Array.isArray(modifiers) && modifiers.some((m) => m === 'control' || m === 'meta' || m === 'alt');
     if (typeof key === 'string' && key.length === 1 && !hasCommandModifier) {
