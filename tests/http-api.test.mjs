@@ -9046,7 +9046,7 @@ test('http-api: composer focus and staging failures return conflicts without suc
       assert.equal(status.data.runtime.lastOutcomes[0].label, 'Prompt not sent');
       assert.match(status.data.runtime.lastOutcomes[0].detail, /No prompt was sent\./);
       if (errorCode === 'prompt_staging_failed') {
-        assert.match(status.data.runtime.lastOutcomes[0].detail, /at character 4, from "intended request"/);
+        assert.match(status.data.runtime.lastOutcomes[0].detail, /requested prompt starting at "intended request"/);
       }
     });
   }

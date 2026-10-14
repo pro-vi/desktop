@@ -256,16 +256,17 @@ class ElectronPageAdapter {
     // sendInputEvent queues keys behind Electron's input router while insertText
     // commits text over another channel, so a line typed right after Shift+Return
     // could reach the editor before the newline. Return once the page saw keyUp.
-    await wc.executeJavaScript(`void (${KEY_UP_SEEN} = new Promise((resolve) => {
+    const inPage = (js) => settleWithin(wc.executeJavaScript(js, true).catch(() => {}), KEY_UP_WAIT_MS);
+    await inPage(`void (${KEY_UP_SEEN} = new Promise((resolve) => {
       window.addEventListener('keyup', () => resolve(), { once: true, capture: true });
-    }))`, true).catch(() => {});
+    }))`);
     wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
     const hasCommandModifier = Array.isArray(modifiers) && modifiers.some((m) => m === 'control' || m === 'meta' || m === 'alt');
     if (typeof key === 'string' && key.length === 1 && !hasCommandModifier) {
       wc.sendInputEvent({ type: 'char', keyCode: key, modifiers });
     }
     wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers });
-    await settleWithin(wc.executeJavaScript(KEY_UP_SEEN, true).catch(() => {}), KEY_UP_WAIT_MS);
+    await inPage(KEY_UP_SEEN);
   }
 
   async insertText(text) {

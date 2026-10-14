@@ -553,9 +553,9 @@ function stagingMismatchDetail(firstDifference) {
   const base = 'The composer text did not match the requested prompt';
   if (!firstDifference) return `${base}. No prompt was sent.`;
   const where = firstDifference.expected
-    ? `from ${JSON.stringify(firstDifference.expected)}`
+    ? `starting at ${JSON.stringify(firstDifference.expected)}`
     : 'because the composer held extra text after it';
-  return `${base} at character ${firstDifference.at}, ${where}. No prompt was sent.`;
+  return `${base} ${where}. No prompt was sent.`;
 }
 
 function deriveProjectUrlFromConversationUrl(value) {
