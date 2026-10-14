@@ -4052,6 +4052,57 @@ test('chatgpt-controller: a surface changed to Work after prompt entry is reject
   assert.equal(harness.pointerEvents.includes('down:335,335'), false);
 });
 
+function projectPageContext(gizmoResponseStatus) {
+  const projectId = `g-p-${'a'.repeat(32)}`;
+  const pathname = `/g/${projectId}-agentify/project`;
+  return {
+    document: {
+      body: { innerText: 'Loading project' },
+      title: 'ChatGPT',
+      readyState: 'complete',
+      querySelectorAll: () => [],
+      querySelector: () => null
+    },
+    location: { href: `https://chatgpt.com${pathname}`, hostname: 'chatgpt.com', pathname },
+    window: { getComputedStyle: () => ({}) },
+    performance: {
+      getEntriesByType: (type) => type === 'resource'
+        ? [{ name: `https://chatgpt.com/backend-api/gizmos/${projectId}?include_file_limits=true`, responseStatus: gizmoResponseStatus }]
+        : []
+    },
+    URL
+  };
+}
+
+test('chatgpt-controller: readiness fails at once on a project the provider refuses', async () => {
+  const blocked = [];
+  const controller = new ChatGPTController({
+    page: { evaluate: async (js) => vm.runInNewContext(js, projectPageContext(403)) },
+    selectors: { promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]' },
+    onBlocked: async (st) => blocked.push(st)
+  });
+  const startedAt = Date.now();
+  await assert.rejects(controller.ensureReady({ timeoutMs: 60_000 }), (error) => {
+    assert.equal(error.message, 'project_unavailable');
+    assert.deepEqual(error.data, {
+      url: `https://chatgpt.com/g/g-p-${'a'.repeat(32)}-agentify/project`,
+      projectId: `g-p-${'a'.repeat(32)}`,
+      status: 403
+    });
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 5_000);
+  assert.deepEqual(blocked, []);
+});
+
+test('chatgpt-controller: a project the provider served keeps the ordinary readiness wait', async () => {
+  const controller = new ChatGPTController({
+    page: { evaluate: async (js) => vm.runInNewContext(js, projectPageContext(200)) },
+    selectors: { promptTextarea: '#prompt-textarea', sendButton: 'button[data-testid="send-button"]' }
+  });
+  await assert.rejects(controller.ensureReady({ timeoutMs: 50 }), (error) => error.message === 'timeout_waiting_for_prompt');
+});
+
 async function surfaceSnapshot(options) {
   modePickerNodes = [];
   const dom = buildModePickerDom(options);

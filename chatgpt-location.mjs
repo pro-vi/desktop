@@ -59,6 +59,16 @@ export function parseChatGptProjectUrl(value, { field = 'projectUrl' } = {}) {
   return parsed.toString();
 }
 
+// A project path segment is `g-p-<32 hex id>` plus an optional `-<slug>` that
+// follows the project's current name, so only the id identifies the project.
+export function chatGptProjectIdFromUrl(value) {
+  try {
+    return parseUrl(value)?.pathname.match(/^\/g\/(g-p-(?:[0-9a-f]{32}|[^/]+))/)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
 export function locationFromConversationUrl(value, { sourceUrl = null } = {}) {
   const target = parseChatGptEntryTarget(value);
   if (!target || target.kind !== 'canonical-conversation') {

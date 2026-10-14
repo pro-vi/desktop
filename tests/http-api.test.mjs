@@ -3790,6 +3790,121 @@ test('http-api: chatUrl and projectUrl conflict before navigation', async (t) =>
   assert.equal(response.data.error, 'chatgpt_location_conflict');
 });
 
+async function startProjectQueryHttp(t, controller) {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-project-entry-'));
+  const tabsList = [{ id: 't-project', key: 'project-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', projectUrl: null }];
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs: {
+      listTabs: () => tabsList,
+      ensureTab: async () => 't-project',
+      updateTabMeta: (tabId, patch) => Object.assign(tabsList.find((item) => item.id === tabId), patch || {}),
+      getControllerById: () => controller
+    },
+    defaultTabId: 't-project',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0 })
+  });
+  t.after(() => server.close());
+  return server.address().port;
+}
+
+test('http-api: a project run whose tab ends on another conversation sends nothing', async (t) => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-agentify/project';
+  let currentUrl = 'https://chatgpt.com/';
+  const queryCalls = [];
+  const port = await startProjectQueryHttp(t, {
+    runExclusive: async (fn) => await fn(),
+    // The project route ends on a conversation that belongs to some other key.
+    navigate: async () => { currentUrl = 'https://chatgpt.com/c/other-keys-thread'; },
+    ensureReady: async () => ({ ok: true }),
+    getUrl: async () => currentUrl,
+    query: async ({ prompt }) => queryCalls.push(prompt)
+  });
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'project-key', projectUrl, prompt: 'review this' }
+  });
+  assert.equal(response.res.status, 409, JSON.stringify(response.data));
+  assert.equal(response.data.error, 'run_location_mismatch');
+  assert.deepEqual(response.data.data, { expected: projectUrl, servedUrl: 'https://chatgpt.com/c/other-keys-thread' });
+  assert.deepEqual(queryCalls, []);
+  const runs = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: { includeArchived: true } });
+  assert.equal(runs.data.runs[0].label, 'Tab left its chat location');
+});
+
+test('http-api: a project the provider refuses fails the query without sending', async (t) => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-agentify/project';
+  let currentUrl = 'https://chatgpt.com/';
+  const queryCalls = [];
+  const port = await startProjectQueryHttp(t, {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => { currentUrl = to; },
+    ensureReady: async () => {
+      const error = new Error('project_unavailable');
+      error.data = { url: projectUrl, projectId: 'g-p-agentify', status: 403 };
+      throw error;
+    },
+    getUrl: async () => currentUrl,
+    query: async ({ prompt }) => queryCalls.push(prompt)
+  });
+  const response = await req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'project-key', projectUrl, prompt: 'review this' }
+  });
+  assert.equal(response.res.status, 409, JSON.stringify(response.data));
+  assert.equal(response.data.error, 'project_unavailable');
+  assert.equal(response.data.data.status, 403);
+  assert.deepEqual(queryCalls, []);
+  const runs = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: { includeArchived: true } });
+  assert.equal(runs.data.runs[0].label, 'Project unavailable');
+});
+
+test('http-api: a stop requested while the project page loads sends nothing', async (t) => {
+  const projectUrl = 'https://chatgpt.com/g/g-p-agentify/project';
+  let currentUrl = 'https://chatgpt.com/';
+  let readinessEntered;
+  const enteredReadiness = new Promise((resolve) => { readinessEntered = resolve; });
+  let releaseReadiness;
+  const readinessReleased = new Promise((resolve) => { releaseReadiness = resolve; });
+  const queryCalls = [];
+  const port = await startProjectQueryHttp(t, {
+    runExclusive: async (fn) => await fn(),
+    navigate: async (to) => { currentUrl = to; },
+    ensureReady: async () => {
+      readinessEntered();
+      await readinessReleased;
+      return { ok: true };
+    },
+    getUrl: async () => currentUrl,
+    requestStop: async () => ({ ok: true, requested: false, clicked: false }),
+    query: async ({ prompt }) => queryCalls.push(prompt)
+  });
+  const pending = req({
+    port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/query',
+    body: { key: 'project-key', projectUrl, prompt: 'review this' }
+  });
+  await enteredReadiness;
+  const stop = await req({ port, token: 'secret', method: 'POST', pth: '/query/stop', body: { key: 'project-key' } });
+  assert.equal(stop.res.status, 200, JSON.stringify(stop.data));
+  releaseReadiness();
+  const response = await pending;
+  assert.equal(response.res.status, 409, JSON.stringify(response.data));
+  assert.equal(response.data.error, 'query_aborted');
+  assert.deepEqual(queryCalls, []);
+});
+
 test('http-api: failed shared materialization preserves keyed project affinity without fallback navigation', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-shared-failure-'));
   const projectUrl = 'https://chatgpt.com/g/g-p-agentify/project';

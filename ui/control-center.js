@@ -149,6 +149,8 @@ const SAFE_CONTROL_CENTER_ERROR_CODES = new Set([
   'tab_not_found',
   'tab_closed',
   'tab_busy',
+  'project_unavailable',
+  'run_location_mismatch',
   'max_tabs_reached',
   'key_vendor_mismatch',
   'missing_watch_folder_name',

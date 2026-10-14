@@ -29,6 +29,7 @@ import {
   resolveChatGptQueryProfile
 } from './chatgpt-mode-intent.mjs';
 import {
+  chatGptProjectIdFromUrl,
   conversationUrlForLocation,
   derivedChatKey,
   locationFromConversationUrl,
@@ -40,6 +41,7 @@ import {
   LIBRARY_LOCAL_ID_PATTERN,
   identityFromOwnedLocation,
   parseProfileScopeId,
+  providerConversationIdFromOwnedLocation,
   sameConversationIdentity
 } from './conversation-identity.mjs';
 import {
@@ -208,6 +210,7 @@ function mapErrorToHttp(error) {
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
   if (msg === 'chat_surface_activation_failed') return { code: 409, body: { error: 'chat_surface_activation_failed', data: error?.data || null } };
+  if (msg === 'project_unavailable' || msg === 'run_location_mismatch') return { code: 409, body: { error: msg, data: error?.data || null } };
   if (Object.hasOwn(DOT_HTTP_ERROR_STATUS, msg)) {
     const data = {};
     if (typeof error?.data?.runId === 'string') {
@@ -535,6 +538,14 @@ function extractProjectUrl(value) {
     return /\/project\/?$/.test(parsed.pathname) ? parsed.toString() : null;
   } catch {
     return /\/project\/?$/.test(text) ? text : null;
+  }
+}
+
+function conversationIdFromUrl(value) {
+  try {
+    return providerConversationIdFromOwnedLocation(locationFromConversationUrl(value));
+  } catch {
+    return null;
   }
 }
 
@@ -1694,6 +1705,22 @@ export function startHttpApi({
         detail: 'The provider tab did not finish navigation before its deadline.'
       };
     }
+    if (message === 'project_unavailable') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Project unavailable',
+        detail: `ChatGPT refused the project (HTTP ${detail?.status}) for the signed-in account. No prompt was sent. Pass another projectUrl or change defaultProjectUrl.`
+      };
+    }
+    if (message === 'run_location_mismatch') {
+      return {
+        ...base,
+        status: 'error',
+        label: 'Tab left its chat location',
+        detail: 'The tab was not on the requested project or conversation when the prompt was due. No prompt was sent.'
+      };
+    }
     if (message === 'timeout_waiting_for_prompt') {
       const kind = String(detail?.kind || '').trim() || 'blocked';
       return {
@@ -2232,11 +2259,26 @@ export function startHttpApi({
   const ensureRunLocation = async ({ controller, tabId, timeoutMs, conversationUrl, projectUrl }) => {
     const targetConversation = String(conversationUrl || '').trim() || null;
     const targetProject = String(projectUrl || '').trim() || null;
-    const currentUrl = typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => '') : '';
-    if (targetConversation && currentUrl !== targetConversation) {
-      patchActiveQuery(tabId, { phase: 'resuming_conversation' });
-      await controller.navigate(targetConversation);
-      if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
+    const readUrl = async () => typeof controller.getUrl === 'function' ? await controller.getUrl().catch(() => '') : '';
+    const currentUrl = await readUrl();
+    // Readiness only proves that some composer is visible. The tab can leave the
+    // target while it waits (a redirect, or a person using the shown window), and a
+    // prompt sent from there lands in another conversation.
+    const assertServedLocation = async (idOf, target) => {
+      const servedUrl = await readUrl();
+      const targetId = idOf(target);
+      if (targetId !== null && idOf(servedUrl) === targetId) return;
+      const error = new Error('run_location_mismatch');
+      error.data = { expected: target, servedUrl: servedUrl || null };
+      throw error;
+    };
+    if (targetConversation) {
+      if (currentUrl !== targetConversation) {
+        patchActiveQuery(tabId, { phase: 'resuming_conversation' });
+        await controller.navigate(targetConversation);
+        if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
+      }
+      await assertServedLocation(conversationIdFromUrl, targetConversation);
       return;
     }
     if (targetProject) {
@@ -2246,6 +2288,7 @@ export function startHttpApi({
         await controller.navigate(targetProject);
         if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
       }
+      await assertServedLocation(chatGptProjectIdFromUrl, targetProject);
     }
   };
 
@@ -2511,6 +2554,7 @@ export function startHttpApi({
       // mutex. The provider-tab operation lease remains held across both sections,
       // so another public operation cannot change the tab between navigation and
       // research acquisition.
+      assertProviderSendAllowed(op.id);
       result = await controller.research({
         prompt,
         attachments,
@@ -3492,6 +3536,10 @@ export function startHttpApi({
             timeoutMs: effectiveTimeoutMs,
             conversationUrl: originalConversationUrl,
             projectUrl: originalProjectUrl
+          }).catch((error) => {
+            // Live-bound callers already receive route drift as their own contract error.
+            if (hasLiveContinuation && error?.message === 'run_location_mismatch') throw liveContinuationError();
+            throw error;
           });
           if (hasLiveContinuation) {
             const preSendSource = await requireLiveContinuationBinding({
@@ -3504,6 +3552,7 @@ export function startHttpApi({
               : null;
             assertLiveContinuationServedRoute(preSendSource, liveContinuationUrl, servedUrl);
           }
+          assertProviderSendAllowed(op.id);
           const queryResult = await controller.query({
             prompt: String(replay.prompt || ''),
             attachments: Array.isArray(replay.attachments) ? replay.attachments.map(String) : [],
@@ -4571,6 +4620,8 @@ export function startHttpApi({
                     : null;
                   assertLiveContinuationServedRoute(preSendSource, suppliedChatUrl, servedUrl);
                 }
+                // A stop sent while the page loaded reached no controller run; honor it here.
+                assertProviderSendAllowed(op.id);
                 const queryResult = await controller.query({
                   prompt: packed.prompt,
                   attachments: packed.attachments,
@@ -4874,6 +4925,7 @@ export function startHttpApi({
                 projectUrl: chatProfile.projectUrl
               });
             }
+            assertProviderSendAllowed(activeOp.id);
             const sendResult = await controller.send({
               text,
               timeoutMs,

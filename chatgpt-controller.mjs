@@ -5500,11 +5500,27 @@ export class ChatGPTController {
 
       const blocked = hasTurnstile || hasArkose || hasVerifyButton || looks403 || (loginLike && !promptVisible);
       const kind = (hasTurnstile || hasArkose || hasVerifyButton) ? 'captcha' : (loginLike ? 'login' : (looks403 ? 'blocked' : null));
+      // As of ChatGPT web 2026-10-14, a project page fetches /backend-api/gizmos/<project id>;
+      // when the account cannot open the project that request answers 403 or 404 and the
+      // page shows "Loading project" without ever rendering a composer.
+      const projectAccess = (() => {
+        const match = /^\\/g\\/(g-p-[0-9a-f]{32})(?:-[^/]*)?\\/project\\/?$/.exec(location.pathname);
+        if (!match) return null;
+        const gizmoPath = '/backend-api/gizmos/' + match[1];
+        let status = null;
+        for (const entry of performance.getEntriesByType('resource')) {
+          try {
+            if (new URL(entry.name).pathname === gizmoPath && entry.responseStatus) status = entry.responseStatus;
+          } catch {}
+        }
+        return { projectId: match[1], status };
+      })();
       return {
         url, title, readyState, chatSurface,
         blocked,
         promptVisible,
         kind,
+        projectAccess,
         indicators: { hasTurnstile, hasArkose, hasVerifyButton, looks403, loginLike, rawPromptVisible, sendVisible }
       };
     })()`);
@@ -5517,6 +5533,13 @@ export class ChatGPTController {
     while (Date.now() - start < timeoutMs) {
       this.#throwIfStopRequested();
       const st = await this.detectChallenge().catch(() => null);
+      if (st?.projectAccess?.status === 403 || st?.projectAccess?.status === 404) {
+        // The provider refused the project, so no one can make this page ready.
+        await this.#exitBlockedStateIfNeeded();
+        const err = new Error('project_unavailable');
+        err.data = { url: st.url || null, projectId: st.projectAccess.projectId, status: st.projectAccess.status };
+        throw err;
+      }
       if (st?.blocked) await this.#enterBlockedState(st);
       if (st?.promptVisible) return st;
 
