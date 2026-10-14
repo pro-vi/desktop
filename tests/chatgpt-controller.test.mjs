@@ -5910,7 +5910,12 @@ test('chatgpt-controller: prompt replacement rejects a nonempty inherited draft 
 
 test('chatgpt-controller: prompt replacement rejects changed punctuation despite identical letters and digits', async () => {
   const page = composerInputPage({ transformInput: (text) => text.replace('+', '-') });
-  await assert.rejects(composerInputController(page).send({ text: '1+2' }), /prompt_staging_failed/);
+  await assert.rejects(composerInputController(page).send({ text: '1+2' }), (error) => {
+    assert.equal(error.message, 'prompt_staging_failed');
+    assert.equal(error.data.firstDifference.at, 1);
+    assert.equal(error.data.firstDifference.expected, '+2');
+    return true;
+  });
 });
 
 test('chatgpt-controller: prompt replacement accepts rich-editor paragraph spacing', async () => {

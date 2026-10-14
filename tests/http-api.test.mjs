@@ -9013,7 +9013,7 @@ test('http-api: composer focus and staging failures return conflicts without suc
         runExclusive: async (fn) => await fn(),
         query: async () => {
           const error = new Error(errorCode);
-          error.data = { expectedChars: 21, stagedChars: 28 };
+          error.data = { expectedChars: 21, stagedChars: 28, firstDifference: { at: 4, expected: 'intended request' } };
           throw error;
         },
         getUrl: async () => 'https://chatgpt.com/'
@@ -9045,6 +9045,9 @@ test('http-api: composer focus and staging failures return conflicts without suc
       const status = await req({ port, token: 'test-token', method: 'GET', pth: '/status' });
       assert.equal(status.data.runtime.lastOutcomes[0].label, 'Prompt not sent');
       assert.match(status.data.runtime.lastOutcomes[0].detail, /No prompt was sent\./);
+      if (errorCode === 'prompt_staging_failed') {
+        assert.match(status.data.runtime.lastOutcomes[0].detail, /at character 4, from "intended request"/);
+      }
     });
   }
 });
@@ -9690,6 +9693,41 @@ test('http-api: send uses governor too', async (t) => {
   qpm = 100;
   const r3 = await req({ port, token: 'secret', method: 'POST', pth: '/send', body: { text: 'hi3' } });
   assert.equal(r3.res.status, 200);
+});
+
+test('http-api: send runs the real controller inside the route lock instead of waiting on it', { timeout: 5_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-send-lock-'));
+  let pageReads = 0;
+  const controller = new ChatGPTController({
+    page: {
+      getUrl: async () => 'https://chatgpt.com/',
+      evaluate: async () => { pageReads += 1; return null; }
+    },
+    selectors: {}
+  });
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs: {
+      listTabs: () => [],
+      ensureTab: async () => 't0',
+      createTab: async () => 't0',
+      closeTab: async () => true,
+      getControllerById: () => controller
+    },
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true }),
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false })
+  });
+  t.after(() => {
+    server.closeAllConnections?.();
+    server.close();
+  });
+  await req({ port: server.address().port, token: 'secret', method: 'POST', pth: '/send', body: { text: 'hi', timeoutMs: 200 } });
+  assert.ok(pageReads > 0, 'send never reached the page');
 });
 
 test('http-api: transcript publication is answer-anchored and explicit about every state', async (t) => {

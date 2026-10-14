@@ -5819,8 +5819,19 @@ export class ChatGPTController {
         const normalize = usesValue
           ? (text) => text.replace(/\\r\\n?/g, '\\n')
           : (text) => text.replace(/\\s+/gu, ' ').trim();
-        if (normalize(staged) !== normalize(expectedPrompt)) {
-          return { ok:false, error:'prompt_staging_failed', expectedChars:expectedPrompt.length, stagedChars:staged.length };
+        const want = normalize(expectedPrompt);
+        const got = normalize(staged);
+        if (got !== want) {
+          let at = 0;
+          while (at < want.length && want[at] === got[at]) at += 1;
+          return {
+            ok:false,
+            error:'prompt_staging_failed',
+            expectedChars:expectedPrompt.length,
+            stagedChars:staged.length,
+            // Quote only the caller's prompt: the composer may hold a draft from elsewhere.
+            firstDifference: { at, expected: want.slice(at, at + 60) }
+          };
         }
       }
       const r = el.getBoundingClientRect();
@@ -8233,56 +8244,56 @@ export class ChatGPTController {
     if (!prompt.trim()) throw new Error('missing_prompt');
     if (prompt.length > 200_000) throw new Error('prompt_too_large');
 
-    return await this.mutex.run(async () => {
-      const run = { kind: 'send', requested: false, requestedAt: null, reason: null, onProgress };
-      this.currentRun = run;
-      try {
-        const initialUrl = await this.getUrl().catch(() => '');
-        const initialTarget = (() => {
-          try { return parseChatGptEntryTarget(initialUrl); } catch { return null; }
-        })();
-        await this.#ensureChat({ timeoutMs });
-        await this.#typePrompt(prompt);
-        await this.#clickSend();
+    // Like query, send runs inside its caller's runExclusive section; taking the
+    // mutex here as well would wait on that section forever.
+    const run = { kind: 'send', requested: false, requestedAt: null, reason: null, onProgress };
+    this.currentRun = run;
+    try {
+      const initialUrl = await this.getUrl().catch(() => '');
+      const initialTarget = (() => {
+        try { return parseChatGptEntryTarget(initialUrl); } catch { return null; }
+      })();
+      await this.#ensureChat({ timeoutMs });
+      await this.#typePrompt(prompt);
+      await this.#clickSend();
 
-        let materializedConversationUrl = null;
-        if (initialTarget?.kind === 'shared-snapshot') {
-          const startedAt = Date.now();
-          const materializationTimeoutMs = Math.min(Math.max(1_000, timeoutMs), 15_000);
-          while (Date.now() - startedAt < materializationTimeoutMs) {
-            this.#throwIfStopRequested();
-            const candidate = extractConversationUrl(await this.getUrl().catch(() => ''));
-            if (candidate) {
-              materializedConversationUrl = candidate;
-              await this.#emitProgress({ phase: 'conversation_materialized', conversationUrl: candidate });
-              break;
-            }
-            await sleep(120);
+      let materializedConversationUrl = null;
+      if (initialTarget?.kind === 'shared-snapshot') {
+        const startedAt = Date.now();
+        const materializationTimeoutMs = Math.min(Math.max(1_000, timeoutMs), 15_000);
+        while (Date.now() - startedAt < materializationTimeoutMs) {
+          this.#throwIfStopRequested();
+          const candidate = extractConversationUrl(await this.getUrl().catch(() => ''));
+          if (candidate) {
+            materializedConversationUrl = candidate;
+            await this.#emitProgress({ phase: 'conversation_materialized', conversationUrl: candidate });
+            break;
           }
-          if (!materializedConversationUrl) {
-            const error = new Error('shared_chat_materialization_failed');
-            error.data = { sourceUrl: initialTarget.chatUrl };
-            throw error;
-          }
+          await sleep(120);
         }
-
-        if (stopAfterSend) {
-          const start = Date.now();
-          while (Date.now() - start < 2500) {
-            this.#throwIfStopRequested();
-            const clicked = await this.#clickVisibleStop();
-            if (clicked) break;
-            await sleep(120);
-          }
+        if (!materializedConversationUrl) {
+          const error = new Error('shared_chat_materialization_failed');
+          error.data = { sourceUrl: initialTarget.chatUrl };
+          throw error;
         }
-
-        return materializedConversationUrl
-          ? { ok: true, conversationUrl: materializedConversationUrl }
-          : { ok: true };
-      } finally {
-        if (this.currentRun === run) this.currentRun = null;
       }
-    });
+
+      if (stopAfterSend) {
+        const start = Date.now();
+        while (Date.now() - start < 2500) {
+          this.#throwIfStopRequested();
+          const clicked = await this.#clickVisibleStop();
+          if (clicked) break;
+          await sleep(120);
+        }
+      }
+
+      return materializedConversationUrl
+        ? { ok: true, conversationUrl: materializedConversationUrl }
+        : { ok: true };
+    } finally {
+      if (this.currentRun === run) this.currentRun = null;
+    }
   }
 
   async getLastAssistantImages(options = {}) {

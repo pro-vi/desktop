@@ -519,6 +519,39 @@ test('electron-browser-backend: Shift+Return inserts a textarea newline but pres
   }
 });
 
+test('electron-browser-backend: text typed after Shift+Return waits until the page saw the key', async () => {
+  const typed = [];
+  const keyUpListeners = [];
+  const pageWindow = {
+    addEventListener: (type, listener) => {
+      if (type === 'keyup') keyUpListeners.push(listener);
+    }
+  };
+  class OkBrowserWindow extends MockBrowserWindow {
+    constructor() {
+      super();
+      this.webContents.executeJavaScript = async (script) => vm.runInNewContext(script, {
+        window: pageWindow,
+        document: { activeElement: { tagName: 'DIV' } }
+      });
+      this.webContents.insertText = async (text) => typed.push(text);
+      // Queued key events reach the page after text committed through insertText.
+      this.webContents.sendInputEvent = (event) => setTimeout(() => {
+        if (event.type === 'keyDown' && event.keyCode === 'Return') typed.push('\n');
+        if (event.type === 'keyUp') keyUpListeners.splice(0).forEach((listener) => listener());
+      }, 20);
+    }
+    async loadURL() {}
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: OkBrowserWindow });
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/' });
+  await page.insertText('first');
+  await page.sendKey('Return', { modifiers: ['shift'] });
+  await page.insertText('second');
+  assert.equal(typed.join(''), 'first\nsecond');
+  await backend.dispose();
+});
+
 test('electron-browser-backend: waitForDownload resolves completed will-download items', async (t) => {
   let createdWindow = null;
   class OkBrowserWindow extends MockBrowserWindow {

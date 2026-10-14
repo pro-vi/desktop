@@ -11,6 +11,11 @@ import {
 
 const { BrowserWindow } = electron;
 
+// Page slot for the promise sendKey awaits; it resolves on the page's next keyup.
+const KEY_UP_SEEN = "window[Symbol.for('agentify.keyUpSeen')]";
+// Bounds the wait for a key the page never receives; delivered keys arrive in milliseconds.
+const KEY_UP_WAIT_MS = 1_000;
+
 function trackWindow(windows, win) {
   if (!win) return;
   windows.add(win);
@@ -248,12 +253,19 @@ class ElectronPageAdapter {
       await wc.insertText('\n');
       return;
     }
+    // sendInputEvent queues keys behind Electron's input router while insertText
+    // commits text over another channel, so a line typed right after Shift+Return
+    // could reach the editor before the newline. Return once the page saw keyUp.
+    await wc.executeJavaScript(`void (${KEY_UP_SEEN} = new Promise((resolve) => {
+      window.addEventListener('keyup', () => resolve(), { once: true, capture: true });
+    }))`, true).catch(() => {});
     wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
     const hasCommandModifier = Array.isArray(modifiers) && modifiers.some((m) => m === 'control' || m === 'meta' || m === 'alt');
     if (typeof key === 'string' && key.length === 1 && !hasCommandModifier) {
       wc.sendInputEvent({ type: 'char', keyCode: key, modifiers });
     }
     wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers });
+    await settleWithin(wc.executeJavaScript(KEY_UP_SEEN, true).catch(() => {}), KEY_UP_WAIT_MS);
   }
 
   async insertText(text) {

@@ -549,6 +549,15 @@ function conversationIdFromUrl(value) {
   }
 }
 
+function stagingMismatchDetail(firstDifference) {
+  const base = 'The composer text did not match the requested prompt';
+  if (!firstDifference) return `${base}. No prompt was sent.`;
+  const where = firstDifference.expected
+    ? `from ${JSON.stringify(firstDifference.expected)}`
+    : 'because the composer held extra text after it';
+  return `${base} at character ${firstDifference.at}, ${where}. No prompt was sent.`;
+}
+
 function deriveProjectUrlFromConversationUrl(value) {
   const conversationUrl = extractConversationUrl(value);
   if (!conversationUrl) return null;
@@ -1789,7 +1798,7 @@ export function startHttpApi({
         label: 'Prompt not sent',
         detail: message === 'prompt_focus_failed'
           ? 'The composer could not receive typing input. No prompt was sent.'
-          : 'The composer text did not match the requested prompt. No prompt was sent.'
+          : stagingMismatchDetail(detail?.firstDifference)
       };
     }
     if (message === 'send_not_triggered') {
