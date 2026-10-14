@@ -24,6 +24,10 @@ Claude Code session
 
 Changes to an MCP tool schema (for example, adding `chatUrl` to `agentify_query` or `agentify_read_conversation`) require both reloads: restart the MCP server so the client sees the new tool schema, then run `agentify_shutdown` so Electron reloads the HTTP routing/controller implementation.
 
+One Electron app serves every MCP client, and `agentify_shutdown` ends all of their in-flight runs as `interrupted`. Before a reload, read both `runtime.activeQueries` from `/status` and the `running` entries from `/runs/list`; treat a run in either as another caller's work, and wait for it or ask before reloading. On 2026-10-14 run `93e05e8e` was missing from the first while its record still said `running`, and a reload ended it although ChatGPT had finished its answer.
+
+The app never reloads on its own, so it can run for days on code older than the checkout. Before reading its behavior as the current code's, compare `startedAt` in `~/.agentify-desktop/state.json` with the last Electron-side commit. Observed 2026-10-14: an app started 2026-10-06 ran none of the 2026-10-08–12 fixes, and a staging check added on 2026-10-12 first ran live at the next restart.
+
 ### Do not trust the first call after `agentify_shutdown` — largely fixed 2026-09-17
 
 The respawned Electron needs a few seconds before its pages finish hydrating, and historically nothing blocked a capture until they were. Observed 2026-08-03: an `agentify_read_conversation` issued ~3s after tab creation returned `messageCount: 0` while `agentify_status` showed the right conversation URL and `readiness` recorded `fail` / `anchor-postcondition-failed`; observed again 2026-09-17 (probe run 1): the first query after spawn captured whole-section chrome (prompt echo + timing + footer + answer) as the assistant node text.
