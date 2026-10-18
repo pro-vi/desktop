@@ -163,6 +163,7 @@ function normalizeRun(input = {}) {
     completionReceipt: validateCompletionReceipt(input.completionReceipt),
     completionVerification: validateCompletionVerification(input.completionVerification),
     promptDelivery: normalizeObject(input.promptDelivery),
+    promptStaging: normalizeObject(input.promptStaging),
     revision: Math.max(0, Number(input.revision) || 0)
   };
 }

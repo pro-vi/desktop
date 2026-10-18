@@ -5816,10 +5816,12 @@ function composerInputPage({
   refuseFocus = false,
   discardInput = false,
   flattenLines = false,
+  lateNewlines = false,
   transformInput = (text) => text
 } = {}) {
   let draft = 'Old draft from another request';
   let selected = false;
+  let pendingNewline = false;
   const clicks = [];
   const keyTargets = [];
   const document = { activeElement: { tagName: 'BODY' } };
@@ -5865,10 +5867,15 @@ function composerInputPage({
       if (document.activeElement !== editor || discardInput) return;
       if (key === 'A' && options.modifiers?.some((value) => ['meta', 'control'].includes(value))) selected = true;
       if (key === 'Backspace' && selected) { draft = ''; selected = false; }
-      if (key === 'Return' && options.modifiers?.includes('shift')) draft += flattenLines ? ' ' : '\n';
+      if (key === 'Return' && options.modifiers?.includes('shift')) {
+        if (lateNewlines) pendingNewline = true;
+        else draft += flattenLines ? ' ' : '\n';
+      }
     },
     async insertText(text) {
       if (document.activeElement === editor && !discardInput) draft += transformInput(text);
+      // A newline overtaken by the text typed after it, as an unordered input channel allows.
+      if (pendingNewline) { draft += '\n'; pendingNewline = false; }
     },
     async moveMouse() {},
     async mouseDown() {},
@@ -5926,7 +5933,31 @@ test('chatgpt-controller: prompt replacement accepts rich-editor paragraph spaci
 
 test('chatgpt-controller: prompt replacement rejects flattened lines', async () => {
   const page = composerInputPage({ textarea: true, flattenLines: true });
-  await assert.rejects(composerInputController(page).send({ text: 'First line\nSecond line' }), /prompt_staging_failed/);
+  await assert.rejects(composerInputController(page).send({ text: 'First line\nSecond line' }), (error) => {
+    assert.equal(error.message, 'prompt_staging_failed');
+    assert.deepEqual({ ...error.data.firstDifference }, { at: 10, line: 2, expected: '\nSecond line' });
+    return true;
+  });
+});
+
+test('chatgpt-controller: prompt replacement names the line a late rich-editor newline displaced', async () => {
+  const page = composerInputPage({ lateNewlines: true });
+  await assert.rejects(composerInputController(page).send({ text: 'Intro\n\nFirst line\nSecond line' }), (error) => {
+    assert.equal(error.message, 'prompt_staging_failed');
+    // Both newlines wait for "F" and land after it as one; the blank line folds
+    // away, so the difference is at the space that stands for the break before line 3.
+    assert.deepEqual({ ...error.data.firstDifference }, { at: 5, line: 3, expected: ' First line Second line' });
+    return true;
+  });
+});
+
+test('chatgpt-controller: prompt replacement counts folded line breaks when naming a later line', async () => {
+  const page = composerInputPage({ transformInput: (text) => text === 'f' ? 'Ω' : text });
+  await assert.rejects(composerInputController(page).send({ text: 'abc\n\ndef\nghi' }), (error) => {
+    assert.equal(error.message, 'prompt_staging_failed');
+    assert.deepEqual({ ...error.data.firstDifference }, { at: 6, line: 3, expected: 'f ghi' });
+    return true;
+  });
 });
 
 test('chatgpt-controller: prompt replacement rejects missing indentation on the first line', async () => {

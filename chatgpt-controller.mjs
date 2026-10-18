@@ -5824,13 +5824,30 @@ export class ChatGPTController {
         if (got !== want) {
           let at = 0;
           while (at < want.length && want[at] === got[at]) at += 1;
+          // The prompt line where the texts differ; a difference at the break
+          // between two lines belongs to the later line. Folded rich text has no
+          // breaks left, so its offset is mapped back through the prompt's lines.
+          let line = 1;
+          if (usesValue) {
+            line = want.slice(0, at + 1).split('\\n').length;
+          } else {
+            let start = 0;
+            const lines = expectedPrompt.split('\\n');
+            for (let i = 0; i < lines.length; i += 1) {
+              const part = normalize(lines[i]);
+              if (!part) continue;
+              line = i + 1;
+              if (at < start + part.length) break;
+              start += part.length + 1;
+            }
+          }
           return {
             ok:false,
             error:'prompt_staging_failed',
             expectedChars:expectedPrompt.length,
             stagedChars:staged.length,
             // Quote only the caller's prompt: the composer may hold a draft from elsewhere.
-            firstDifference: { at, expected: want.slice(at, at + 60) }
+            firstDifference: { at, line, expected: want.slice(at, at + 60) }
           };
         }
       }

@@ -9013,7 +9013,7 @@ test('http-api: composer focus and staging failures return conflicts without suc
         runExclusive: async (fn) => await fn(),
         query: async () => {
           const error = new Error(errorCode);
-          error.data = { expectedChars: 21, stagedChars: 28, firstDifference: { at: 4, expected: 'intended request' } };
+          error.data = { expectedChars: 21, stagedChars: 28, firstDifference: { at: 4, line: 1, expected: 'intended request' } };
           throw error;
         },
         getUrl: async () => 'https://chatgpt.com/'
@@ -9046,7 +9046,15 @@ test('http-api: composer focus and staging failures return conflicts without suc
       assert.equal(status.data.runtime.lastOutcomes[0].label, 'Prompt not sent');
       assert.match(status.data.runtime.lastOutcomes[0].detail, /No prompt was sent\./);
       if (errorCode === 'prompt_staging_failed') {
-        assert.match(status.data.runtime.lastOutcomes[0].detail, /requested prompt starting at "intended request"/);
+        const detail = 'The composer text did not match the requested prompt on line 1, starting at "intended request". No prompt was sent.';
+        const promptStaging = { expectedChars: 21, stagedChars: 28, firstDifference: { at: 4, line: 1 } };
+        assert.equal(status.data.runtime.lastOutcomes[0].detail, detail);
+        assert.equal(response.data.detail, detail);
+        assert.deepEqual(response.data.promptStaging, promptStaging);
+        assert.equal(runs.data.runs[0].detail, detail);
+        assert.deepEqual(runs.data.runs[0].promptStaging, promptStaging);
+      } else {
+        assert.equal(runs.data.runs[0].promptStaging, null);
       }
     });
   }

@@ -151,6 +151,7 @@ function runStatusText(run = {}, data = {}) {
   // persisted run record (and structuredContent.run) instead of the text.
   if (run.responseDebug && run.status !== 'success') lines.push(`responseDebug=${JSON.stringify(run.responseDebug)}`);
   if (run.recovery && run.status !== 'success') lines.push(`recovery=${JSON.stringify(run.recovery)}`);
+  if (run.promptStaging) lines.push(`promptStaging=${JSON.stringify(run.promptStaging)}`);
   // The durable conversation transcript is a local JSON file; `ready` means
   // it verifiably contains this run's answer turn (turn= names that turn).
   const transcriptBlock = run?.outputManifest?.transcript;
@@ -166,6 +167,18 @@ function runStatusText(run = {}, data = {}) {
     lines.push(`${truncation}${data.outputText}`);
   }
   return lines.join('\n');
+}
+
+// A sync call refused before Send reports where the composer text went wrong,
+// in the same lines a run record's status text uses.
+function rethrowPromptStaging(error) {
+  const body = error?.data?.body;
+  if (body?.error !== 'prompt_staging_failed') throw error;
+  throw new Error([
+    body.error,
+    body.detail ? `detail=${body.detail}` : null,
+    body.promptStaging ? `promptStaging=${JSON.stringify(body.promptStaging)}` : null
+  ].filter(Boolean).join('\n'));
 }
 
 function conversationReadText(data = {}) {
@@ -979,7 +992,7 @@ registerTool(
         timeoutMs: timeoutMs || 10 * 60_000,
         fireAndForget: fireAndForget || undefined
       }
-    });
+    }).catch(rethrowPromptStaging);
     if (data.async) {
       const structuredContent = asyncQueryStructuredContent(data);
       const content = [{ type: 'text', text: `Query submitted. runId=${structuredContent.runId || ''}. Next: call agentify_wait_run with this runId for proven completion. Use agentify_get_run only for a non-blocking snapshot.` }];
@@ -1738,7 +1751,7 @@ registerTool(
         show: !!show,
         source: 'mcp'
       }
-    });
+    }).catch(rethrowPromptStaging);
     if (data.run?.recipient?.kind === 'dot') {
       return {
         content: [{ type: 'text', text: runStatusText(data.run, data) }],
@@ -1811,7 +1824,7 @@ registerTool(
         attachments: resolvedAttachments,
         timeoutMs: timeoutMs || 10 * 60_000
       }
-    });
+    }).catch(rethrowPromptStaging);
     const d = await requestJson({
       ...conn,
       method: 'POST',

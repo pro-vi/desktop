@@ -1032,6 +1032,52 @@ test('mcp query surfaces the stable live-continuation guard error through real s
   assert.equal(serialized.includes('<div'), false);
 });
 
+test('mcp query reports where prompt staging went wrong through real stdio', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-prompt-staging-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const token = 'mcp-prompt-staging-token';
+  const serverId = 'mcp-prompt-staging-server';
+  const detail = 'The composer text did not match the requested prompt on line 3, starting at " Second line". No prompt was sent.';
+  const promptStaging = { expectedChars: 6578, stagedChars: 6578, firstDifference: { at: 812, line: 3 } };
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/query') {
+      await readJsonBody(req);
+      return sendJsonStatus(res, 409, { error: 'prompt_staging_failed', detail, promptStaging, data: { ...promptStaging, firstDifference: { at: 812, line: 3, expected: ' Second line' } } });
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-prompt-staging-test', version: '1.0.0' }, { capabilities: {} });
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({ name: 'agentify_query', arguments: { key: 'staging', prompt: 'First line\n\nSecond line' } });
+  } finally {
+    await client.close();
+  }
+
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.content[0].text.split('\n'), [
+    'prompt_staging_failed',
+    `detail=${detail}`,
+    `promptStaging=${JSON.stringify(promptStaging)}`
+  ]);
+});
+
 test('mcp server tools/list composes profiles without duplicate tools', async () => {
   const tools = await listedTools('core,browser');
   assert.equal(tools.length, new Set(tools).size);
