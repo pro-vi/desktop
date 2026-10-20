@@ -115,6 +115,47 @@ test('Dot native prepared send persists request identity before input and return
   assert.equal(Object.hasOwn(result.result, 'completionEvidence'), false);
 });
 
+test('Dot native delivery handle waits for canonical request acceptance', async () => {
+  const fixture = createNativeDotPage({ settle: false });
+  const send = fixture.services.composer.sendPrepared;
+  fixture.services.composer.sendPrepared = (...args) => {
+    send(...args);
+    return { delivery: Promise.resolve(true) };
+  };
+  let observePending;
+  const pending = new Promise((resolve) => { observePending = resolve; });
+  const evaluate = fixture.page.evaluate;
+  fixture.page.evaluate = async (script) => {
+    const observation = await evaluate(script);
+    if (fixture.state.inputCount && !script.includes('"action":"submit"')) observePending();
+    return observation;
+  };
+  const checkpoints = [];
+  const sending = talk(controllerFor(fixture), { timeoutMs: 2_000, recordDotSubmission: async (value) => checkpoints.push(value) });
+  const first = await Promise.race([pending.then(() => 'pending'), sending.then(() => 'early-success', () => 'early-error')]);
+  assert.equal(first, 'pending');
+  assert.deepEqual(checkpoints.map(({ state }) => state), ['unknown']);
+  const message = fixture.state.messages.at(-1);
+  message.id = 'canonical-outgoing';
+  message.deliveryState = '';
+  fixture.state.unconfirmed = [];
+  assert.equal((await sending).result.userMessageId, message.id);
+  assert.deepEqual(checkpoints.map(({ state }) => state), ['unknown', 'submitted']);
+  assert.equal(fixture.state.inputCount, 1);
+});
+
+test('Dot canonical acceptance does not wait on the native delivery promise', async () => {
+  const fixture = createNativeDotPage();
+  const send = fixture.services.composer.sendPrepared;
+  fixture.services.composer.sendPrepared = (...args) => {
+    send(...args);
+    return { delivery: new Promise(() => {}) };
+  };
+  const delivered = await talk(controllerFor(fixture));
+  assert.equal(delivered.result.userMessageId, 'accepted-1');
+  assert.equal(fixture.state.inputCount, 1);
+});
+
 test('Dot checkpoint failure prevents the native send', async () => {
   const fixture = createNativeDotPage();
   await assert.rejects(talk(controllerFor(fixture), { recordDotSubmission: async () => { throw new Error('disk_failed'); } }), /disk_failed/);

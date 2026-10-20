@@ -862,8 +862,7 @@ function dotBatchResult(value) {
   const batch = parseDotMessageBatch(value);
   const content = batch.messages.map((message) => ({ type: 'text', text: `messageId=${message.id} sender=dot\n${message.text === null ? '[non-text message]' : message.text}` }));
   if (!content.length) content.push({ type: 'text', text: batch.timedOut ? 'No new Dot messages observed before the wait deadline.' : 'No new Dot messages observed.' });
-  const messages = batch.messages.map(({ text, ...metadata }) => metadata);
-  return { content, structuredContent: { ...batch, messages } };
+  return { content, structuredContent: batch };
 }
 
 for (const [operation, description] of [

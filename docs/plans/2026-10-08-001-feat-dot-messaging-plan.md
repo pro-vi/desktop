@@ -108,7 +108,7 @@ Recheck those producers at contact before accepting a delivery checkpoint.
 | Native UI observation | `DotPageObservation`, `chatgpt-dot-ui.mjs` | Browser producer and host decoder; actual metadata defines identity and delivery |
 | Outgoing checkpoint | `dotSubmission`, `chatgpt-recipient.mjs` | Controller/service callback, run store, get/retry; separate from incoming messages |
 | Caller reading position | `DotCursor`, `chatgpt-recipient.mjs` | HTTP/MCP requests and results; growing-room position, not a snapshot hash |
-| Received message batch | `DotMessageBatch`, `chatgpt-recipient.mjs` | Browser/service/MCP; bodies once in text, IDs/cursor in metadata |
+| Received message batch | `DotMessageBatch`, `chatgpt-recipient.mjs` | Browser/service/MCP; complete messages in text blocks and the structured batch |
 | Message wait | `agentify_dot_wait` / `/dot/wait` | Bounded HTTP observation plus MCP deadline loop; separate from `waitForRun` |
 
 Keep ordinary `query`, `send`, completion receipts, and Transcript Library
@@ -120,7 +120,7 @@ and its exclusive consumers instead of retaining an unused compatibility path.
 - **D1:** A coding agent discovers talk/read/wait in the core profile and can
   use personal Dot without knowing its display name or URL.
 - **D2:** Talk reports delivery; read/wait return multiple messages with a
-  usable cursor. A message body appears once across MCP text and metadata.
+  usable cursor. Both MCP text blocks and structured messages retain each complete body.
 - **D3:** Timeout and received-message labels describe observation, never
   matched prompt completion or background-task completion.
 
@@ -204,9 +204,9 @@ not undo delivered messages; preserve stored evidence and provider messages.
 cursor, native message, and batch definitions each have one owner. Derive
 same-process consumers; validate page evaluations, wire JSON, and stored rows.
 Electron and CDP adapters deliver equivalent decoded observations. Stored Dot
-data cannot become ordinary Chat data through location repair. MCP message
-bodies occur only in text content; structured content retains metadata and
-cursor without duplicating bodies. Generic run waiters retain query/research
+data cannot become ordinary Chat data through location repair. MCP text blocks and structured messages both retain complete message bodies,
+so clients choosing either representation receive the payload. The same batch
+limits apply to both projections. Generic run waiters retain query/research
 completion semantics; they do not become Dot message waiters.
 
 **C7. Privacy and ordinary behavior.** Explicit read/wait captures only the

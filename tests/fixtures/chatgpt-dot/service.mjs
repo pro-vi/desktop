@@ -64,11 +64,12 @@ export async function exerciseDotMessaging() {
     const first = await client.callTool({ name: 'agentify_dot_read', arguments: { after: start, limit: 1 } });
     assert.equal(first.isError, undefined, JSON.stringify(first));
     assert.equal(first.structuredContent.hasMore, true);
-    assert.equal(JSON.stringify(first).split('FIRST_DOT_BODY').length - 1, 1);
-    assert.equal(Object.hasOwn(first.structuredContent.messages[0], 'text'), false);
+    assert.equal(first.structuredContent.messages[0].text, 'FIRST_DOT_BODY');
+    assert.equal(first.content[0].text, 'messageId=first sender=dot\nFIRST_DOT_BODY');
     const second = await client.callTool({ name: 'agentify_dot_wait', arguments: { after: first.structuredContent.cursor, timeoutMs: 1_000 } });
     assert.equal(second.isError, undefined, JSON.stringify(second));
     assert.deepEqual(second.structuredContent.messages.map(({ id }) => id), ['second']);
+    assert.equal(second.structuredContent.messages[0].text, 'SECOND_DOT_BODY');
     const cursor = second.structuredContent.cursor;
     const independent = await client.callTool({ name: 'agentify_dot_read', arguments: { after: start } });
     assert.deepEqual(independent.structuredContent.messages.map(({ id }) => id), ['first', 'second']);
@@ -86,7 +87,7 @@ export async function exerciseDotMessaging() {
     const retry = await fixture.call('/runs/retry', { runId: talk.structuredContent.runId });
     assert.equal(retry.status, 200);
     assert.equal(native.state.inputCount, 1);
-    return { tools: 3, delivery: 'accepted', initialIncomingPosts: 2, laterIncomingPosts: 1, independentReaders: true, restartCursor: true, repeatedInputCount: native.state.inputCount, bodiesDuplicated: false, runtime: 'synthetic native page; no provider send' };
+    return { tools: 3, delivery: 'accepted', initialIncomingPosts: 2, laterIncomingPosts: 1, independentReaders: true, restartCursor: true, repeatedInputCount: native.state.inputCount, textInBothRepresentations: true, runtime: 'synthetic native page; no provider send' };
   } finally {
     await client?.close();
     await fixture.close({ remove: true });

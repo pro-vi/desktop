@@ -27,7 +27,7 @@ function installNativeFixture(binding) {
       sendPrepared: (roomId, request) => {
         state.texts.push(request.text);
         state.messages.push({ id: `accepted-${state.texts.length}`, roomId, requestId: request.requestId, text: request.text, self: true, senderId: 'fixture-owner', senderAeonId: null, deliveryState: '', createdAt: request.createdAt, attachments: [] });
-        return true;
+        return { delivery: Promise.resolve(true) };
       }
     }
   };

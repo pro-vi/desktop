@@ -15,7 +15,7 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
         state.texts.push(request.text);
         state.messages.push({ id: settle ? `accepted-${state.inputCount}` : request.requestId, roomId, senderId: 'fixture-owner', senderAeonId: null, self: true, role: 'user', requestId: request.requestId, deliveryState: settle ? '' : 'pending', text: request.text, createdAt: request.createdAt, attachments: [] });
         if (!settle) state.unconfirmed.push(request.requestId);
-        return true;
+        return { delivery: settle ? Promise.resolve(true) : new Promise(() => {}) };
       }
     }
   };

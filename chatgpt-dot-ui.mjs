@@ -104,8 +104,8 @@ function runDotPageOperation(options, identityFields) {
     if (!options.binding || !same(binding, options.binding)) return { state: 'binding-mismatch', binding };
     if (draftChars !== 0 || uploadCount !== 0) return { state: 'draft-conflict' };
     if (snapshot.cursors.after !== null || typeof services.composer.sendPrepared !== 'function' || typeof options.requestId !== 'string' || !options.requestId || typeof options.text !== 'string' || !options.text.trim()) return { state: 'unconfirmed' };
-    const accepted = services.composer.sendPrepared(room.id, { requestId: options.requestId, text: options.text, createdAt: new Date().toISOString() });
-    return { ...base, submitted: accepted === true };
+    const queued = services.composer.sendPrepared(room.id, { requestId: options.requestId, text: options.text, createdAt: new Date().toISOString() });
+    return { ...base, submitted: record(queued) && typeof queued.delivery?.then === 'function' };
   }
   if (options.action === 'read') {
     if (snapshot.cursors.after !== null) return { state: 'cursor-unavailable' };

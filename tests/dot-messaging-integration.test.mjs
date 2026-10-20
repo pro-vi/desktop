@@ -14,6 +14,23 @@ test('Dot messaging crosses native evaluator, controller, HTTP, durable storage 
   assert.equal(proof.repeatedInputCount, 1);
 });
 
+test('Dot MCP read and wait retain complete text in both result representations', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  const client = await fixture.connect(); t.after(() => client.close());
+  const initial = await client.callTool({ name: 'agentify_dot_read', arguments: {} });
+  const text = 'First line\n第二行 with `code`';
+  fixture.native.state.messages.push(fixture.native.incoming('text', text), fixture.native.incoming('attachment', undefined, { text: undefined, attachments: [{}] }));
+  for (const operation of ['read', 'wait']) {
+    const result = await client.callTool({ name: `agentify_dot_${operation}`, arguments: { after: initial.structuredContent.cursor, ...(operation === 'wait' ? { timeoutMs: 1_000 } : {}) } });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.deepEqual(result.structuredContent.messages.map(({ text }) => text), [text, null]);
+    assert.equal(result.content[0].text, `messageId=text sender=dot\n${text}`);
+    assert.match(result.content[1].text, /\[non-text message\]/);
+    assert.equal(result.structuredContent.hasMore, false);
+  }
+  assert.equal(fixture.native.state.inputCount, 0);
+});
+
 test('Dot operation-specific validation prevents effects and preserves ordinary Chat', async (t) => {
   const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
   for (const route of ['/dot/talk', '/dot/read', '/dot/wait']) {
@@ -58,6 +75,23 @@ test('Dot unknown delivery persists across restart and cannot replay input', asy
   assert.equal(native.state.inputCount, 1);
   const loaded = await fixture.call('/runs/get', { runId });
   assert.equal(loaded.data.run.dotSubmission.requestId, talk.data.data.dotSubmission.requestId);
+});
+
+test('Dot null native submission retains uncertainty and cannot replay', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  let calls = 0;
+  fixture.native.services.composer.sendPrepared = () => { calls++; return null; };
+  const talk = await fixture.call('/dot/talk', { text: 'native refusal' });
+  assert.equal(talk.status, 409);
+  assert.equal(talk.data.error, 'dot_delivery_unconfirmed');
+  assert.equal(talk.data.data.dotSubmission.state, 'unknown');
+  assert.ok(talk.data.data.dotSubmission.requestId);
+  const runId = talk.data.data.runId;
+  const loaded = await fixture.call('/runs/get', { runId });
+  assert.deepEqual(loaded.data.run.dotSubmission, talk.data.data.dotSubmission);
+  assert.equal((await fixture.call('/runs/retry', { runId })).data.error, 'dot_delivery_unconfirmed');
+  assert.equal(calls, 1);
+  assert.equal(fixture.native.state.inputCount, 0);
 });
 
 test('Dot safe pre-input retry revalidates and sends once', async (t) => {

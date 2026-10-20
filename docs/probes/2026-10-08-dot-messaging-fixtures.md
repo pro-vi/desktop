@@ -14,8 +14,9 @@ interval, or background-task-completion condition is required.
 `node scripts/e2e-mcp-dot-messaging.mjs` exercises the actual message evaluator,
 controller, HTTP service, durable run/key files, and stdio MCP client. It proves
 one native outgoing input, two incoming posts across read/wait, an independent
-reader, service restart, cursor reuse, and a later incoming post. The received
-message body appears once across MCP text and structured metadata.
+reader, service restart, cursor reuse, and a later incoming post. At this original fixture revision, the received message body appeared once
+across MCP text and structured metadata. The [2026-10-20 repair](2026-10-20-dot-message-results.md)
+retains it in both representations for clients that select structured results.
 
 The same command launches a separate Electron 39.6.0 process with a disposable
 profile and synthetic HTTPS page served locally. The production Electron page
