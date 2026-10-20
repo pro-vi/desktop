@@ -1,5 +1,5 @@
 import { requestJson } from './mcp-lib.mjs';
-import { parseDotCursor, parseDotMessageBatch, sameDotBinding } from './chatgpt-recipient.mjs';
+import { parseDotCursor, parseDotMessageBatch, assertSameDotBinding } from './chatgpt-recipient.mjs';
 
 export async function waitForDotMessages({ conn, body, signal, request = requestJson } = {}) {
   const input = parseDotCursor(body.after);
@@ -20,7 +20,7 @@ export async function waitForDotMessages({ conn, body, signal, request = request
       })]) : await running;
       if (expired || Date.now() >= deadline) return { binding: input.binding, messages: [], cursor: body.after, hasMore: false, timedOut: true };
       const batch = parseDotMessageBatch(response);
-      if (!sameDotBinding(input.binding, batch.binding)) throw new Error('dot_binding_mismatch');
+      assertSameDotBinding(input.binding, batch.binding);
       if (batch.messages.length || batch.hasMore) return batch;
       if (batch.cursor !== body.after) throw new Error('invalid_dot_batch');
     } finally {

@@ -884,15 +884,23 @@ for (const [operation, description] of [
       const delivery = parseDotDelivery(data);
       return { content: [{ type: 'text', text: `Dot message delivered. runId=${delivery.runId} messageId=${delivery.dotSubmission.userMessageId}. Read or wait using the returned dotCursor for incoming messages.` }], structuredContent: delivery };
     } catch (error) {
-      const code = error?.data?.body?.error;
-      const data = error?.data?.body?.data;
+      const directBindingMismatch = error?.code === 'dot_binding_mismatch';
+      const code = directBindingMismatch ? error.code : error?.data?.body?.error;
+      const data = directBindingMismatch ? error.data : error?.data?.body?.data;
+      const mismatchedFields = code === 'dot_binding_mismatch' && Array.isArray(data?.mismatchedFields)
+        ? data.mismatchedFields.filter((field) => ['conversationId', 'roomId', 'peerAeonId', 'accountKey', 'dotUrl'].includes(field))
+        : [];
+      const bindingFailure = mismatchedFields.length ? ` Binding mismatch: ${mismatchedFields.join(', ')}.` : '';
       if (code === 'dot_message_too_large' && typeof data?.messageId === 'string' && Number.isSafeInteger(data?.requiredChars) && data.requiredChars > 0) {
         return { content: [{ type: 'text', text: `Dot message ${data.messageId} requires maxChars>=${data.requiredChars}. Increase the budget and reuse the same reading position.` }], structuredContent: { error: code, messageId: data.messageId, requiredChars: data.requiredChars, cursor: body.after || null }, isError: true };
       }
-      if (operation !== 'talk' || !data?.runId) throw error;
+      if (operation !== 'talk' || !data?.runId) {
+        if (bindingFailure) return { content: [{ type: 'text', text: `Dot operation refused.${bindingFailure}` }], structuredContent: { error: code, mismatchedFields }, isError: true };
+        throw error;
+      }
       const dot = parseDotRunFields(data);
       const status = dot.dotSubmission.state === 'submitted' ? (code === 'run_status_unconfirmed' ? 'Dot message delivered; final run status unconfirmed.' : `Dot message delivered; operation failed (${code}).`) : dot.dotSubmission.state === 'unknown' ? 'Dot message delivery unconfirmed.' : 'Dot message not submitted.';
-      return { content: [{ type: 'text', text: `${status} runId=${data.runId} state=${dot.dotSubmission.state}. Keep the recorded checkpoint; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code }, isError: true };
+      return { content: [{ type: 'text', text: `${status}${bindingFailure} runId=${data.runId} state=${dot.dotSubmission.state}. Keep the recorded checkpoint; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code, ...(bindingFailure ? { mismatchedFields } : {}) }, isError: true };
     }
   });
 }

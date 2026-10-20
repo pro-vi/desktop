@@ -3,7 +3,7 @@ import vm from 'node:vm';
 export const binding = Object.freeze({ dotUrl: 'https://chatgpt.com/dots/fixture-conversation', conversationId: 'fixture-conversation', roomId: 'fixture-room', peerAeonId: 'fixture-peer', accountKey: 'fixture-account' });
 
 export function createNativeDotPage({ settle = true, initial = [] } = {}) {
-  const state = { messages: [...initial], inputCount: 0, chatInputCount: 0, texts: [], draft: '', attachments: [], loaded: true, after: null, before: null, unconfirmed: [], roomId: binding.roomId, peer: binding.peerAeonId, account: binding.accountKey, beforeSubmit: null, history: null };
+  const state = { messages: [...initial], inputCount: 0, chatInputCount: 0, texts: [], draft: '', attachments: [], loaded: true, after: null, before: null, unconfirmed: [], conversationId: binding.conversationId, roomId: binding.roomId, peer: binding.peerAeonId, account: binding.accountKey, beforeSubmit: null, history: null };
   const editor = { get textContent() { return state.draft; }, getBoundingClientRect: () => ({ width: 20, height: 20 }), closest: () => null };
   const services = {
     conversations: { timeline: () => ({ getSnapshot: () => ({ messages: state.messages, loaded: state.loaded, cursors: { after: state.after, before: state.before } }) }) },
@@ -26,7 +26,7 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
   const location = { origin: 'https://chatgpt.com', pathname: '/dots/fixture-conversation', href: binding.dotUrl };
   const context = vm.createContext({ Map, Set, Date, location, getComputedStyle: (node) => ({ display: 'block', visibility: 'visible', overflowY: node === scroller ? 'auto' : 'visible' }), document: { querySelectorAll: (selector) => selector === 'main' ? state.mainNodes || [main] : [sidebar] } });
   const updateProps = () => {
-    const props = { conversationId: binding.conversationId, roomId: state.roomId, room: { id: state.roomId, aeon_id: state.peer, members: [{ id: 'fixture-peer-member', aeon_id: state.peer }, { id: 'fixture-owner', aeon_id: null }] }, services };
+    const props = { conversationId: state.conversationId, roomId: state.roomId, room: { id: state.roomId, aeon_id: state.peer, members: [{ id: 'fixture-peer-member', aeon_id: state.peer }, { id: 'fixture-owner', aeon_id: null }] }, services };
     main.__reactProps$fixture = props;
     main.__reactFiber$fixture = { memoizedProps: props, return: null };
     const account = { accountKey: state.account };

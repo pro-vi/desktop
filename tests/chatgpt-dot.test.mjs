@@ -71,6 +71,21 @@ test('Dot accepts duplicated identical native contexts', async () => {
   assert.deepEqual(await controller.inspectDotBinding(), binding);
 });
 
+for (const [field, stateKey] of [['conversationId', 'conversationId'], ['roomId', 'roomId'], ['peerAeonId', 'peer'], ['accountKey', 'account']]) {
+  test(`Dot binding refusal identifies ${field} without returning identity values`, async () => {
+    const fixture = createNativeDotPage();
+    const controller = controllerFor(fixture);
+    await controller.prepareDotEntry();
+    fixture.state[stateKey] = 'changed-identity';
+    await assert.rejects(controller.inspectDotBinding(), (error) => {
+      assert.equal(error.message, 'dot_binding_mismatch');
+      assert.deepEqual(error.data, { mismatchedFields: [field] });
+      return true;
+    });
+    assert.equal(fixture.state.inputCount, 0);
+  });
+}
+
 test('Dot native prepared send persists request identity before input and returns delivery only', async () => {
   const fixture = createNativeDotPage();
   const controller = controllerFor(fixture);

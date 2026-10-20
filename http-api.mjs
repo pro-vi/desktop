@@ -16,7 +16,8 @@ import {
   parseDotMessageBatch,
   parseDotSubmission,
   parseDotRunFields,
-  sameDotBinding
+  sameDotBinding,
+  assertSameDotBinding
 } from './chatgpt-recipient.mjs';
 import { parseCompletionEvidence } from './chatgpt-completion-evidence.mjs';
 import { modeIntentForResponseModelSlug, responseModeEvidenceForMessage } from './chatgpt-response-mode.mjs';
@@ -216,6 +217,9 @@ function mapErrorToHttp(error) {
     const data = {};
     if (typeof error?.data?.runId === 'string') {
       try { Object.assign(data, { runId: error.data.runId }, parseDotRunFields(error.data)); } catch {}
+    }
+    if (msg === 'dot_binding_mismatch' && Array.isArray(error?.data?.mismatchedFields)) {
+      data.mismatchedFields = error.data.mismatchedFields.filter((field) => ['conversationId', 'roomId', 'peerAeonId', 'accountKey', 'dotUrl'].includes(field));
     }
     if (msg === 'dot_message_too_large' && typeof error?.data?.messageId === 'string' && Number.isSafeInteger(error?.data?.requiredChars)) Object.assign(data, { messageId: error.data.messageId, requiredChars: error.data.requiredChars });
     return { code: DOT_HTTP_ERROR_STATUS[msg], body: { error: msg, ...(Object.keys(data).length ? { data } : {}) } };
@@ -3215,9 +3219,9 @@ export function startHttpApi({
     if (Object.hasOwn(keyMetaByKey, key) && saved?.recipient?.kind !== 'dot') throw new Error('recipient_conflict');
     const cursor = body.after ? parseDotCursor(body.after) : null;
     if (expectedBinding) expectedBinding = parseDotBinding(expectedBinding);
-    if (expectedBinding && saved?.dotBinding && !sameDotBinding(expectedBinding, saved.dotBinding)) throw new Error('dot_binding_mismatch');
-    if (expectedBinding && cursor && !sameDotBinding(expectedBinding, cursor.binding)) throw new Error('dot_binding_mismatch');
-    if (cursor && saved?.dotBinding && !sameDotBinding(cursor.binding, saved.dotBinding)) throw new Error('dot_binding_mismatch');
+    if (expectedBinding && saved?.dotBinding) assertSameDotBinding(expectedBinding, saved.dotBinding);
+    if (expectedBinding && cursor) assertSameDotBinding(expectedBinding, cursor.binding);
+    if (cursor && saved?.dotBinding) assertSameDotBinding(cursor.binding, saved.dotBinding);
     const op = { id: crypto.randomUUID(), kind: operation, source: requestSourceForBody(body), key, tabId: null, startedAt: Date.now(), phase: 'resolving_tab' };
     const heldScopes = new Set();
     reserveOperationScopes({ heldScopes, scopes: [`key:${key}`], operation: op });
@@ -3237,7 +3241,9 @@ export function startHttpApi({
       return await runExclusive(controller, async () => {
         if (operation === 'send') assertProviderSendAllowed(op.id);
         const binding = parseDotBinding(await controller.prepareDotEntry({ recipient, dotBinding: expectedBinding || saved?.dotBinding || cursor?.binding || null, timeoutMs: Math.min(body.timeoutMs || 30_000, 30_000) }));
-        if ((expectedBinding && !sameDotBinding(binding, expectedBinding)) || (saved?.dotBinding && !sameDotBinding(binding, saved.dotBinding)) || (cursor && !sameDotBinding(binding, cursor.binding))) throw new Error('dot_binding_mismatch');
+        for (const expected of [expectedBinding, saved?.dotBinding, cursor?.binding]) {
+          if (expected) assertSameDotBinding(expected, binding);
+        }
         if (operation === 'send') {
           reserveOperationScopes({ heldScopes, scopes: [dotConversationScope(binding)], operation: op, tabId });
           await patchRunRecord(op.id, { dotBinding: binding });
@@ -3283,7 +3289,7 @@ export function startHttpApi({
       assertProviderSendAllowed(op.id);
     };
     const recordDotCursor = async (cursor) => {
-      if (!sameDotBinding(parseDotCursor(cursor).binding, binding)) throw new Error('dot_binding_mismatch');
+      assertSameDotBinding(binding, parseDotCursor(cursor).binding);
       await patchRunRecord(op.id, { dotCursor: cursor });
       assertProviderSendAllowed(op.id);
     };
@@ -3307,7 +3313,7 @@ export function startHttpApi({
       const fields = parseDotRunFields(run);
       if (!fields.dotBinding) throw new Error('dot_binding_unconfirmed');
       return await withDotTarget({ key: run.key, dotUrl: fields.dotBinding.dotUrl, after: fields.dotCursor || undefined }, 'dot-open', async ({ tabId, binding }) => {
-        if (!sameDotBinding(binding, fields.dotBinding)) throw new Error('dot_binding_mismatch');
+        assertSameDotBinding(fields.dotBinding, binding);
         if (show) await onShow?.({ tabId });
         return { ok: true, tabId, run };
       }, { expectedBinding: fields.dotBinding });

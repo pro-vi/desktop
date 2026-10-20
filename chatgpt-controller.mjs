@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { CHATGPT_MODEL_INTENTS, normalizeChatGptModeIntent, normalizeChatGptModelIntent } from './chatgpt-mode-intent.mjs';
 import { locationFromConversationUrl, parseChatGptEntryTarget } from './chatgpt-location.mjs';
-import { parseChatGptRecipient, parseDotBinding, sameDotBinding, parseDotCursor, encodeDotCursor, parseDotMessageBatch } from './chatgpt-recipient.mjs';
+import { parseChatGptRecipient, parseDotBinding, assertSameDotBinding, parseDotCursor, encodeDotCursor, parseDotMessageBatch } from './chatgpt-recipient.mjs';
 import { dotPageScript, parseDotPageObservation } from './chatgpt-dot-ui.mjs';
 import {
   completionEvidenceFor,
@@ -1042,10 +1042,14 @@ export class ChatGPTController {
       if (opened) {
         try {
           const observation = await this.runDotPageOperation({ binding: expected });
-          if (expected && !sameDotBinding(expected, observation.binding)) throw new Error('dot_binding_mismatch');
+          if (expected) assertSameDotBinding(expected, observation.binding);
           if (requested.dotUrl) {
             const requestedPath = new URL(requested.dotUrl).pathname;
-            if (requestedPath !== new URL(observation.binding.dotUrl).pathname && requestedPath !== `/dots/${encodeURIComponent(observation.binding.conversationId)}`) throw new Error('dot_binding_mismatch');
+            if (requestedPath !== new URL(observation.binding.dotUrl).pathname && requestedPath !== `/dots/${encodeURIComponent(observation.binding.conversationId)}`) {
+              const error = new Error('dot_binding_mismatch');
+              error.data = { mismatchedFields: ['dotUrl'] };
+              throw error;
+            }
           }
           this.dotBinding = observation.binding;
           return observation.binding;
@@ -1061,7 +1065,7 @@ export class ChatGPTController {
   async readDotMessages({ after = undefined, limit = 32, maxChars = 20_000, binding = this.dotBinding } = {}) {
     if (!binding) throw new Error('dot_binding_unconfirmed');
     const cursor = after === undefined ? null : parseDotCursor(after);
-    if (cursor && !sameDotBinding(cursor.binding, binding)) throw new Error('dot_binding_mismatch');
+    if (cursor) assertSameDotBinding(cursor.binding, binding);
     let observation;
     const deadline = Date.now() + 2_000;
     while (true) {

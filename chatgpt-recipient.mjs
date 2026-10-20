@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 export const CHATGPT_CHAT_RECIPIENT = Object.freeze({ kind: 'chat' });
 export const DOT_SUBMISSION_STATES = Object.freeze(['not-submitted', 'unknown', 'submitted']);
+export const DOT_BINDING_IDENTITY_FIELDS = Object.freeze(['conversationId', 'roomId', 'peerAeonId', 'accountKey']);
 export const DOT_HTTP_ERROR_STATUS = Object.freeze({
   invalid_dot_url: 400,
   invalid_recipient: 400,
@@ -101,7 +102,18 @@ export function parseDotBinding(value) {
 export function sameDotBinding(left, right) {
   const a = parseDotBinding(left);
   const b = parseDotBinding(right);
-  return a.conversationId === b.conversationId && a.roomId === b.roomId && a.peerAeonId === b.peerAeonId && a.accountKey === b.accountKey;
+  return DOT_BINDING_IDENTITY_FIELDS.every((field) => a[field] === b[field]);
+}
+
+export function assertSameDotBinding(left, right) {
+  const a = parseDotBinding(left);
+  const b = parseDotBinding(right);
+  const mismatchedFields = DOT_BINDING_IDENTITY_FIELDS.filter((field) => a[field] !== b[field]);
+  if (mismatchedFields.length) {
+    const error = invalid('dot_binding_mismatch');
+    error.data = { mismatchedFields };
+    throw error;
+  }
 }
 
 export function dotConversationScope(binding) {

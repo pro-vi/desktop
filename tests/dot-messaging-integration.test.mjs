@@ -78,6 +78,43 @@ test('Dot persisted cursor rejects account drift without sending or resetting', 
   fixture.native.state.account = 'other-account';
   const drifted = await fixture.call('/dot/read', { after: initial.data.cursor });
   assert.equal(drifted.data.error, 'dot_binding_mismatch');
+  assert.deepEqual(drifted.data.data, { mismatchedFields: ['accountKey'] });
+  assert.equal(fixture.native.state.inputCount, 0);
+});
+
+test('Dot MCP binding refusals name changed fields and retain delivery checkpoints', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  const initial = await fixture.call('/dot/read', {});
+  fixture.native.state.account = 'other-account';
+  const client = await fixture.connect(); t.after(() => client.close());
+  for (const [operation, args] of [['read', {}], ['wait', { after: initial.data.cursor, timeoutMs: 1_000 }], ['talk', { text: 'must not send' }]]) {
+    const result = await client.callTool({ name: `agentify_dot_${operation}`, arguments: args });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error, 'dot_binding_mismatch');
+    assert.deepEqual(result.structuredContent.mismatchedFields, ['accountKey']);
+    assert.match(result.content[0].text, /Binding mismatch: accountKey/);
+    if (operation === 'talk') assert.equal(result.structuredContent.dotSubmission.state, 'not-submitted');
+  }
+  assert.equal(fixture.native.state.inputCount, 0);
+});
+
+test('Dot MCP wait preserves binding diagnostics from a foreign successful batch', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  const initial = await fixture.call('/dot/read', {});
+  const foreign = { ...binding, accountKey: 'another-account' };
+  const handler = fixture.api.listeners('request')[0];
+  fixture.api.removeListener('request', handler);
+  fixture.api.on('request', (req, res) => {
+    if (req.url !== '/dot/wait') return handler(req, res);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ binding: foreign, messages: [], cursor: encodeDotCursor(foreign), hasMore: false }));
+  });
+  const client = await fixture.connect(); t.after(() => client.close());
+  const result = await client.callTool({ name: 'agentify_dot_wait', arguments: { after: initial.data.cursor, timeoutMs: 1_000 } });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent?.error, 'dot_binding_mismatch');
+  assert.deepEqual(result.structuredContent.mismatchedFields, ['accountKey']);
+  assert.match(result.content[0].text, /Binding mismatch: accountKey/);
   assert.equal(fixture.native.state.inputCount, 0);
 });
 

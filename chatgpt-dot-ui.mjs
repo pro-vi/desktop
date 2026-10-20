@@ -1,12 +1,12 @@
-import { parseDotBinding, sameDotBinding } from './chatgpt-recipient.mjs';
+import { parseDotBinding, assertSameDotBinding, DOT_BINDING_IDENTITY_FIELDS } from './chatgpt-recipient.mjs';
 
 // Observed on 2026-10-07 with ChatGPT messaging asset
 // 166137.5a625a2847.js. Component names are minified and are not selectors.
 export function dotPageScript(options = {}) {
-  return `(${runDotPageOperation.toString()})(${JSON.stringify(options)})`;
+  return `(${runDotPageOperation.toString()})(${JSON.stringify(options)}, ${JSON.stringify(DOT_BINDING_IDENTITY_FIELDS)})`;
 }
 
-function runDotPageOperation(options) {
+function runDotPageOperation(options, identityFields) {
   const visible = (node) => {
     const rect = node.getBoundingClientRect();
     const style = getComputedStyle(node);
@@ -58,8 +58,8 @@ function runDotPageOperation(options) {
   const owners = room.members.filter((member) => member?.id !== peers[0].id);
   if (owners.length !== 1 || typeof owners[0].id !== 'string') return { state: 'unconfirmed' };
   const binding = { dotUrl: location.href, conversationId, roomId: room.id, peerAeonId: room.aeon_id, accountKey: accountKeys[0] };
-  const same = (a, b) => a && b && ['conversationId', 'roomId', 'peerAeonId', 'accountKey'].every((key) => a[key] === b[key]);
-  if (options.binding && !same(binding, options.binding)) return { state: 'binding-mismatch' };
+  const same = (a, b) => a && b && identityFields.every((key) => a[key] === b[key]);
+  if (options.binding && !same(binding, options.binding)) return { state: 'binding-mismatch', binding };
   const services = context.services;
   if (typeof services.conversations?.timeline !== 'function') return { state: 'unconfirmed' };
   const timeline = services.conversations.timeline(room.id);
@@ -101,7 +101,7 @@ function runDotPageOperation(options) {
     return base;
   }
   if (options.action === 'submit') {
-    if (!options.binding || !same(binding, options.binding)) return { state: 'binding-mismatch' };
+    if (!options.binding || !same(binding, options.binding)) return { state: 'binding-mismatch', binding };
     if (draftChars !== 0 || uploadCount !== 0) return { state: 'draft-conflict' };
     if (snapshot.cursors.after !== null || typeof services.composer.sendPrepared !== 'function' || typeof options.requestId !== 'string' || !options.requestId || typeof options.text !== 'string' || !options.text.trim()) return { state: 'unconfirmed' };
     const accepted = services.composer.sendPrepared(room.id, { requestId: options.requestId, text: options.text, createdAt: new Date().toISOString() });
@@ -148,7 +148,10 @@ function fail(code = 'dot_binding_unconfirmed') {
 export function parseDotPageObservation(value, { binding = null } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail();
   if (value.state === 'not-dot' || value.state === 'unconfirmed') fail();
-  if (value.state === 'binding-mismatch') fail('dot_binding_mismatch');
+  if (value.state === 'binding-mismatch') {
+    if (binding) assertSameDotBinding(binding, value.binding);
+    fail('dot_binding_mismatch');
+  }
   if (value.state === 'draft-conflict') fail('dot_draft_conflict');
   if (value.state === 'cursor-unavailable') fail('dot_cursor_unavailable');
   if (value.state === 'message-too-large') {
@@ -159,7 +162,7 @@ export function parseDotPageObservation(value, { binding = null } = {}) {
   }
   if (value.state !== 'ready') fail();
   const observed = parseDotBinding(value.binding);
-  if (binding && !sameDotBinding(observed, binding)) fail('dot_binding_mismatch');
+  if (binding) assertSameDotBinding(binding, observed);
   if (!Array.isArray(value.messages) || !Array.isArray(value.unconfirmedRequestIds) || !value.unconfirmedRequestIds.every((id) => typeof id === 'string' && !!id) || (value.draftChars !== null && (!Number.isSafeInteger(value.draftChars) || value.draftChars < 0)) || (value.uploadCount !== null && (!Number.isSafeInteger(value.uploadCount) || value.uploadCount < 0)) || (value.historyAfter !== null && typeof value.historyAfter !== 'string')) fail();
   const ids = new Set();
   const messages = value.messages.map((message) => {
