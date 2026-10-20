@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-08
+- **Amended:** 2026-10-20
 
 ## Decision
 
@@ -9,6 +10,12 @@ Expose personal Dot through separate talk, read, and wait operations. Talk
 records native outgoing delivery. Read and wait return independent batches
 with caller-owned cursors. A received post does not prove a matched prompt
 reply or completed background work.
+
+Bind message continuity and send serialization to the verified account, native
+message room and remote peer. The provider's active conversation ID remains
+observed metadata; changing it alone does not invalidate the recipient or a
+saved message position. Revalidate account, room and peer before refreshing
+that metadata. A URL remains a locator and does not establish recipient identity.
 
 Keep Dot delivery as a send run. Preserve uncertainty before native input and
 never replay unknown or submitted delivery automatically. Ordinary Chat query

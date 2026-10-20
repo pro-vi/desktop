@@ -82,6 +82,43 @@ test('Dot persisted cursor rejects account drift without sending or resetting', 
   assert.equal(fixture.native.state.inputCount, 0);
 });
 
+test('Dot cursors survive active conversation changes across restart and MCP reads', async (t) => {
+  const native = createNativeDotPage();
+  native.state.messages.push(native.incoming('anchor'));
+  let fixture = await createDotServiceFixture({ native }); t.after(() => fixture.close({ remove: true }));
+  const initial = await fixture.call('/dot/read', {});
+  const stateDir = fixture.stateDir;
+  native.state.conversationId = 'current-conversation';
+  await fixture.close({ remove: false });
+  fixture = await createDotServiceFixture({ native, stateDir });
+  const client = await fixture.connect(); t.after(() => client.close());
+  const empty = await client.callTool({ name: 'agentify_dot_read', arguments: { after: initial.data.cursor } });
+  assert.equal(empty.isError, undefined, JSON.stringify(empty));
+  assert.equal(empty.structuredContent.binding.conversationId, native.state.conversationId);
+  assert.equal(empty.structuredContent.cursor, initial.data.cursor);
+  native.state.messages.push(native.incoming('after-change'));
+  for (const operation of ['read', 'wait']) {
+    const result = await client.callTool({ name: `agentify_dot_${operation}`, arguments: { after: initial.data.cursor, ...(operation === 'wait' ? { timeoutMs: 1_000 } : {}) } });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.equal(result.structuredContent.binding.conversationId, native.state.conversationId);
+    assert.deepEqual(result.structuredContent.messages.map(({ id }) => id), ['after-change']);
+  }
+  assert.equal(native.state.inputCount, 0);
+});
+
+test('Dot cursors cannot establish an unrelated locator', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  fixture.native.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-route';
+  const untrusted = { ...binding, dotUrl: 'https://chatgpt.com/dots/unrelated' };
+  for (const after of [undefined, encodeDotCursor(untrusted)]) {
+    const refused = await fixture.call('/dot/read', { dotUrl: untrusted.dotUrl, ...(after ? { after } : {}) });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.data.error, 'dot_binding_mismatch');
+    assert.deepEqual(refused.data.data.mismatchedFields, ['dotUrl']);
+  }
+  assert.equal(fixture.native.state.inputCount, 0);
+});
+
 test('Dot MCP binding refusals name changed fields and retain delivery checkpoints', async (t) => {
   const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
   const initial = await fixture.call('/dot/read', {});
@@ -183,6 +220,7 @@ test('Dot sends through different keys serialize by native room until delivery s
   };
   const first = fixture.call('/dot/talk', { key: 'first-agent', text: 'first', timeoutMs: 2_000 });
   await waitForInputs(1);
+  native.state.conversationId = 'current-conversation';
   const blocked = await fixture.call('/dot/talk', { key: 'second-agent', text: 'must not interleave' });
   assert.equal(blocked.data.error, 'tab_busy');
   assert.equal(native.state.inputCount, 1);

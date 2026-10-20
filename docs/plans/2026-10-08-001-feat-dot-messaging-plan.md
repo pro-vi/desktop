@@ -139,8 +139,11 @@ owned target. Use a dedicated default Dot key rather than the default Chat tab.
 provider conversation ID, native room ID, remote Aeon ID, and provider UI
 account key. These are distinct fields; do not infer their meaning from local
 profile names. Capture them from the same active personal Dot context. Persist
-them before sending, revalidate after navigation, and compare all identity
-fields on continuation/cursor use. Display names never establish identity.
+them before sending and revalidate after navigation. Continuation, cursor use
+and send serialization compare account key, room ID and remote Aeon ID, as
+recorded in ADR 0016. The active provider conversation ID remains observed
+metadata; a change to that field alone preserves recipient identity and saved
+message positions. Display names never establish identity.
 Native sender metadata stamps direction outside message content; incoming Dot
 posts must match the room's remote participant. Role alone supplies no author
 evidence. Missing, ambiguous, loading, or drifted observations reject effects.

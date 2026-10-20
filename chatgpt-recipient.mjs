@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 export const CHATGPT_CHAT_RECIPIENT = Object.freeze({ kind: 'chat' });
 export const DOT_SUBMISSION_STATES = Object.freeze(['not-submitted', 'unknown', 'submitted']);
-export const DOT_BINDING_IDENTITY_FIELDS = Object.freeze(['conversationId', 'roomId', 'peerAeonId', 'accountKey']);
+export const DOT_BINDING_IDENTITY_FIELDS = Object.freeze(['accountKey', 'roomId', 'peerAeonId']);
 export const DOT_HTTP_ERROR_STATUS = Object.freeze({
   invalid_dot_url: 400,
   invalid_recipient: 400,
@@ -118,7 +118,7 @@ export function assertSameDotBinding(left, right) {
 
 export function dotConversationScope(binding) {
   const parsed = parseDotBinding(binding);
-  const identity = JSON.stringify([parsed.accountKey, parsed.conversationId, parsed.roomId, parsed.peerAeonId]);
+  const identity = JSON.stringify(DOT_BINDING_IDENTITY_FIELDS.map((field) => parsed[field]));
   return `dot:${createHash('sha256').update(identity).digest('hex')}`;
 }
 

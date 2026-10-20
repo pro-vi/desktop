@@ -29,17 +29,26 @@ const observation = () => ({
   }]
 });
 
-test('Dot binding retains distinct conversation, room, peer, and account identities', () => {
+test('Dot binding retains distinct room, peer, and account identities', () => {
   assert.deepEqual(parseDotBinding(binding), binding);
   assert.deepEqual(parseChatGptRecipient({ kind: 'dot' }), { kind: 'dot', dotUrl: null });
   assert.deepEqual(parseChatGptRecipient(), { kind: 'chat' });
-  for (const key of ['conversationId', 'roomId', 'peerAeonId', 'accountKey']) {
-    assert.equal(sameDotBinding(binding, { ...binding, [key]: 'another', ...(key === 'conversationId' ? { dotUrl: 'https://chatgpt.com/dots/another' } : {}) }), false);
-    assert.notEqual(dotConversationScope(binding), dotConversationScope({ ...binding, [key]: 'another', ...(key === 'conversationId' ? { dotUrl: 'https://chatgpt.com/dots/another' } : {}) }));
+  for (const key of ['roomId', 'peerAeonId', 'accountKey']) {
+    assert.equal(sameDotBinding(binding, { ...binding, [key]: 'another' }), false);
+    assert.notEqual(dotConversationScope(binding), dotConversationScope({ ...binding, [key]: 'another' }));
   }
   assert.throws(() => parseDotBinding({ ...binding, dotUrl: 'https://chatgpt.com/c/fixture-conversation' }), /invalid_dot_binding/);
   assert.throws(() => parseDotBinding({ ...binding, accountKey: null }), /invalid_dot_binding/);
   assert.deepEqual(parseDotBinding({ ...binding, dotUrl: 'https://chatgpt.com/dots/fixture-route' }), { ...binding, dotUrl: 'https://chatgpt.com/dots/fixture-route' });
+});
+
+test('Dot identity and operation scope survive an active conversation change', () => {
+  const current = { ...binding, conversationId: 'current-conversation', dotUrl: 'https://chatgpt.com/dots/home' };
+  assert.equal(sameDotBinding(binding, current), true);
+  assert.equal(dotConversationScope(binding), dotConversationScope(current));
+  const cursor = encodeDotCursor(binding, 'current-tail');
+  const batch = { binding: current, messages: [], cursor, hasMore: false };
+  assert.deepEqual(parseDotMessageBatch(batch), batch);
 });
 
 test('Dot operation schemas preserve text bytes and refuse caller observation stamps', () => {

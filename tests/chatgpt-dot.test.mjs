@@ -71,7 +71,7 @@ test('Dot accepts duplicated identical native contexts', async () => {
   assert.deepEqual(await controller.inspectDotBinding(), binding);
 });
 
-for (const [field, stateKey] of [['conversationId', 'conversationId'], ['roomId', 'roomId'], ['peerAeonId', 'peer'], ['accountKey', 'account']]) {
+for (const [field, stateKey] of [['roomId', 'roomId'], ['peerAeonId', 'peer'], ['accountKey', 'account']]) {
   test(`Dot binding refusal identifies ${field} without returning identity values`, async () => {
     const fixture = createNativeDotPage();
     const controller = controllerFor(fixture);
@@ -85,6 +85,21 @@ for (const [field, stateKey] of [['conversationId', 'conversationId'], ['roomId'
     assert.equal(fixture.state.inputCount, 0);
   });
 }
+
+test('Dot native binding follows the active conversation within the same room', async () => {
+  const fixture = createNativeDotPage();
+  const controller = controllerFor(fixture);
+  await controller.prepareDotEntry();
+  const cursor = (await controller.readDotMessages()).cursor;
+  fixture.state.conversationId = 'current-conversation';
+  const current = { ...binding, conversationId: fixture.state.conversationId };
+  assert.deepEqual(await controller.prepareDotEntry({ dotBinding: binding }), current);
+  assert.equal((await controller.readDotMessages({ after: cursor })).cursor, cursor);
+  fixture.state.messages.push(fixture.incoming('new-message'));
+  assert.deepEqual((await controller.readDotMessages({ after: cursor })).messages.map(({ id }) => id), ['new-message']);
+  await talk(controller, { binding: current });
+  assert.equal(fixture.state.inputCount, 1);
+});
 
 test('Dot native prepared send persists request identity before input and returns delivery only', async () => {
   const fixture = createNativeDotPage();
