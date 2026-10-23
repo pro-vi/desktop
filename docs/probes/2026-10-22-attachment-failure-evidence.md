@@ -65,3 +65,7 @@ The native integration and full application fixtures made no provider requests.
 Live acceptance of the
 recovered historical input was not tested. Full byte identity with the original
 historical attachment is unproved.
+
+A later [live transfer check](2026-10-23-text-attachment-transfer.md) observed
+a storage response and composer completion, with final server readiness still
+unverified.
