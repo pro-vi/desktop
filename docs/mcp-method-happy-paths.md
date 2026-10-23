@@ -45,6 +45,12 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
   stdio MCP catalog-import composition. The catalog journey keeps the production
   grant, reader, blob, catalog, HTTP, and MCP layers active while replacing the
   native dialog and remote route verifier at their explicit contracts.
+- **CONTROLLED-ATTACHMENT-FAILURE** — launch the full Electron app in an isolated
+  profile with provider HTTPS intercepted locally; submit an attachment through
+  public MCP, inject a native renderer failure, and verify its stage, input
+  identity and stack frames in the failed run. Observe zero fixture Send clicks,
+  restart the app, and retrieve identical diagnostics through MCP. This checks
+  failure evidence only. [Probe](probes/2026-10-22-attachment-failure-evidence.md).
 
 ## Method matrix
 

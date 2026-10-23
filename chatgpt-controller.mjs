@@ -3896,7 +3896,7 @@ export class ChatGPTController {
     return outcomes;
   }
 
-  async #openComposerAction({ intent, timeoutMs = 10_000 } = {}) {
+  async #openComposerAction({ intent, timeoutMs = 10_000, evaluate = script => this.#eval(script) } = {}) {
     const normalizedIntent = String(intent || '').trim().toLowerCase();
     if (!normalizedIntent) return null;
 
@@ -3913,7 +3913,7 @@ export class ChatGPTController {
     while (Date.now() - start < timeoutMs) {
       this.#throwIfStopRequested();
       const allowClick = lastClickAt === 0 || (Date.now() - lastClickAt) >= 1500;
-      const snap = await this.#eval(`(() => {
+      const snap = await evaluate(`(() => {
         const intent = ${JSON.stringify(normalizedIntent)};
         const allowClick = ${allowClick ? 'true' : 'false'};
         ${HOST_DOM_COLLECTION_HELPERS_JS}
@@ -6616,14 +6616,32 @@ export class ChatGPTController {
 
   async #attachFiles(files) {
     if (!files?.length) return await this.#attachFilesImpl(files);
-    return await this.runCompatibilityCapability(
-      'attachment',
-      async () => await this.#attachFilesImpl(files),
-      { anchorId: 'composer-menu-button', postcondition: () => true, authoritativeTerminal: true }
-    );
+    const diagnostics = { stage: 'prepare', inputs: [] };
+    try {
+      return await this.runCompatibilityCapability(
+        'attachment',
+        async () => await this.#attachFilesImpl(files, diagnostics),
+        { anchorId: 'composer-menu-button', postcondition: () => true, authoritativeTerminal: true }
+      );
+    } catch (error) {
+      const rendererError = error?.data?.rendererError;
+      const failure = rendererError ? new Error('attachment_upload_failed', { cause: error }) : error;
+      const { rendererError: _rendererError, ...detail } = error?.data || {};
+      failure.attachmentDebug = {
+        ...detail,
+        stage: diagnostics.stage,
+        inputs: diagnostics.inputs.filter(Boolean),
+        exception: rendererError || {
+          source: 'host', name: error?.name || 'Error',
+          message: error?.message || 'attachment_failure', stack: error?.stack || null
+        }
+      };
+      if (rendererError) failure.data = { ...failure.attachmentDebug, reason: 'renderer_exception' };
+      throw failure;
+    }
   }
 
-  async #attachFilesImpl(files) {
+  async #attachFilesImpl(files, diagnostics) {
     if (!files?.length) return;
     await this.#emitProgress({ phase: 'uploading_files' });
     const absFiles = files.map((p) => path.resolve(p));
@@ -6638,16 +6656,21 @@ export class ChatGPTController {
     });
 
     // Read files into base64 for Blob-based injection.
-    const fileData = await Promise.all(absFiles.map(async (f) => {
+    const fileData = await Promise.all(absFiles.map(async (f, index) => {
       const buf = await fs.readFile(f);
       const name = path.basename(f);
       const ext = path.extname(f).toLowerCase();
       const mimeMap = { '.md': 'text/markdown', '.txt': 'text/plain', '.json': 'application/json', '.csv': 'text/csv', '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
       const mime = mimeMap[ext] || 'application/octet-stream';
+      diagnostics.inputs[index] = { name, bytes: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') };
       return { name, mime, data: buf.toString('base64') };
     }));
 
-    const attachOpen = await this.#openComposerAction({ intent: 'upload_files', timeoutMs: 10_000 });
+    diagnostics.stage = 'open_picker';
+    const attachOpen = await this.#openComposerAction({
+      intent: 'upload_files', timeoutMs: 10_000,
+      evaluate: script => this.page.evaluate(script, { captureExceptions: true })
+    });
     await this.#emitProgress({
       attachmentDebug: {
         stage: 'open_picker',
@@ -6661,7 +6684,8 @@ export class ChatGPTController {
     // Inject files as Blobs via DataTransfer — this creates real File objects that
     // React's synthetic event system accepts, unlike CDP setFileInputFiles which
     // creates filesystem-backed Files that ChatGPT's handlers reject.
-    const injected = await this.#eval(`(async () => {
+    diagnostics.stage = 'inject_files';
+    const injected = await this.page.evaluate(`(async () => {
       const fileData = ${JSON.stringify(fileData)};
       const dt = new DataTransfer();
       for (const { name, mime, data } of fileData) {
@@ -6748,7 +6772,7 @@ export class ChatGPTController {
         localInputCount: localInputs.length,
         totalInputCount: inputs.length
       };
-    })()`);
+    })()`, { captureExceptions: true });
     await this.#emitProgress({
       attachmentDebug: {
         stage: 'inject_files',
@@ -6776,6 +6800,7 @@ export class ChatGPTController {
         };
         throw err;
       }
+      diagnostics.stage = 'cdp_file_input';
       await this.page.setFileInputFiles(absFiles);
       await this.#emitProgress({
         attachmentDebug: {
@@ -6794,12 +6819,13 @@ export class ChatGPTController {
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const expectedNamesJson = JSON.stringify(expectedNames);
     const deadline = Date.now() + 30_000;
+    diagnostics.stage = 'wait_upload';
     let lastStatus = null;
     let lastUploadSig = null;
     while (Date.now() < deadline) {
       this.#throwIfStopRequested();
       await sleep(500);
-      const status = await this.#eval(`(() => {
+      const status = await this.page.evaluate(`(() => {
         const visible = (n) => {
           if (!n) return false;
           const r = n.getBoundingClientRect();
@@ -6896,7 +6922,7 @@ export class ChatGPTController {
           attachmentControlCount >= expectedNames.length
         );
         return { dismissed: false, done, pending, pendingText, dialogText, chipCount, attachmentControlCount, errorText, matchedNames };
-      })()`);
+      })()`, { captureExceptions: true });
       lastStatus = status;
       const uploadSig = JSON.stringify({
         dismissed: !!status?.dismissed,
@@ -6927,10 +6953,11 @@ export class ChatGPTController {
         });
       }
       if (status?.dismissed) {
-        await this.#eval(`(() => {
+        diagnostics.stage = 'dismiss_error';
+        await this.page.evaluate(`(() => {
           const closeBtn = document.querySelector('[aria-label*="Remove" i], [aria-label*="Delete" i], [data-testid*="attachment"] [role="button"], [data-testid*="file"] button');
           if (closeBtn) closeBtn.click();
-        })()`);
+        })()`, { captureExceptions: true });
         await sleep(300);
         const err = new Error('attachment_upload_failed');
         err.data = { reason: 'dialog', detail: clipText(status?.dialogText || '', 160) || null };

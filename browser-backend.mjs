@@ -1,5 +1,37 @@
 const SUPPORTED_BROWSER_BACKENDS = ['electron', 'chrome-cdp'];
 
+export function rendererEvaluationError(details) {
+  const description = details?.exception?.description || details?.text || 'renderer_evaluation_failed';
+  const message = String(description).split('\n')[0];
+  const frames = details?.stackTrace?.callFrames || [];
+  let stackFrames = frames.map(frame =>
+    `    at ${frame.functionName || '<anonymous>'} (script ${frame.scriptId}:${frame.lineNumber + 1}:${frame.columnNumber + 1})`
+  );
+  if (!stackFrames.length) {
+    stackFrames = String(description).split('\n').slice(1).flatMap(line => {
+      const frame = line.trim();
+      if (!frame.startsWith('at ')) return [];
+      const position = /:(\d+):(\d+)\)?$/.exec(frame);
+      if (!position) return [];
+      const call = frame.slice(3);
+      const nameEnd = call.indexOf(' (');
+      const name = nameEnd >= 0 ? call.slice(0, nameEnd) : '<anonymous>';
+      return [`    at ${name} (line ${position[1]}:${position[2]})`];
+    });
+  }
+  const stack = [message, ...stackFrames].join('\n');
+  const error = new Error(message);
+  error.data = { rendererError: {
+    source: 'renderer',
+    name: details?.exception?.className || 'Error',
+    message,
+    stack,
+    lineNumber: details?.lineNumber ?? null,
+    columnNumber: details?.columnNumber ?? null
+  } };
+  return error;
+}
+
 export function normalizeBrowserBackend(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return 'electron';

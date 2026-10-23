@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeBrowserBackend,
+  rendererEvaluationError,
   resolveBrowserBackend,
   resolveChromeDebugPort,
   resolveChromeExecutablePath,
@@ -10,6 +11,36 @@ import {
   resolveChromeProfileName
 } from '../browser-backend.mjs';
 import { buildChromeLaunchArgs, defaultChromeUserDataDir } from '../chrome-cdp-backend.mjs';
+
+test('browser-backend: renderer evidence keeps exception fields without source payloads', () => {
+  const error = rendererEvaluationError({
+    text: 'Uncaught', lineNumber: 2, columnNumber: 4,
+    exception: { className: 'TypeError', description: 'TypeError: synthetic_failure\nraw source payload', preview: { body: 'file contents' } },
+    stackTrace: { callFrames: [{ functionName: 'inject', scriptId: '12', lineNumber: 2, columnNumber: 4, url: 'https://fixture.invalid/source.js?private=value' }] }
+  });
+  assert.equal(error.data.rendererError.message, 'TypeError: synthetic_failure');
+  assert.match(error.data.rendererError.stack, /inject \(script 12:3:5\)/);
+  for (const text of ['raw source payload', 'file contents', 'private=value']) {
+    assert.equal(JSON.stringify(error.data).includes(text), false);
+  }
+});
+
+test('browser-backend: native description frames survive without protocol stackTrace', () => {
+  const error = rendererEvaluationError({
+    text: 'Uncaught (in promise)',
+    exception: { className: 'TypeError', description: [
+      'TypeError: synthetic_failure',
+      '    at asynchronousFailure (https://fixture.invalid/source.js?private=value:3:5)',
+      '    at <anonymous>:1:9',
+      'raw source payload'
+    ].join('\n') }
+  });
+  assert.match(error.data.rendererError.stack, /at asynchronousFailure \(line 3:5\)/);
+  assert.match(error.data.rendererError.stack, /at <anonymous> \(line 1:9\)/);
+  for (const text of ['fixture.invalid', 'private=value', 'raw source payload']) {
+    assert.equal(JSON.stringify(error.data).includes(text), false);
+  }
+});
 
 test('browser-backend: normalizes aliases', () => {
   assert.equal(normalizeBrowserBackend('chrome'), 'chrome-cdp');

@@ -14,6 +14,7 @@ import { locationFromConversationUrl } from '../chatgpt-location.mjs';
 import { createPrivateLibraryBlobStore } from '../library-blob-store.mjs';
 import { createProviderTabOperationLeases } from '../provider-tab-operation-leases.mjs';
 import { createTranscriptStore } from '../transcript-store.mjs';
+import { createRunStore } from '../run-store.mjs';
 import {
   createChatGptTranscriptCapture,
   createTranscriptSyncService
@@ -9003,6 +9004,49 @@ test('http-api: query rejects unknown vendor hint', async (t) => {
   assert.equal(r.res.status, 400);
   assert.equal(r.data.error, 'invalid_vendor');
 });
+
+for (const exceptionSource of ['renderer', 'host']) {
+  test(`http-api: ${exceptionSource} attachment exception evidence survives finalization and reload`, async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-attachment-evidence-'));
+    t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+    const attachmentDebug = {
+      stage: 'inject_files',
+      inputs: [{ name: 'fixture.txt', bytes: 12, sha256: 'a'.repeat(64) }],
+      exception: { source: exceptionSource, name: 'TypeError', message: 'synthetic_failure', stack: 'at inject (script 12:3:4)' }
+    };
+    const controller = {
+      runExclusive: async fn => await fn(),
+      query: async () => {
+        const error = new Error(exceptionSource === 'renderer' ? 'attachment_upload_failed' : 'synthetic_debugger_transport_failure');
+        if (exceptionSource === 'renderer') error.data = { reason: 'renderer_exception' };
+        error.attachmentDebug = attachmentDebug;
+        throw error;
+      },
+      getUrl: async () => 'https://chatgpt.com/'
+    };
+    const tabs = {
+      listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt' }],
+      ensureTab: async () => 't0',
+      getControllerById: () => controller
+    };
+    const server = await startHttpApi({
+      providerTabOperations: createProviderTabOperationLeases(), port: 0, token: 'test-token', tabs,
+      defaultTabId: 't0', stateDir, getStatus: async () => ({ ok: true })
+    });
+    t.after(() => server.close());
+    const port = server.address().port;
+    const response = await req({ port, token: 'test-token', method: 'POST', pth: '/query', body: { prompt: 'fixture' } });
+    assert.equal(response.res.status, exceptionSource === 'renderer' ? 409 : 500);
+    const runs = await req({ port, token: 'test-token', method: 'POST', pth: '/runs/list', body: {} });
+    const run = runs.data.runs[0];
+    assert.equal(run.status, 'error');
+    assert.equal(run.completionReceipt, null);
+    assert.deepEqual(run.attachmentDebug, attachmentDebug);
+    const reloaded = createRunStore(stateDir);
+    await reloaded.load();
+    assert.deepEqual(reloaded.get(run.id).attachmentDebug, attachmentDebug);
+  });
+}
 
 test('http-api: composer focus and staging failures return conflicts without success receipts', async (t) => {
   for (const errorCode of ['prompt_focus_failed', 'prompt_staging_failed']) {

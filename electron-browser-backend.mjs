@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import electron from 'electron';
 import { readChatGptResponseMode } from './chatgpt-response-mode.mjs';
+import { rendererEvaluationError } from './browser-backend.mjs';
 
 import {
   DEEP_RESEARCH_IFRAME_SELECTOR,
@@ -142,8 +143,26 @@ class ElectronPageAdapter {
     await this.win.loadURL(url);
   }
 
-  async evaluate(js) {
-    return await this.win.webContents.executeJavaScript(js, true);
+  async evaluate(js, { captureExceptions = false } = {}) {
+    const wc = this.win.webContents;
+    if (!captureExceptions) return await wc.executeJavaScript(js, true);
+    let invoked = false;
+    try {
+      return await this.#withDebugger(async (debuggerClient) => {
+        invoked = true;
+        const result = await debuggerClient.sendCommand('Runtime.evaluate', {
+          expression: String(js), awaitPromise: true, returnByValue: true, userGesture: true
+        });
+        if (result?.exceptionDetails) throw rendererEvaluationError(result.exceptionDetails);
+        if (!result?.result) throw new Error('renderer_evaluation_malformed');
+        return result.result.value;
+      }, { attachErrorMessage: 'renderer_exception_capture_unavailable' });
+    } catch (error) {
+      // Only an unavailable debugger permits the original evaluation path.
+      // After dispatch, another evaluation could repeat an upload.
+      if (!invoked) return await wc.executeJavaScript(js, true);
+      throw error;
+    }
   }
 
   async terminateEvaluation() {

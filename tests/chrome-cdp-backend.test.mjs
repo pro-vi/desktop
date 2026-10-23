@@ -100,8 +100,15 @@ async function createDownloadTestPage() {
   backend.started = true;
   backend.client = client;
   const session = await backend.createSession({ url: 'https://chatgpt.com/' });
-  return { page: session.page, calls, listeners, emit };
+  return { page: session.page, calls, listeners, emit, client };
 }
+
+test('chrome-cdp-backend: attachment evaluations retain native exception details', async () => {
+  const { page, client } = await createDownloadTestPage();
+  client.send = async () => ({ exceptionDetails: { text: 'Uncaught', exception: { className: 'TypeError', description: 'TypeError: synthetic_failure' } } });
+  await assert.rejects(page.evaluate('synthetic', { captureExceptions: true }), error => error.data.rendererError.message === 'TypeError: synthetic_failure');
+  await assert.rejects(page.evaluate('synthetic'), /chrome_cdp_evaluation_exception/);
+});
 
 test('chrome-cdp-backend: response metadata ignores other page sessions and removes its listeners', async () => {
   const listeners = new Map();

@@ -164,6 +164,7 @@ function normalizeRun(input = {}) {
     completionVerification: validateCompletionVerification(input.completionVerification),
     promptDelivery: normalizeObject(input.promptDelivery),
     promptStaging: normalizeObject(input.promptStaging),
+    attachmentDebug: normalizeObject(input.attachmentDebug),
     revision: Math.max(0, Number(input.revision) || 0)
   };
 }

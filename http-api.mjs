@@ -1704,7 +1704,8 @@ export function startHttpApi({
       source: op?.source || 'http',
       kind: op?.kind || 'query',
       finishedAt: Date.now(),
-      durationMs: Math.max(0, Date.now() - Number(op?.startedAt || Date.now()))
+      durationMs: Math.max(0, Date.now() - Number(op?.startedAt || Date.now())),
+      ...(error?.attachmentDebug ? { attachmentDebug: error.attachmentDebug } : {})
     };
     if (message === 'query_aborted') {
       return {
@@ -1785,9 +1786,11 @@ export function startHttpApi({
       return {
         ...base,
         status: 'error',
-        label: 'Attachment rejected',
-        detail: detail?.detail ? `The provider rejected the attachment: ${detail.detail}` : 'The provider rejected the attachment before send.',
-        attachmentDebug: detail || null
+        label: detail?.reason === 'renderer_exception' ? 'Attachment failed' : 'Attachment rejected',
+        detail: detail?.reason === 'renderer_exception'
+          ? 'The attachment could not be prepared in the browser before send.'
+          : detail?.detail ? `The provider rejected the attachment: ${detail.detail}` : 'The provider rejected the attachment before send.',
+        attachmentDebug: error?.attachmentDebug || detail || null
       };
     }
     if (message === 'attachment_upload_stalled') {
@@ -1796,7 +1799,7 @@ export function startHttpApi({
         status: 'error',
         label: 'Attachment stalled',
         detail: detail?.pendingText ? `Attachment never finished uploading: ${detail.pendingText}` : 'Attachment never finished uploading.',
-        attachmentDebug: detail || null
+        attachmentDebug: error?.attachmentDebug || detail || null
       };
     }
     if (message === 'missing_staged_prompt') {
@@ -2226,6 +2229,7 @@ export function startHttpApi({
       completionReceipt: outcome.completionReceipt || null,
       ...(outcome.promptDelivery ? { promptDelivery: outcome.promptDelivery } : {}),
       ...(outcome.promptStaging ? { promptStaging: outcome.promptStaging } : {}),
+      ...(outcome.attachmentDebug ? { attachmentDebug: outcome.attachmentDebug } : {}),
       ...(outcome.responseDebug ? { responseDebug: outcome.responseDebug } : {}),
       ...(outcome.recovery ? { recovery: outcome.recovery } : {}),
       ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})

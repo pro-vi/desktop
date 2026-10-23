@@ -4,12 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
 
 import { ChatGPTController, chatgptMessageId, chatgptMessageRole, defaultReconcileGraceMs } from '../chatgpt-controller.mjs';
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
 import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 import { createProviderCompatibilityBridge, loadChatGptCompatibilityProfile } from '../chatgpt-compatibility.mjs';
 import { readChatGptResponseMode } from '../chatgpt-response-mode.mjs';
+import { rendererEvaluationError } from '../browser-backend.mjs';
 
 function readyState() {
   return {
@@ -6063,6 +6065,51 @@ test('chatgpt-controller: send fails when the prompt never stages in the active 
     /missing_staged_prompt/
   );
 });
+
+for (const failedStage of ['open_picker', 'inject_files', 'wait_upload']) {
+  test(`chatgpt-controller: attachment evidence identifies ${failedStage} without submitting`, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-attachment-stage-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const attachment = path.join(dir, 'fixture.txt');
+    const text = 'private synthetic attachment body';
+    await fs.writeFile(attachment, text);
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now += 1_000;
+    t.after(() => { Date.now = realNow; });
+    let sendEvaluations = 0;
+    const page = {
+      getUrl: async () => 'https://chatgpt.com/',
+      evaluate: async (js, options = {}) => {
+        if (js.includes('const hasTurnstile')) return readyState();
+        const stage = js.includes('upload_menu_item_visible') ? 'open_picker'
+          : js.includes('const fileData =') ? 'inject_files'
+          : js.includes('const dialogBtn = Array.from') ? 'wait_upload' : null;
+        if (stage) {
+          assert.equal(options.captureExceptions, true);
+          if (stage === failedStage) throw rendererEvaluationError({
+            text: 'Uncaught', exception: { className: 'TypeError', description: 'TypeError: synthetic_failure' }
+          });
+          if (stage === 'open_picker') return { action: 'file_input_ready' };
+          return { ok: true, count: 1 };
+        }
+        if (js.includes('already_generating')) sendEvaluations++;
+        throw new Error('unexpected_attachment_evaluation');
+      }
+    };
+    const controller = new ChatGPTController({ page, selectors: { promptTextarea: '#prompt-textarea', sendButton: '[data-testid="send-button"]' } });
+    await assert.rejects(controller.query({ prompt: 'fixture', attachments: [attachment] }), error => {
+      assert.equal(error.message, 'attachment_upload_failed');
+      assert.equal(error.data.reason, 'renderer_exception');
+      assert.equal(error.attachmentDebug.stage, failedStage);
+      assert.deepEqual(error.attachmentDebug.inputs, [{ name: 'fixture.txt', bytes: Buffer.byteLength(text), sha256: crypto.createHash('sha256').update(text).digest('hex') }]);
+      assert.equal(error.attachmentDebug.exception.source, 'renderer');
+      assert.equal(JSON.stringify(error.attachmentDebug).includes(text), false);
+      return true;
+    });
+    assert.equal(sendEvaluations, 0);
+  });
+}
 
 test('chatgpt-controller: query fails when attachment upload stays pending', async () => {
   const realNow = Date.now;

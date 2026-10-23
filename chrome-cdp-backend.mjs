@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readChatGptResponseMode } from './chatgpt-response-mode.mjs';
+import { rendererEvaluationError } from './browser-backend.mjs';
 
 import {
   DEEP_RESEARCH_IFRAME_SELECTOR,
@@ -442,7 +443,7 @@ class ChromeCdpPageAdapter {
     await this.client.send('Page.navigate', { url }, this.sessionId);
   }
 
-  async evaluate(js) {
+  async evaluate(js, { captureExceptions = false } = {}) {
     const result = await this.client.send(
       'Runtime.evaluate',
       {
@@ -452,6 +453,7 @@ class ChromeCdpPageAdapter {
       },
       this.sessionId
     );
+    if (captureExceptions && result?.exceptionDetails) throw rendererEvaluationError(result.exceptionDetails);
     return unwrapChromeCdpEvaluationResult(result);
   }
 

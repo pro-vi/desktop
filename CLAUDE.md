@@ -62,6 +62,8 @@ Optional local pre-push convenience (documented, never auto-installed): `npm tes
 
 ## Feature checklist
 
+E2E map: docs/mcp-method-happy-paths.md
+
 `docs/mcp-method-happy-paths.md` is the maintained list of every MCP method, its journey and pass condition, and its last verified status with evidence. Every row stays ✅: a change to a method's code path, or a ChatGPT page change that breaks one, re-runs that row's journey and updates its status column; a failing row is recorded as ❌ with the run, never dropped. The local rows run through `scripts/e2e-*.mjs` (no provider sends); the live rows need consent under "Live provider probes" below.
 
 ## Live provider probes

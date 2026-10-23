@@ -473,6 +473,45 @@ test('electron-browser-backend: insertText uses native webContents.insertText wh
   assert.equal(inserted, 'hello');
 });
 
+test('electron-browser-backend: detailed evaluation never retries after dispatch', async () => {
+  let nativeCalls = 0;
+  let protocolCalls = 0;
+  class Window extends MockBrowserWindow {
+    constructor() {
+      super();
+      this.webContents.executeJavaScript = async () => { nativeCalls++; return 'fallback'; };
+      this.webContents.debugger.sendCommand = async () => {
+        protocolCalls++;
+        return { exceptionDetails: { text: 'Uncaught', exception: { className: 'TypeError', description: 'TypeError: synthetic_failure' } } };
+      };
+    }
+    async loadURL() {}
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: Window });
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/' });
+  await assert.rejects(page.evaluate('synthetic', { captureExceptions: true }), error => error.data.rendererError.name === 'TypeError');
+  assert.equal(protocolCalls, 1);
+  assert.equal(nativeCalls, 0);
+  await backend.dispose();
+});
+
+test('electron-browser-backend: unavailable exception capture keeps one native evaluation', async () => {
+  let nativeCalls = 0;
+  class Window extends MockBrowserWindow {
+    constructor() {
+      super();
+      this.webContents.debugger.attach = () => { throw new Error('unavailable'); };
+      this.webContents.executeJavaScript = async () => { nativeCalls++; return 'native-result'; };
+    }
+    async loadURL() {}
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: Window });
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/' });
+  assert.equal(await page.evaluate('synthetic', { captureExceptions: true }), 'native-result');
+  assert.equal(nativeCalls, 1);
+  await backend.dispose();
+});
+
 test('electron-browser-backend: select-all shortcut uses the native editing command', async () => {
   const actions = [];
   class OkBrowserWindow extends MockBrowserWindow {
