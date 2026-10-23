@@ -5754,7 +5754,7 @@ export class ChatGPTController {
     );
   }
 
-  async #focusPromptImpl({ phase = null, clickPrompt = true, expectedPrompt = null } = {}) {
+  async #focusPromptImpl({ phase = null, clickPrompt = true, expectedPrompt = null, replacePrompt = null } = {}) {
     if (phase) await this.#emitProgress({ phase });
     const sel = JSON.stringify(this.selectors.promptTextarea);
     const focusScript = `(() => {
@@ -5813,6 +5813,23 @@ export class ChatGPTController {
       if (document.activeElement !== el && !el.contains(document.activeElement)) {
         return { ok:false, error:'prompt_focus_failed' };
       }
+      let replaced = false;
+      const replacement = ${JSON.stringify(replacePrompt)};
+      if (replacement !== null && el.isContentEditable) {
+        let fiber = null;
+        for (let node = el; node && !fiber; node = node.parentElement) {
+          const key = Object.keys(node).find((key) => key.startsWith('__reactFiber$'));
+          if (key) fiber = node[key];
+        }
+        for (; fiber; fiber = fiber.return) {
+          const composer = fiber.memoizedProps?.composerController;
+          if (composer?.view?.dom !== el || typeof composer.updateLiteralText !== 'function') continue;
+          // Use the editor's literal-text transaction instead of its Markdown typing rules.
+          composer.updateLiteralText(replacement, 'replace');
+          replaced = true;
+          break;
+        }
+      }
       const expectedPrompt = ${JSON.stringify(expectedPrompt)};
       if (expectedPrompt !== null) {
         const usesValue = el.matches('textarea, input');
@@ -5860,7 +5877,7 @@ export class ChatGPTController {
       const y = Math.max(0, r.y);
       const right = Math.min(window.innerWidth, r.x + r.width);
       const bottom = Math.min(window.innerHeight, r.y + r.height);
-      return { ok:true, rect: { x, y, w: Math.max(0, right - x), h: Math.max(0, bottom - y) } };
+      return { ok:true, replaced, rect: { x, y, w: Math.max(0, right - x), h: Math.max(0, bottom - y) } };
     })()`;
     let ok = await this.#eval(focusScript);
     if (!ok?.ok) {
@@ -5887,14 +5904,16 @@ export class ChatGPTController {
 
   async #typePrompt(prompt, { clickPrompt = true } = {}) {
     await this.#focusPrompt({ phase: 'typing_prompt', clickPrompt });
-
-    const isMac = process.platform === 'darwin';
-    await sleep(jitter(25, 80));
-    await this.#sendKey('A', { modifiers: [isMac ? 'meta' : 'control'] });
-    await sleep(jitter(15, 50));
-    await this.#sendKey('Backspace');
-    await sleep(jitter(25, 80));
-    await this.#typeHuman(prompt);
+    const replacement = await this.#focusPrompt({ clickPrompt: false, replacePrompt: prompt });
+    if (!replacement.replaced) {
+      const isMac = process.platform === 'darwin';
+      await sleep(jitter(25, 80));
+      await this.#sendKey('A', { modifiers: [isMac ? 'meta' : 'control'] });
+      await sleep(jitter(15, 50));
+      await this.#sendKey('Backspace');
+      await sleep(jitter(25, 80));
+      await this.#typeHuman(prompt);
+    }
     await this.#focusPrompt({ clickPrompt: false, expectedPrompt: prompt });
   }
 

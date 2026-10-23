@@ -5817,6 +5817,8 @@ function composerInputPage({
   discardInput = false,
   flattenLines = false,
   lateNewlines = false,
+  inlineCodeInputRule = false,
+  nativeComposer = false,
   transformInput = (text) => text
 } = {}) {
   let draft = 'Old draft from another request';
@@ -5824,27 +5826,39 @@ function composerInputPage({
   let pendingNewline = false;
   const clicks = [];
   const keyTargets = [];
+  const nativeReplacements = [];
   const document = { activeElement: { tagName: 'BODY' } };
-  const makeEditor = () => ({
-    isContentEditable: !textarea,
-    disabled: false,
-    readOnly: false,
-    get value() { return draft; },
-    get innerText() { return textarea ? draft : draft.replace(/\n/g, '\n\n'); },
-    get textContent() { return draft; },
-    getAttribute(name) {
-      return { 'aria-label': 'Message ChatGPT', role: 'textbox', contenteditable: textarea ? null : 'true' }[name] ?? null;
-    },
-    matches(selector) { return textarea && /textarea/.test(selector); },
-    contains(node) { return node === this; },
-    focus() { if (!refuseFocus) document.activeElement = this; },
-    getBoundingClientRect() { return { x: 418, y: -195, width: 553, height: 728 }; }
-  });
+  const makeEditor = () => {
+    const node = {
+      isContentEditable: !textarea,
+      disabled: false,
+      readOnly: false,
+      get value() { return draft; },
+      get innerText() { return textarea ? draft : draft.replace(/\n/g, '\n\n'); },
+      get textContent() { return draft; },
+      getAttribute(name) {
+        return { 'aria-label': 'Message ChatGPT', role: 'textbox', contenteditable: textarea ? null : 'true' }[name] ?? null;
+      },
+      matches(selector) { return textarea && /textarea/.test(selector); },
+      contains(node) { return node === this; },
+      focus() { if (!refuseFocus) document.activeElement = this; },
+      getBoundingClientRect() { return { x: 418, y: -195, width: 553, height: 728 }; }
+    };
+    if (nativeComposer) node.__reactFiber$fixture = {
+      memoizedProps: { composerController: {
+        view: { dom: nativeComposer === 'other' ? {} : node },
+        updateLiteralText(text) { draft = transformInput(text); nativeReplacements.push(text); }
+      } },
+      return: null
+    };
+    return node;
+  };
   let editor = makeEditor();
   document.querySelectorAll = () => [editor];
   return {
     clicks,
     keyTargets,
+    nativeReplacements,
     get draft() { return draft; },
     async getUrl() { return 'https://chatgpt.com/'; },
     async evaluate(js) {
@@ -5874,6 +5888,9 @@ function composerInputPage({
     },
     async insertText(text) {
       if (document.activeElement === editor && !discardInput) draft += transformInput(text);
+      if (inlineCodeInputRule && (text === '`' || /^`[^`]+`$/.test(text))) {
+        draft = draft.replace(/`([^`]+)`$/, '$1');
+      }
       // A newline overtaken by the text typed after it, as an unordered input channel allows.
       if (pendingNewline) { draft += '\n'; pendingNewline = false; }
     },
@@ -5929,6 +5946,41 @@ test('chatgpt-controller: prompt replacement accepts rich-editor paragraph spaci
   const page = composerInputPage();
   await assert.rejects(composerInputController(page).send({ text: 'First paragraph\n\nSecond paragraph' }), /reached_send_boundary/);
   assert.equal(page.draft.replace(/\s+/gu, ' ').trim(), 'First paragraph Second paragraph');
+});
+
+test('chatgpt-controller: short inline code keeps its literal delimiters', async () => {
+  const page = composerInputPage({ inlineCodeInputRule: true, nativeComposer: true });
+  const prompt = 'Use `value` here.';
+  await assert.rejects(composerInputController(page).send({ text: prompt }), /reached_send_boundary/);
+  assert.equal(page.draft, prompt);
+  assert.deepEqual(page.nativeReplacements, [prompt]);
+});
+
+test('chatgpt-controller: a bare inline-code line keeps its literal delimiters', async () => {
+  const page = composerInputPage({ inlineCodeInputRule: true, nativeComposer: true });
+  const prompt = '`value`';
+  await assert.rejects(composerInputController(page).send({ text: prompt }), /reached_send_boundary/);
+  assert.equal(page.draft, prompt);
+});
+
+test('chatgpt-controller: native composer replacement stays bound to the focused editor', async () => {
+  const page = composerInputPage({ inlineCodeInputRule: true, nativeComposer: 'other' });
+  await assert.rejects(composerInputController(page).send({ text: '`value`' }), /prompt_staging_failed/);
+  assert.equal(page.nativeReplacements.length, 0);
+});
+
+test('chatgpt-controller: native composer replacement still rejects changed text', async () => {
+  const page = composerInputPage({ nativeComposer: true, transformInput: text => text.replace('+', '-') });
+  await assert.rejects(composerInputController(page).send({ text: '1+2' }), /prompt_staging_failed/);
+});
+
+test('chatgpt-controller: native composer exceptions do not retry or send a changed draft', async () => {
+  const page = composerInputPage({ nativeComposer: true });
+  const failure = new Error('native_replacement_failed');
+  page.nativeReplacements.push = () => { throw failure; };
+  await assert.rejects(composerInputController(page).send({ text: 'New draft' }), error => error === failure);
+  assert.equal(page.draft, 'New draft');
+  assert.equal(page.keyTargets.length, 0);
 });
 
 test('chatgpt-controller: prompt replacement rejects flattened lines', async () => {
