@@ -19,7 +19,8 @@ unproved. Attachment contents and provider file identifiers are omitted here.
 The production controller ran against one owned Electron renderer through CDP.
 Evaluations stopped after upload completion, before prompt staging or Send.
 Submission controls were also blocked. This was a bounded attachment check,
-not the public MCP query journey, and it created no durable live query record.
+not the public MCP query journey, and it created no durable live query record. Reasoning selection
+was not requested, so the reported callers' mode-activation path was not checked.
 
 ## Observations
 
@@ -51,6 +52,7 @@ its cause. Later direct-tab setup reached a composer; no production readiness
 change was made on that evidence.
 
 This observation does not disprove the older failure or verify post-upload
-processing. The historical attachment investigation remains open. Future failed
-runs retain available exception evidence, upload stage and input identity through the
+processing. The historical attachment investigation remains open. Failures inside the
+attachment operation retain available evidence through the
 [diagnostic capture and persistence change](2026-10-22-attachment-failure-evidence.md).
+Errors before that operation starts are outside its capture.
