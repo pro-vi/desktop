@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import { DOT_PAGE_FAILURE_REASONS } from './chatgpt-dot-ui.mjs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -890,16 +891,19 @@ for (const [operation, description] of [
         ? data.mismatchedFields.filter((field) => ['conversationId', 'roomId', 'peerAeonId', 'accountKey', 'dotUrl'].includes(field))
         : [];
       const bindingFailure = mismatchedFields.length ? ` Binding mismatch: ${mismatchedFields.join(', ')}.` : '';
+      const reason = code === 'dot_binding_unconfirmed' && DOT_PAGE_FAILURE_REASONS.includes(data?.reason) ? data.reason : null;
+      const readinessFailure = reason ? ` Readiness check: ${reason}.` : '';
       if (code === 'dot_message_too_large' && typeof data?.messageId === 'string' && Number.isSafeInteger(data?.requiredChars) && data.requiredChars > 0) {
         return { content: [{ type: 'text', text: `Dot message ${data.messageId} requires maxChars>=${data.requiredChars}. Increase the budget and reuse the same reading position.` }], structuredContent: { error: code, messageId: data.messageId, requiredChars: data.requiredChars, cursor: body.after || null }, isError: true };
       }
       if (operation !== 'talk' || !data?.runId) {
+        if (reason) return { content: [{ type: 'text', text: `Dot operation refused.${readinessFailure}` }], structuredContent: { error: code, reason }, isError: true };
         if (bindingFailure) return { content: [{ type: 'text', text: `Dot operation refused.${bindingFailure}` }], structuredContent: { error: code, mismatchedFields }, isError: true };
         throw error;
       }
       const dot = parseDotRunFields(data);
       const status = dot.dotSubmission.state === 'submitted' ? (code === 'run_status_unconfirmed' ? 'Dot message delivered; final run status unconfirmed.' : `Dot message delivered; operation failed (${code}).`) : dot.dotSubmission.state === 'unknown' ? 'Dot message delivery unconfirmed.' : 'Dot message not submitted.';
-      return { content: [{ type: 'text', text: `${status}${bindingFailure} runId=${data.runId} state=${dot.dotSubmission.state}. Keep the recorded checkpoint; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code, ...(bindingFailure ? { mismatchedFields } : {}) }, isError: true };
+      return { content: [{ type: 'text', text: `${status}${bindingFailure}${readinessFailure} runId=${data.runId} state=${dot.dotSubmission.state}. Keep the recorded checkpoint; never resend automatically.` }], structuredContent: { runId: data.runId, ...dot, error: code, ...(bindingFailure ? { mismatchedFields } : {}), ...(reason ? { reason } : {}) }, isError: true };
     }
   });
 }

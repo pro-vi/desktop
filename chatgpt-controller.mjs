@@ -1033,11 +1033,18 @@ export class ChatGPTController {
     if (current !== url) await this.navigate(url);
     const deadline = Date.now() + timeoutMs;
     let opened = !!expected || !!requested.dotUrl;
+    let lastUnconfirmed;
     while (Date.now() < deadline) {
       this.#throwIfStopRequested();
       if (!opened) {
         const entry = await this.#eval(dotPageScript({ action: 'open' }));
         opened = entry?.state === 'opening';
+        if (!opened) {
+          try { parseDotPageObservation(entry); } catch (error) {
+            if (error.message !== 'dot_binding_unconfirmed') throw error;
+            lastUnconfirmed = error;
+          }
+        }
       }
       if (opened) {
         try {
@@ -1055,11 +1062,12 @@ export class ChatGPTController {
           return observation.binding;
         } catch (error) {
           if (error.message !== 'dot_binding_unconfirmed') throw error;
+          lastUnconfirmed = error;
         }
       }
       await sleep(200);
     }
-    throw new Error('dot_binding_unconfirmed');
+    throw lastUnconfirmed || new Error('dot_binding_unconfirmed');
   }
 
   async readDotMessages({ after = undefined, limit = 32, maxChars = 20_000, binding = this.dotBinding } = {}) {

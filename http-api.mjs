@@ -3,6 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { URL } from 'node:url';
 import crypto from 'node:crypto';
+import { DOT_PAGE_FAILURE_REASONS } from './chatgpt-dot-ui.mjs';
 import { writeToken, readProjects, writeProjects } from './state.mjs';
 import {
   DOT_HTTP_ERROR_STATUS,
@@ -221,6 +222,7 @@ function mapErrorToHttp(error) {
     if (msg === 'dot_binding_mismatch' && Array.isArray(error?.data?.mismatchedFields)) {
       data.mismatchedFields = error.data.mismatchedFields.filter((field) => ['conversationId', 'roomId', 'peerAeonId', 'accountKey', 'dotUrl'].includes(field));
     }
+    if (msg === 'dot_binding_unconfirmed' && DOT_PAGE_FAILURE_REASONS.includes(error?.data?.reason)) data.reason = error.data.reason;
     if (msg === 'dot_message_too_large' && typeof error?.data?.messageId === 'string' && Number.isSafeInteger(error?.data?.requiredChars)) Object.assign(data, { messageId: error.data.messageId, requiredChars: error.data.requiredChars });
     return { code: DOT_HTTP_ERROR_STATUS[msg], body: { error: msg, ...(Object.keys(data).length ? { data } : {}) } };
   }

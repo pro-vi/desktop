@@ -3,6 +3,108 @@ import assert from 'node:assert/strict';
 import { ChatGPTController } from '../chatgpt-controller.mjs';
 import { encodeDotCursor, parseDotCursor, parseDotSubmission, initialDotSubmission } from '../chatgpt-recipient.mjs';
 import { binding, createNativeDotPage } from './fixtures/chatgpt-dot/native-page.mjs';
+import { DOT_PAGE_FAILURE_REASONS, dotPageScript, parseDotPageObservation } from '../chatgpt-dot-ui.mjs';
+
+const failureCases = [
+  ['origin-unexpected', "location.origin = 'https://example.test'"],
+  ['sidebar-ambiguous', "document.querySelectorAll = () => []"],
+  ['route-not-dot', "location.pathname = '/'"],
+  ['account-ambiguous', "sidebar.__reactFiber$fixture.memoizedProps.accountKey = null"],
+  ['conversation-ambiguous', "props.conversationId = null"],
+  ['context-ambiguous', "props.services = null"],
+  ['room-invalid', "props.room.members = null"],
+  ['peer-ambiguous', "props.room.members[0].aeon_id = null"],
+  ['owner-ambiguous', "props.room.members.pop()"],
+  ['profile-context-mismatch', "sidebar.__reactFiber$fixture.memoizedProps.profile.messaging_room_id = 'unrelated-room'"],
+  ['timeline-unavailable', "props.services.conversations.timeline = null"],
+  ['timeline-not-loaded', "props.services.conversations.timeline = () => ({ getSnapshot: () => ({ loaded: false }) })"],
+  ['messages-invalid', "props.services.conversations.timeline = () => ({ getSnapshot: () => ({ loaded: true }) })"],
+  ['cursors-invalid', "props.services.conversations.timeline = () => ({ getSnapshot: () => ({ loaded: true, messages: [], cursors: {} }) })"],
+  ['composer-invalid', "props.services.composer.state.getSnapshot = () => ({})"],
+  ['message-invalid', "props.services.conversations.timeline = () => ({ getSnapshot: () => ({ loaded: true, messages: [{}], cursors: { after: null } }) })"],
+  ['message-sender-unknown', "props.services.conversations.timeline = () => ({ getSnapshot: () => ({ loaded: true, messages: [{ id: 'bad', roomId: props.roomId, deliveryState: '' }], cursors: { after: null } }) })"],
+  ['submission-unavailable', "props.services.composer.sendPrepared = null", { action: 'submit', binding, text: 'fixture', requestId: 'fixture-request' }],
+  ['message-delivery-pending', null, { action: 'read', limit: 32, maxChars: 20000 }, { deliveryState: 'pending' }],
+  ['message-content-unavailable', null, { action: 'read', limit: 32, maxChars: 20000 }, { text: null }]
+];
+
+test('Dot rejection fixtures cover every public reason', () => {
+  assert.deepEqual(failureCases.map(([reason]) => reason), [...DOT_PAGE_FAILURE_REASONS]);
+});
+
+for (const [reason, mutation, options = {}, message] of failureCases) {
+  test(`Dot reports ${reason} without private native values`, async () => {
+    const fixture = createNativeDotPage();
+    if (message) fixture.state.messages.push(fixture.incoming('fixture-message', 'private fixture body', message));
+    const script = `(() => { const sidebar = document.querySelectorAll('button')[0]; const props = document.querySelectorAll('main')[0].__reactProps$fixture; ${mutation || ''}; return ${dotPageScript(options)}; })()`;
+    const observed = await fixture.page.evaluate(script);
+    assert.deepEqual(observed, { state: 'unconfirmed', reason });
+    assert.throws(() => parseDotPageObservation(observed), (error) => {
+      assert.equal(error.message, 'dot_binding_unconfirmed');
+      assert.deepEqual(error.data, { reason });
+      return true;
+    });
+    assert.equal(fixture.state.inputCount, 0);
+  });
+}
+
+test('Dot ignores unrecognized diagnostic content', () => {
+  assert.throws(() => parseDotPageObservation({ state: 'unconfirmed', reason: 'private fixture body', text: 'private fixture body' }), (error) => {
+    assert.equal(error.data, undefined);
+    return true;
+  });
+});
+
+test('Dot confirms the primary profile on the home alias without a selected sidebar item', async () => {
+  const fixture = createNativeDotPage();
+  fixture.location.href = 'https://chatgpt.com/dots/home';
+  fixture.location.pathname = '/dots/home';
+  const evaluate = fixture.page.evaluate;
+  fixture.page.evaluate = (script) => evaluate(`(() => { const sidebar = document.querySelectorAll('button')[0]; const get = sidebar.getAttribute; sidebar.getAttribute = name => name === 'aria-current' ? null : get(name); return ${script}; })()`);
+  assert.deepEqual(await controllerFor(fixture).inspectDotBinding(), { ...binding, dotUrl: fixture.location.href });
+  assert.equal(fixture.state.inputCount, 0);
+});
+
+for (const [field, value, reason] of [
+  ['is_primary', false, 'sidebar-ambiguous'],
+  ['id', 'another-profile', 'sidebar-ambiguous'],
+  ['messaging_room_id', 'another-room', 'profile-context-mismatch'],
+  ['active_root_thread_id', 'another-conversation', 'profile-context-mismatch']
+]) {
+  test(`Dot refuses a native primary profile with changed ${field}`, async () => {
+    const fixture = createNativeDotPage();
+    const evaluate = fixture.page.evaluate;
+    fixture.page.evaluate = (script) => evaluate(`(() => { document.querySelectorAll('button')[0].__reactProps$fixture.profile[${JSON.stringify(field)}] = ${JSON.stringify(value)}; return ${script}; })()`);
+    await assert.rejects(controllerFor(fixture).inspectDotBinding(), (error) => {
+      assert.deepEqual(error.data, { reason });
+      return true;
+    });
+    assert.equal(fixture.state.inputCount, 0);
+  });
+}
+
+test('Dot rejects duplicate visible primary profile controls', async () => {
+  const fixture = createNativeDotPage();
+  const evaluate = fixture.page.evaluate;
+  fixture.page.evaluate = (script) => evaluate(`(() => { const query = document.querySelectorAll; document.querySelectorAll = selector => selector.startsWith('button[data-sidebar-destination') ? [...query(selector), ...query(selector)] : query(selector); return ${script}; })()`);
+  await assert.rejects(controllerFor(fixture).inspectDotBinding(), (error) => {
+    assert.deepEqual(error.data, { reason: 'sidebar-ambiguous' });
+    return true;
+  });
+  assert.equal(fixture.state.inputCount, 0);
+});
+
+for (const opened of [true, false]) {
+  test(`Dot preparation retains the last ${opened ? 'timeline' : 'opening'} reason`, async () => {
+    const fixture = createNativeDotPage();
+    fixture.state.loaded = false;
+    if (!opened) fixture.location.origin = 'https://example.test';
+    await assert.rejects(controllerFor(fixture).prepareDotEntry({ timeoutMs: 1 }), (error) => {
+      assert.deepEqual(error.data, { reason: opened ? 'timeline-not-loaded' : 'origin-unexpected' });
+      return true;
+    });
+  });
+}
 
 function controllerFor(fixture) {
   return new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot' }, page: fixture.page, selectors: {} });
@@ -24,8 +126,8 @@ test('Dot native adapter discovers personal context without display names', asyn
 
 test('Dot identifies the native conversation when its URL uses another route ID', async () => {
   const fixture = createNativeDotPage();
-  fixture.location.pathname = '/dots/fixture-route';
-  fixture.location.href = 'https://chatgpt.com/dots/fixture-route';
+  fixture.location.pathname = '/dots/fixture-peer';
+  fixture.location.href = 'https://chatgpt.com/dots/fixture-peer';
   const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot', dotUrl: fixture.location.href }, page: fixture.page, selectors: {} });
   assert.deepEqual(await controller.prepareDotEntry(), { ...binding, dotUrl: fixture.location.href });
   const delivered = await talk(controller, { binding: { ...binding, dotUrl: fixture.location.href } });
@@ -36,7 +138,7 @@ test('Dot accepts a conversation locator redirected to its canonical personal ro
   const fixture = createNativeDotPage();
   fixture.location.href = 'https://chatgpt.com/';
   fixture.location.pathname = '/';
-  fixture.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-route';
+  fixture.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-peer';
   const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot', dotUrl: binding.dotUrl }, page: fixture.page, selectors: {} });
   assert.deepEqual(await controller.prepareDotEntry(), { ...binding, dotUrl: fixture.state.navigateRedirect });
   assert.equal(fixture.state.inputCount, 0);
@@ -44,7 +146,7 @@ test('Dot accepts a conversation locator redirected to its canonical personal ro
 
 test('Dot rejects an unrelated locator redirected to the personal route', async () => {
   const fixture = createNativeDotPage();
-  fixture.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-route';
+  fixture.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-peer';
   const controller = new ChatGPTController({ vendorId: 'chatgpt', recipient: { kind: 'dot', dotUrl: 'https://chatgpt.com/dots/unrelated' }, page: fixture.page, selectors: {} });
   await assert.rejects(controller.prepareDotEntry(), /dot_binding_mismatch/);
   assert.equal(fixture.state.inputCount, 0);

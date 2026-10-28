@@ -31,7 +31,7 @@ function installNativeFixture(binding) {
       }
     }
   };
-  const account = { accountKey: binding.accountKey };
+  const account = { accountKey: binding.accountKey, profile: { id: binding.peerAeonId, is_primary: true, messaging_room_id: binding.roomId, active_root_thread_id: binding.conversationId } };
   sidebar.__reactProps$fixture = account;
   sidebar.__reactFiber$fixture = { memoizedProps: account, return: null };
   sidebar.onclick = () => history.pushState(null, '', '/dots/fixture-conversation');
@@ -46,11 +46,12 @@ function installNativeFixture(binding) {
 
 async function browserFixture() {
   const { app, session } = await import('electron');
-  const owned = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-dot-browser-fixture-'));
+  const owned = process.argv[2];
+  if (!owned) throw new Error('missing_fixture_profile');
   app.setPath('userData', owned);
   await app.whenReady();
   const partition = `dot-fixture-${crypto.randomUUID()}`;
-  const html = `<html><body><button data-sidebar-destination="builtin:orbit" aria-current="page">Personal fixture</button><main><div contenteditable="true" role="textbox" style="width:200px;height:30px"></div></main><script>(${installNativeFixture.toString()})(${JSON.stringify(binding)})</script></body></html>`;
+  const html = `<html><body><button data-sidebar-destination="builtin:orbit:${binding.peerAeonId}" aria-current="page">Personal fixture</button><main><div contenteditable="true" role="textbox" style="width:200px;height:30px"></div></main><script>(${installNativeFixture.toString()})(${JSON.stringify(binding)})</script></body></html>`;
   session.fromPartition(partition).protocol.handle('https', () => new Response(html, { headers: { 'content-type': 'text/html' } }));
   const { ElectronBrowserBackend } = await import('../electron-browser-backend.mjs');
   const backend = new ElectronBrowserBackend({ windowDefaults: { width: 900, height: 700, show: false, webPreferences: { partition } } });
@@ -71,7 +72,6 @@ async function browserFixture() {
     process.stdout.write(`${JSON.stringify({ browserFixture: 'passed', electron: process.versions.electron, deliveredOnce: true, messages: 2, checkpoints: checkpoints.map(({ state }) => state) })}\n`);
   } finally {
     await windowSession?.close();
-    await fs.rm(owned, { recursive: true, force: false });
     app.quit();
   }
 }
@@ -81,9 +81,16 @@ if (process.versions.electron) {
 } else {
   const transport = await exerciseDotMessaging();
   const electron = (await import('electron')).default;
-  const { stdout } = await promisify(execFile)(electron, [scriptPath], { cwd: repoRoot, timeout: 30_000, maxBuffer: 1024 * 1024 });
-  const browser = JSON.parse(stdout.trim().split('\n').at(-1));
-  assert.equal(browser.browserFixture, 'passed');
+  const owned = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-dot-browser-fixture-'));
+  let browser;
+  try {
+    const { stdout } = await promisify(execFile)(electron, [scriptPath, owned], { cwd: repoRoot, timeout: 30_000, maxBuffer: 1024 * 1024 });
+    browser = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.equal(browser.browserFixture, 'passed');
+  } finally {
+    await fs.rm(owned, { recursive: true, force: false });
+  }
+  assert.equal(await fs.stat(owned).then(() => true, (error) => { if (error.code === 'ENOENT') return false; throw error; }), false);
   const output = path.join(repoRoot, '.inbox/.work/dot-messaging-e2e.json');
   await fs.mkdir(path.dirname(output), { recursive: true });
   const run = promisify(execFile);

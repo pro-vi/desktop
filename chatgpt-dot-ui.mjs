@@ -1,7 +1,16 @@
 import { parseDotBinding, assertSameDotBinding, DOT_BINDING_IDENTITY_FIELDS } from './chatgpt-recipient.mjs';
 
-// Observed on 2026-10-07 with ChatGPT messaging asset
-// 166137.5a625a2847.js. Component names are minified and are not selectors.
+export const DOT_PAGE_FAILURE_REASONS = Object.freeze([
+  'origin-unexpected', 'sidebar-ambiguous', 'route-not-dot',
+  'account-ambiguous', 'conversation-ambiguous', 'context-ambiguous',
+  'room-invalid', 'peer-ambiguous', 'owner-ambiguous', 'profile-context-mismatch', 'timeline-unavailable',
+  'timeline-not-loaded', 'messages-invalid', 'cursors-invalid', 'composer-invalid',
+  'message-invalid', 'message-sender-unknown', 'submission-unavailable',
+  'message-delivery-pending', 'message-content-unavailable'
+]);
+
+// Observed with ChatGPT sidebar asset 76629.ffb823c03a.js on 2026-10-28.
+// Native profile identity, rather than display names, selects personal Dot.
 export function dotPageScript(options = {}) {
   return `(${runDotPageOperation.toString()})(${JSON.stringify(options)}, ${JSON.stringify(DOT_BINDING_IDENTITY_FIELDS)})`;
 }
@@ -12,14 +21,8 @@ function runDotPageOperation(options, identityFields) {
     const style = getComputedStyle(node);
     return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !node.closest('[inert]');
   };
-  const personal = [...document.querySelectorAll('button[data-sidebar-destination="builtin:orbit"]')].filter(visible);
-  if (options.action === 'open') {
-    if (location.origin !== 'https://chatgpt.com' || personal.length !== 1) return { state: 'unconfirmed' };
-    personal[0].click();
-    return { state: 'opening' };
-  }
-  const route = /^\/dots\/([^/]+)$/.exec(location.pathname);
-  if (location.origin !== 'https://chatgpt.com' || !route || personal.length !== 1 || personal[0].getAttribute('aria-current') !== 'page') return { state: 'not-dot' };
+  const unconfirmed = (reason) => ({ state: 'unconfirmed', reason });
+  if (location.origin !== 'https://chatgpt.com') return unconfirmed('origin-unexpected');
   const record = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
   const propsKey = (node) => Object.keys(node).find((key) => key.startsWith('__reactProps$'));
   const ancestors = (node) => {
@@ -36,45 +39,62 @@ function runDotPageOperation(options, identityFields) {
     }
     return found;
   };
-  const accountKeys = [...new Set(ancestors(personal[0]).flatMap((props) => typeof props.accountKey === 'string' && props.accountKey ? [props.accountKey] : []))];
-  if (accountKeys.length !== 1) return { state: 'unconfirmed' };
+  const personal = [...document.querySelectorAll('button[data-sidebar-destination^="builtin:orbit:"]')].filter(visible).flatMap((node) => {
+    const path = ancestors(node);
+    const profiles = [...new Set(path.flatMap((props) => record(props.profile) && props.profile.is_primary === true && typeof props.profile.id === 'string' && props.profile.id && node.getAttribute('data-sidebar-destination') === `builtin:orbit:${props.profile.id}` ? [props.profile] : []))];
+    return profiles.length === 1 ? [{ node, path, profile: profiles[0] }] : [];
+  });
+  if (personal.length !== 1) return unconfirmed('sidebar-ambiguous');
+  const { node, path, profile } = personal[0];
+  if (options.action === 'open') {
+    node.click();
+    return { state: 'opening' };
+  }
+  const route = /^\/dots\/([^/]+)$/.exec(location.pathname);
+  if (!route) return unconfirmed('route-not-dot');
+  const accountKeys = [...new Set(path.flatMap((props) => typeof props.accountKey === 'string' && props.accountKey ? [props.accountKey] : []))];
+  if (accountKeys.length !== 1) return unconfirmed('account-ambiguous');
   const contexts = [];
   for (const main of [...document.querySelectorAll('main')].filter(visible)) {
     const path = ancestors(main);
     const props = path.find((props) => record(props.room) && props.room.id === props.roomId && record(props.services));
     if (!props) continue;
     const conversationIds = [...new Set(path.flatMap((entry) => entry.roomId === props.room.id && typeof entry.conversationId === 'string' && entry.conversationId ? [entry.conversationId] : []))];
-    if (conversationIds.length !== 1) return { state: 'unconfirmed' };
+    if (conversationIds.length !== 1) return unconfirmed('conversation-ambiguous');
     contexts.push({ main, ...props, conversationId: conversationIds[0] });
   }
   const distinct = new Map(contexts.map((context) => [JSON.stringify([context.conversationId, context.room.id, context.room.aeon_id]), context]));
-  if (distinct.size !== 1) return { state: 'unconfirmed' };
+  if (distinct.size !== 1) return unconfirmed('context-ambiguous');
   const context = [...distinct.values()][0];
   const conversationId = context.conversationId;
   const room = context.room;
-  if (typeof room.id !== 'string' || typeof room.aeon_id !== 'string' || !Array.isArray(room.members)) return { state: 'unconfirmed' };
+  if (typeof room.id !== 'string' || typeof room.aeon_id !== 'string' || !Array.isArray(room.members)) return unconfirmed('room-invalid');
   const peers = room.members.filter((member) => member?.aeon_id === room.aeon_id);
-  if (peers.length !== 1 || typeof peers[0].id !== 'string') return { state: 'unconfirmed' };
+  if (peers.length !== 1 || typeof peers[0].id !== 'string') return unconfirmed('peer-ambiguous');
   const owners = room.members.filter((member) => member?.id !== peers[0].id);
-  if (owners.length !== 1 || typeof owners[0].id !== 'string') return { state: 'unconfirmed' };
+  if (owners.length !== 1 || typeof owners[0].id !== 'string') return unconfirmed('owner-ambiguous');
+  if (profile.id !== room.aeon_id || profile.messaging_room_id !== room.id || profile.active_root_thread_id !== conversationId) return unconfirmed('profile-context-mismatch');
   const binding = { dotUrl: location.href, conversationId, roomId: room.id, peerAeonId: room.aeon_id, accountKey: accountKeys[0] };
   const same = (a, b) => a && b && identityFields.every((key) => a[key] === b[key]);
   if (options.binding && !same(binding, options.binding)) return { state: 'binding-mismatch', binding };
   const services = context.services;
-  if (typeof services.conversations?.timeline !== 'function') return { state: 'unconfirmed' };
+  if (typeof services.conversations?.timeline !== 'function') return unconfirmed('timeline-unavailable');
   const timeline = services.conversations.timeline(room.id);
   const snapshot = timeline?.getSnapshot?.();
   const composerState = services.composer?.state?.getSnapshot?.();
-  if (!snapshot || snapshot.loaded !== true || !Array.isArray(snapshot.messages) || !record(snapshot.cursors) || !Object.hasOwn(snapshot.cursors, 'after') || (snapshot.cursors.after !== null && typeof snapshot.cursors.after !== 'string') || !record(composerState) || !Array.isArray(composerState.unconfirmedSends)) return { state: 'unconfirmed' };
-  const unconfirmed = composerState.unconfirmedSends.flatMap((entry) => entry?.request?.roomId === room.id && typeof entry.request.requestId === 'string' ? [entry.request.requestId] : []);
-  const unconfirmedIds = new Set(unconfirmed);
+  if (!snapshot || snapshot.loaded !== true) return unconfirmed('timeline-not-loaded');
+  if (!Array.isArray(snapshot.messages)) return unconfirmed('messages-invalid');
+  if (!record(snapshot.cursors) || !Object.hasOwn(snapshot.cursors, 'after') || (snapshot.cursors.after !== null && typeof snapshot.cursors.after !== 'string')) return unconfirmed('cursors-invalid');
+  if (!record(composerState) || !Array.isArray(composerState.unconfirmedSends)) return unconfirmed('composer-invalid');
+  const unconfirmedRequests = composerState.unconfirmedSends.flatMap((entry) => entry?.request?.roomId === room.id && typeof entry.request.requestId === 'string' ? [entry.request.requestId] : []);
+  const unconfirmedIds = new Set(unconfirmedRequests);
   const messages = [];
   for (const message of snapshot.messages) {
-    if (!record(message) || typeof message.id !== 'string' || message.roomId !== room.id || typeof message.deliveryState !== 'string') return { state: 'unconfirmed' };
+    if (!record(message) || typeof message.id !== 'string' || message.roomId !== room.id || typeof message.deliveryState !== 'string') return unconfirmed('message-invalid');
     let direction;
     if (message.self === true && message.senderId === owners[0].id) direction = 'outgoing';
     else if (message.self === false && message.senderId === peers[0].id && message.senderAeonId === room.aeon_id) direction = 'incoming';
-    else return { state: 'unconfirmed' };
+    else return unconfirmed('message-sender-unknown');
     messages.push({
       id: message.id, direction, requestId: typeof message.requestId === 'string' ? message.requestId : null,
       deliveryState: message.deliveryState, createdAt: typeof message.createdAt === 'string' ? message.createdAt : '',
@@ -93,7 +113,7 @@ function runDotPageOperation(options, identityFields) {
   const attachments = typeof services.composer.getAttachmentDraft === 'function' ? services.composer.getAttachmentDraft(room.id) : null;
   const draftChars = editors.length === 1 && typeof nativeDraft === 'string' && editors[0].textContent === nativeDraft ? nativeDraft.length : null;
   const uploadCount = Array.isArray(attachments) ? attachments.length : null;
-  const base = { state: 'ready', binding, messages: metadata, unconfirmedRequestIds: unconfirmed, draftChars, uploadCount, historyAfter: typeof snapshot.cursors?.after === 'string' ? snapshot.cursors.after : null };
+  const base = { state: 'ready', binding, messages: metadata, unconfirmedRequestIds: unconfirmedRequests, draftChars, uploadCount, historyAfter: typeof snapshot.cursors?.after === 'string' ? snapshot.cursors.after : null };
   if (options.action === 'history') {
     const scrollers = [context.main, ...context.main.querySelectorAll('*')].filter((node) => node.scrollHeight > node.clientHeight && ['auto', 'scroll'].includes(getComputedStyle(node).overflowY));
     if (scrollers.length !== 1) return { state: 'cursor-unavailable' };
@@ -103,7 +123,7 @@ function runDotPageOperation(options, identityFields) {
   if (options.action === 'submit') {
     if (!options.binding || !same(binding, options.binding)) return { state: 'binding-mismatch', binding };
     if (draftChars !== 0 || uploadCount !== 0) return { state: 'draft-conflict' };
-    if (snapshot.cursors.after !== null || typeof services.composer.sendPrepared !== 'function' || typeof options.requestId !== 'string' || !options.requestId || typeof options.text !== 'string' || !options.text.trim()) return { state: 'unconfirmed' };
+    if (snapshot.cursors.after !== null || typeof services.composer.sendPrepared !== 'function' || typeof options.requestId !== 'string' || !options.requestId || typeof options.text !== 'string' || !options.text.trim()) return unconfirmed('submission-unavailable');
     const queued = services.composer.sendPrepared(room.id, { requestId: options.requestId, text: options.text, createdAt: new Date().toISOString() });
     return { ...base, submitted: record(queued) && typeof queued.delivery?.then === 'function' };
   }
@@ -117,7 +137,7 @@ function runDotPageOperation(options, identityFields) {
     }
     if (options.after === null && (!Object.hasOwn(snapshot.cursors, 'before') || snapshot.cursors.before !== null)) return { state: 'cursor-unavailable' };
     const remaining = messages.slice(start).filter((message) => message.direction === 'incoming' && !message.deleted);
-    if (remaining.some((message) => message.deliveryState !== '' || unconfirmedIds.has(message.requestId || message.id))) return { state: 'unconfirmed' };
+    if (remaining.some((message) => message.deliveryState !== '' || unconfirmedIds.has(message.requestId || message.id))) return unconfirmed('message-delivery-pending');
     let candidates = remaining;
     if (options.after === undefined) candidates = candidates.slice(-options.limit);
     let chars = 0;
@@ -125,7 +145,7 @@ function runDotPageOperation(options, identityFields) {
     for (const message of candidates) {
       if (received.length === options.limit) break;
       const text = typeof message.native.text === 'string' ? message.native.text : null;
-      if (text === null && !message.hasAttachments && !message.taskCardOnly) return { state: 'unconfirmed' };
+      if (text === null && !message.hasAttachments && !message.taskCardOnly) return unconfirmed('message-content-unavailable');
       const requiredChars = text?.length || 0;
       if (chars + requiredChars > options.maxChars) {
         if (!received.length) return { state: 'message-too-large', messageId: message.id, requiredChars };
@@ -139,15 +159,16 @@ function runDotPageOperation(options, identityFields) {
   return base;
 }
 
-function fail(code = 'dot_binding_unconfirmed') {
+function fail(code = 'dot_binding_unconfirmed', reason = null) {
   const error = new Error(code);
   error.code = code;
+  if (DOT_PAGE_FAILURE_REASONS.includes(reason)) error.data = { reason };
   throw error;
 }
 
 export function parseDotPageObservation(value, { binding = null } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail();
-  if (value.state === 'not-dot' || value.state === 'unconfirmed') fail();
+  if (value.state === 'not-dot' || value.state === 'unconfirmed') fail('dot_binding_unconfirmed', value.reason);
   if (value.state === 'binding-mismatch') {
     if (binding) assertSameDotBinding(binding, value.binding);
     fail('dot_binding_mismatch');

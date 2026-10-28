@@ -20,16 +20,16 @@ export function createNativeDotPage({ settle = true, initial = [] } = {}) {
     }
   };
   const visible = { getBoundingClientRect: () => ({ width: 100, height: 100 }), closest: () => null };
-  const sidebar = { ...visible, click: () => { location.href = binding.dotUrl; location.pathname = '/dots/fixture-conversation'; }, getAttribute: () => 'page' };
+  const sidebar = { ...visible, click: () => { location.href = binding.dotUrl; location.pathname = '/dots/fixture-conversation'; }, getAttribute: (name) => name === 'data-sidebar-destination' ? `builtin:orbit:${state.peer}` : 'page' };
   const scroller = { scrollHeight: 200, clientHeight: 100, scrollTo: () => state.history?.() };
   const main = { ...visible, querySelectorAll: (selector) => selector === '*' ? [scroller] : [editor] };
   const location = { origin: 'https://chatgpt.com', pathname: '/dots/fixture-conversation', href: binding.dotUrl };
-  const context = vm.createContext({ Map, Set, Date, location, getComputedStyle: (node) => ({ display: 'block', visibility: 'visible', overflowY: node === scroller ? 'auto' : 'visible' }), document: { querySelectorAll: (selector) => selector === 'main' ? state.mainNodes || [main] : [sidebar] } });
+  const context = vm.createContext({ Map, Set, Date, location, getComputedStyle: (node) => ({ display: 'block', visibility: 'visible', overflowY: node === scroller ? 'auto' : 'visible' }), document: { querySelectorAll: (selector) => selector === 'main' ? state.mainNodes || [main] : ['button', 'button[data-sidebar-destination^="builtin:orbit:"]'].includes(selector) ? [sidebar] : [] } });
   const updateProps = () => {
     const props = { conversationId: state.conversationId, roomId: state.roomId, room: { id: state.roomId, aeon_id: state.peer, members: [{ id: 'fixture-peer-member', aeon_id: state.peer }, { id: 'fixture-owner', aeon_id: null }] }, services };
     main.__reactProps$fixture = props;
     main.__reactFiber$fixture = { memoizedProps: props, return: null };
-    const account = { accountKey: state.account };
+    const account = { accountKey: state.account, profile: { id: state.peer, is_primary: true, messaging_room_id: state.roomId, active_root_thread_id: state.conversationId } };
     sidebar.__reactProps$fixture = account;
     sidebar.__reactFiber$fixture = { memoizedProps: account, return: null };
   };

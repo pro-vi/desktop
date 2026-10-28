@@ -8,6 +8,28 @@ import { createDotServiceFixture, exerciseDotMessaging } from './fixtures/chatgp
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test('Dot HTTP and MCP retain only an allowlisted not-ready reason', async (t) => {
+  const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
+  const client = await fixture.connect(); t.after(() => client.close());
+  await client.callTool({ name: 'agentify_dot_read', arguments: {} });
+  const tab = fixture.tabs.tabs.get(fixture.tabs.keyToId.get('personal-dot'));
+  tab.controller.prepareDotEntry = async () => {
+    const error = new Error('dot_binding_unconfirmed');
+    error.data = { reason: 'message-sender-unknown', text: 'private fixture body', token: 'private fixture token' };
+    throw error;
+  };
+  const http = await fixture.call('/dot/read', {});
+  assert.equal(http.status, 409);
+  assert.deepEqual(http.data, { error: 'dot_binding_unconfirmed', data: { reason: 'message-sender-unknown' } });
+  const result = await client.callTool({ name: 'agentify_dot_read', arguments: {} });
+  assert.equal(result.structuredContent.error, 'dot_binding_unconfirmed');
+  assert.equal(result.structuredContent.reason, 'message-sender-unknown');
+  assert.equal(JSON.stringify(result).includes('private fixture'), false);
+  tab.controller.prepareDotEntry = async () => { const error = new Error('dot_binding_unconfirmed'); error.data = { reason: 'private fixture body' }; throw error; };
+  assert.deepEqual((await fixture.call('/dot/read', {})).data, { error: 'dot_binding_unconfirmed' });
+  assert.equal(fixture.native.state.inputCount, 0);
+});
+
 test('Dot messaging crosses native evaluator, controller, HTTP, durable storage and real MCP stdio', async () => {
   const proof = await exerciseDotMessaging();
   assert.equal(proof.restartCursor, true);
@@ -142,7 +164,7 @@ test('Dot cursors survive active conversation changes across restart and MCP rea
 
 test('Dot cursors cannot establish an unrelated locator', async (t) => {
   const fixture = await createDotServiceFixture(); t.after(() => fixture.close());
-  fixture.native.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-route';
+  fixture.native.state.navigateRedirect = 'https://chatgpt.com/dots/fixture-peer';
   const untrusted = { ...binding, dotUrl: 'https://chatgpt.com/dots/unrelated' };
   for (const after of [undefined, encodeDotCursor(untrusted)]) {
     const refused = await fixture.call('/dot/read', { dotUrl: untrusted.dotUrl, ...(after ? { after } : {}) });
