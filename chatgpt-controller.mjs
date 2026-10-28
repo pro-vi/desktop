@@ -6208,7 +6208,11 @@ export class ChatGPTController {
       if (!prompt || promptLen <= 0) return { ok:false, error:'missing_staged_prompt', host };
       const form = prompt?.closest('form') || null;
       const submitter = form
-        ? Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n) && !looksVoiceLike(n))
+        ? Array.from(form.querySelectorAll(${sendSel})).find((n) =>
+            visible(n) && !disabled(n) && !looksVoiceLike(n) && n.form === form && (
+              (n.localName === 'button' && n.type === 'submit') ||
+              (n.localName === 'input' && (n.type === 'submit' || n.type === 'image'))
+            ))
         : null;
       const score = (n) => {
         const r = n.getBoundingClientRect();
@@ -6358,7 +6362,11 @@ export class ChatGPTController {
         }
         const form = prompt?.closest?.('form') || null;
         if (!form || typeof form.requestSubmit !== 'function') return false;
-        const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
+        const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) =>
+          visible(n) && !disabled(n) && n.form === form && (
+            (n.localName === 'button' && n.type === 'submit') ||
+            (n.localName === 'input' && (n.type === 'submit' || n.type === 'image'))
+          ));
         if (!submitBtn) return false;
         form.requestSubmit(submitBtn);
         return true;
@@ -6476,18 +6484,15 @@ export class ChatGPTController {
         }
         const form = prompt?.closest?.('form') || null;
         if (form && typeof form.requestSubmit === 'function') {
-          const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n));
+          const submitBtn = Array.from(form.querySelectorAll(${sendSel})).find((n) =>
+            visible(n) && !disabled(n) && n.form === form && (
+              (n.localName === 'button' && n.type === 'submit') ||
+              (n.localName === 'input' && (n.type === 'submit' || n.type === 'image'))
+            ));
           if (submitBtn) {
             form.requestSubmit(submitBtn);
             return true;
           }
-        }
-        const submitBtn = form
-          ? Array.from(form.querySelectorAll(${sendSel})).find((n) => visible(n) && !disabled(n))
-          : document.querySelector(${sendSel});
-        if (submitBtn) {
-          submitBtn.click();
-          return true;
         }
         return false;
       })()`);

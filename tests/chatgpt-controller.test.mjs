@@ -3820,6 +3820,13 @@ function makeModePickerNode({ tag = 'div', text = '', attrs = {}, rect = { x: 0,
     isContentEditable: false,
     disabled: false,
     readOnly: false,
+    get localName() { return this.tagName.toLowerCase(); },
+    get type() {
+      const type = String(this.attrs.type || '').toLowerCase();
+      if (this.tagName === 'button') return ['button', 'reset', 'submit'].includes(type) ? type : 'submit';
+      return type || 'text';
+    },
+    get form() { return this.closest('form'); },
     getAttribute(name) {
       return Object.prototype.hasOwnProperty.call(this.attrs, name) ? String(this.attrs[name]) : null;
     },
@@ -5909,6 +5916,113 @@ function composerInputPage({
 
 function composerInputController(page) {
   return new ChatGPTController({ page, selectors: { promptTextarea: '[role="textbox"]' } });
+}
+
+async function nativeSubmitterFixture(t, { tag = 'button', type = 'submit', foreignForm = false, changeType = false, secondary = false } = {}) {
+  const realNow = Date.now;
+  let now = 15_000_000;
+  Date.now = () => now += 1_000;
+  t.after(() => { Date.now = realNow; });
+  modePickerNodes = [];
+  const dom = buildModePickerDom({ composerMode: 'chat', surfaceSwitcher: true });
+  const prompt = modePickerNodes.find(node => node.tagName === 'textarea');
+  const form = makeModePickerNode({ tag: 'form', parent: dom.document.body });
+  prompt.parent = form;
+  prompt.focus = () => { dom.document.activeElement = prompt; };
+  const file = makeModePickerNode({
+    tag: 'button', text: 'review-run2.txt', attrs: { title: 'review-run2.txt', type: foreignForm ? 'submit' : 'button' },
+    tokens: ['button[title*="run" i]', 'button'], parent: form,
+    rect: { x: 430, y: 700, w: 240, h: 30 }
+  });
+  if (foreignForm) Object.defineProperty(file, 'form', { get: () => ({}) });
+  const send = makeModePickerNode({
+    tag, text: 'Send', attrs: { 'data-testid': 'send-button', ...(type === null ? {} : { type }) },
+    tokens: ['[data-testid="send-button"]', 'button', 'input'], parent: form,
+    rect: { x: 1000, y: 800, w: 40, h: 40 }
+  });
+  modePickerNodes.push(form, ...(changeType ? [] : [file]), send);
+  let sent = false;
+  const submissions = [];
+  const clicks = [];
+  const decisions = [];
+  const keys = [];
+  file.click = () => { clicks.push(file); };
+  form.requestSubmit = candidate => {
+    if (candidate.form !== form) throw new Error('submitter_belongs_to_another_form');
+    if (candidate.type !== 'submit' && candidate.type !== 'image') throw new TypeError('not_a_submit_button');
+    assert.equal(candidate, send, 'Only the message submit control may submit this form');
+    submissions.push(candidate);
+    if (!secondary || submissions.length === 2) sent = true;
+  };
+  const page = composerInputPage({ textarea: true });
+  const originalEvaluate = page.evaluate.bind(page);
+  const originalMouseUp = page.mouseUp.bind(page);
+  let phase = null;
+  page.evaluate = async js => {
+    if (js.includes('already_generating') || js.includes('form.requestSubmit(submitBtn);') || js.includes('prompt?.focus?.();')) {
+      prompt.value = sent ? '' : page.draft;
+      prompt.textContent = prompt.value;
+      prompt.innerText = prompt.value;
+      return vm.runInNewContext(js, dom);
+    }
+    if (js.includes('promptLen') && js.includes('stopVisible')) return { promptLen: sent ? 0 : page.draft.length, stopVisible: sent, stopCount: sent ? 1 : 0, sendDisabled: sent };
+    return await originalEvaluate(js);
+  };
+  const originalSendKey = page.sendKey.bind(page);
+  page.sendKey = async (key, options) => {
+    if (phase === 'sending_prompt' && key === 'Enter') {
+      assert.equal(dom.document.activeElement, prompt, 'Keyboard retry must target the composer');
+      keys.push(key);
+      sent = true;
+      return;
+    }
+    return await originalSendKey(key, options);
+  };
+  page.mouseUp = async (x, y) => {
+    if (phase !== 'sending_prompt') return await originalMouseUp(x, y);
+    if (x === 1020 && y === 820) {
+      clicks.push(send);
+      if (!secondary) sent = true;
+    } else clicks.push(file);
+  };
+  const controller = new ChatGPTController({ page, vendorId: 'chatgpt', selectors: {
+    promptTextarea: '#prompt-textarea',
+    sendButton: 'button[title*="run" i], [data-testid="send-button"], input[type="submit"], input[type="image"]',
+    stopButton: '[data-testid="stop-button"]'
+  } });
+  const result = await controller.send({ text: 'fixture', onProgress: patch => {
+    phase = patch.phase || phase;
+    if (patch.sendDebug?.stage === 'choose_action') {
+      decisions.push(patch.sendDebug);
+      if (changeType) send.attrs.type = 'button';
+    }
+  } });
+  assert.equal(result.ok, true);
+  assert.equal(sent, true);
+  assert.ok(clicks.every(node => node === send), 'The file card must never be clicked to submit');
+  assert.equal(decisions[0].requestSubmit, type !== 'button');
+  if (type !== 'button') assert.equal(decisions[0].submitter.testId, 'send-button');
+  return { submissions, clicks, keys, send };
+}
+
+for (const [name, options] of [
+  ['submit button', {}],
+  ['implicit submit button', { type: null }],
+  ['submit input', { tag: 'input', type: 'submit' }],
+  ['image input', { tag: 'input', type: 'image' }],
+  ['JavaScript Send button', { type: 'button' }],
+  ['control owned by another form', { foreignForm: true }],
+  ['control changed after selection', { changeType: true }],
+  ['secondary submission', { secondary: true }],
+  ['unacknowledged JavaScript Send button', { type: 'button', secondary: true }]
+]) {
+  test(`chatgpt-controller: native form submission rejects file controls with ${name}`, async t => {
+    const { submissions, clicks, keys } = await nativeSubmitterFixture(t, options);
+    if (options.type === 'button' || options.changeType) assert.equal(submissions.length, 0);
+    else assert.equal(submissions.length, options.secondary ? 2 : 1);
+    if (options.type === 'button' || options.changeType) assert.equal(clicks.length, 1);
+    assert.equal(keys.length, options.type === 'button' && options.secondary ? 1 : 0);
+  });
 }
 
 test('chatgpt-controller: prompt replacement clicks inside the viewport and refocuses the current editor', async () => {
