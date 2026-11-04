@@ -11,7 +11,7 @@ test('mcp tool profiles default to the full compatibility surface', () => {
   const resolved = resolveMcpToolProfile({ argv: [], env: {} });
   assert.deepEqual(resolved.profiles, ['full']);
   assert.deepEqual(new Set(resolved.tools), new Set(ALL_MCP_TOOL_NAMES));
-  assert.equal(resolved.tools.length, 50);
+  assert.equal(resolved.tools.length, 51);
 });
 
 test('mcp tool profiles expose the transcript and import library workflow', () => {

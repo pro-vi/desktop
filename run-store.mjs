@@ -24,7 +24,7 @@ function runsDir(stateDir) {
   return path.join(stateDir, 'runs');
 }
 
-function runPath(stateDir, runId) {
+export function runRecordPath(stateDir, runId) {
   return path.join(runsDir(stateDir), `${runId}.json`);
 }
 
@@ -297,7 +297,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     const next = normalizeRun({ ...record, revision: Math.max(Number(previous?.revision) || 0, Number(record?.revision) || 0) + 1 });
     if (!next.id) throw new Error('missing_run_id');
     assertRunLifecycle(next, { requireCompletionReceipt: true });
-    await writeFile(runPath(stateDir, next.id), `${JSON.stringify(next, null, 2)}\n`);
+    await writeFile(runRecordPath(stateDir, next.id), `${JSON.stringify(next, null, 2)}\n`);
     records.set(next.id, next);
     for (const listener of listeners) listener(safeClone(next));
     return safeClone(next);
@@ -351,10 +351,10 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     });
   }
 
-  // The one mutation permitted on finalized runs: the transcript block inside
-  // outputManifest, written by post-query transcript publication. A ready
-  // attachment is fixed — later snapshots of the same conversation attach to
-  // their own runs, never re-point this one.
+  // Permitted on finalized runs, like archive and recordModeRecheck: the
+  // transcript block inside outputManifest, written by post-query
+  // transcript publication. A ready attachment is fixed — later snapshots of
+  // the same conversation attach to their own runs, never re-point this one.
   async function attachTranscript(runId, transcript = null) {
     const id = assertRunId(runId);
     if (!transcript || typeof transcript !== 'object' || typeof transcript.state !== 'string') {
@@ -367,6 +367,33 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
       const next = normalizeRun({
         ...current,
         outputManifest: { ...(current.outputManifest || {}), transcript },
+        id,
+        startedAt: current.startedAt,
+        updatedAt: Date.now()
+      });
+      return await writeRecord(next);
+    });
+  }
+
+  // Also permitted on finalized runs: a later read of the answer's model
+  // metadata records the mode of an answer whose read failed
+  // at completion. It moves only `unverified` to `observed`; an observed mode
+  // is fixed, so a second recheck never rewrites it.
+  async function recordModeRecheck(runId, { modeFields, label } = {}) {
+    const id = assertRunId(runId);
+    if (modeFields?.modeVerification !== 'observed' || !modeFields.modeUsed || !modeFields.responseModeEvidence || !modeFields.modeRecheck) {
+      throw new Error('mode_recheck_evidence_required');
+    }
+    return await enqueueRunOp(id, async () => {
+      const current = records.get(id);
+      if (!current) throw new Error('run_not_found');
+      if (!current.finishedAt || current.outputManifest?.modeVerification !== 'unverified') return safeClone(current);
+      const next = normalizeRun({
+        ...current,
+        label,
+        modeUsed: modeFields.modeUsed,
+        degradedFrom: modeFields.degradedFrom ?? null,
+        outputManifest: { ...current.outputManifest, ...modeFields },
         id,
         startedAt: current.startedAt,
         updatedAt: Date.now()
@@ -462,6 +489,7 @@ export function createRunStore(stateDir, { writeFile = defaultWriteFile } = {}) 
     create,
     patch,
     attachTranscript,
+    recordModeRecheck,
     finalize,
     finalizeStaleRunning,
     archive,

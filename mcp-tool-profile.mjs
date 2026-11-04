@@ -59,6 +59,7 @@ export const MCP_TOOL_PROFILES = Object.freeze({
     'agentify_list_runs',
     'agentify_open_run',
     'agentify_retry_run',
+    'agentify_recheck_run_mode',
     'agentify_archive_run'
   ]),
   media: Object.freeze([

@@ -2,7 +2,7 @@
 
 This is the maintained feature checklist for the public Agentify Desktop MCP surface.
 `ALL_MCP_TOOL_NAMES` in `mcp-tool-profile.mjs` is the method authority; the matrix has
-one row per method, 50 in the current catalog.
+one row per method, 51 in the current catalog.
 
 A row passes only after the named public MCP method returns its expected observable
 result through the real Electron service. Unit tests, a lower HTTP call, listing a
@@ -38,7 +38,8 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
   before and after mutation, open and remove only the target, and prove one owned
   bundle persists across restart before deleting it without changing a decoy bundle.
 - **LOCAL-OPERATIONS** — act only on runs created by LIVE-QUERY: list, inspect, reopen,
-  retry, archive, and confirm archive visibility.
+  retry, recheck an unverified answer mode (needs a LIVE-QUERY run recorded `unverified`;
+  with none, that row stays not run), archive, and confirm archive visibility.
 - **LOCAL-ADMIN** — rotate the token and prove a fresh authenticated MCP call, then
   shut down and prove the next MCP call starts a new Electron server.
 - **CONTROLLED-LIBRARY** — run the isolated Electron/real-ZIP library E2E plus the
@@ -102,6 +103,7 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
 | `agentify_open_artifacts_folder` | LIVE-MEDIA | 1 | The owned tab artifact directory opens through the platform shell and the method returns success. | ✅ | image tab folder opened |
 | `agentify_open_run` | LOCAL-OPERATIONS | 1 | Reopening a completed owned run restores its saved conversation URL and reports the matching tab. | ✅ | 2026-10-11: each fresh Pro run reopened on its saved conversation URL; subsequent get returned identical saved answer bytes. [Evidence](probes/2026-10-11-response-mode-metadata.md#live-wiki-queries). |
 | `agentify_retry_run` | LOCAL-OPERATIONS | 1 | Replay creates a new run with `retryOf` pointing to the owned original and finishes with its own receipt. | ❌ | 2026-10-22: literal native composer replacement passed seven live staging cases with Send blocked; the full journey was not rerun. [Staging evidence](probes/2026-10-22-literal-prompt-staging.md). 2026-10-18: a staging refusal now returns `detail` and `promptStaging` lines instead of the bare `prompt_staging_failed`; refusal path only, checked with a stub test through `agentify_query`, the journey was not re-run. 2026-10-11: shared query finalization now retains confirmed downgraded answers. Fresh public retry check pending. [Native evidence](probes/2026-10-11-response-mode-metadata.md). |
+| `agentify_recheck_run_mode` | LOCAL-OPERATIONS | 1 | Rechecking a finished run whose `modeVerification` is `unverified` sets `modeUsed` and `modeVerification: "observed"` with `modeRecheck` in both the run record and `metadata.json`, and returns both paths in `updatedPaths`. | ❌ | 2026-11-03: added; checked with stub tests only, the journey has not run. |
 | `agentify_archive_run` | LOCAL-OPERATIONS | 1 | Archiving the owned run sets `archivedAt` and changes default versus archived listing visibility. | ✅ | `dca4b9b9` archived |
 | `agentify_download_images` | LIVE-MEDIA | 1 | The latest assistant image is downloaded to a local path and is a decodable non-empty image file. | ✅ | 1254×1254 PNG from the image reply |
 | `agentify_shutdown` | LOCAL-ADMIN | 1 | The desktop exits cleanly; a later authenticated MCP method starts a different server id. | ✅ | `e2e-mcp-local-state` receipt; 2026-10-12: immediate public status relaunched twice while the old process was still exiting. New server identities verified. [Restart evidence](probes/2026-10-11-response-mode-metadata.md#native-editing-and-immediate-restart--2026-10-12). |

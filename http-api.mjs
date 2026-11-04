@@ -70,7 +70,7 @@ import {
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
 import { CONTEXT_LIMIT_CAPS, prepareQueryContext } from './context-packer.mjs';
-import { createRunStore, parseResponseDebug, parseResponseRecovery } from './run-store.mjs';
+import { createRunStore, parseResponseDebug, parseResponseRecovery, runRecordPath } from './run-store.mjs';
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 import { providerTabOperationEvidence } from './provider-tab-operation-leases.mjs';
 import { isTerminalRunStatus } from './run-lifecycle.mjs';
@@ -178,6 +178,7 @@ function mapErrorToHttp(error) {
   if (msg === 'missing_run_id') return { code: 400, body: { error: 'missing_run_id' } };
   if (msg === 'run_not_found') return { code: 404, body: { error: 'run_not_found' } };
   if (msg === 'run_not_retryable') return { code: 409, body: { error: 'run_not_retryable' } };
+  if (msg === 'run_mode_recheck_unsupported' || msg === 'run_answer_identity_missing' || msg === 'run_metadata_unavailable') return { code: 409, body: { error: msg, data: error?.data || null } };
   if (msg === 'run_wait_unsupported') return { code: 409, body: { error: 'run_wait_unsupported' } };
   if (msg === 'tab_busy') return { code: 409, body: { error: 'tab_busy', data: error?.data || null } };
   if (msg === 'key_vendor_mismatch') return { code: 409, body: { error: 'key_vendor_mismatch' } };
@@ -2663,19 +2664,24 @@ export function startHttpApi({
     return { result, researchMeta, outputManifest, conversationUrl };
   };
 
+  // Delivery (ADR 0014) and mode checks report on a saved answer, never fail
+  // it; the label is the one line every read path shows, so it carries each
+  // notice. A downgrade reaches a success only through a later mode recheck.
+  const successLabel = ({ promptDelivery, modeVerification, degradedFrom = null }) => {
+    const notices = [];
+    if (promptDelivery?.checked === true && promptDelivery.complete === false) notices.push('prompt incomplete');
+    if (modeVerification === 'unverified') notices.push('mode unverified');
+    if (degradedFrom) notices.push('mode downgraded');
+    return `Response received${notices.length ? ` (${notices.join('; ')})` : ''}`;
+  };
+
   const successOutcomeForResult = ({ result, op, conversationUrl, outputManifest = null, completionReceipt = null }) => {
     const now = Date.now();
     const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
     const modeUsage = Object.hasOwn(outputManifest || {}, 'modeUsed') ? outputManifest : meta;
-    // The delivery check reports, never fails the run (ADR 0014); the label is
-    // the one line every read path shows, so it carries the incompleteness.
-    const promptIncomplete = meta.promptDelivery?.checked === true && meta.promptDelivery.complete === false;
-    const notices = [];
-    if (promptIncomplete) notices.push('prompt incomplete');
-    if (modeUsage.modeVerification === 'unverified') notices.push('mode unverified');
     return {
       status: 'success',
-      label: `Response received${notices.length ? ` (${notices.join('; ')})` : ''}`,
+      label: successLabel({ promptDelivery: meta.promptDelivery, modeVerification: modeUsage.modeVerification, degradedFrom: modeUsage.degradedFrom }),
       detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
       conversationUrl: conversationUrl || null,
       source: op?.source || 'http',
@@ -3140,6 +3146,15 @@ export function startHttpApi({
     return queryManifest || researchManifest || null;
   };
 
+  // Resolves a saved artifact file and refuses one outside the artifacts root.
+  const artifactFileInsideRoot = async (filePath) => {
+    const ready = await assertArtifactFileReady(filePath);
+    const realFilePath = ready.realFilePath || ready.filePath;
+    const realArtifactsRoot = await fs.realpath(artifactsRoot(stateDir)).catch(() => path.resolve(artifactsRoot(stateDir)));
+    assertWithin({ filePath: realFilePath, allowedRoots: [realArtifactsRoot] });
+    return realFilePath;
+  };
+
   const readRunOutputText = async (run, { maxOutputChars } = {}) => {
     const max = positiveIntOr(maxOutputChars, 200_000, 1_000_000);
     const manifest = outputManifestForRun(run);
@@ -3153,10 +3168,7 @@ export function startHttpApi({
     };
     if (!outputPath) return base;
     try {
-      const ready = await assertArtifactFileReady(outputPath);
-      const realArtifactsRoot = await fs.realpath(artifactsRoot(stateDir)).catch(() => path.resolve(artifactsRoot(stateDir)));
-      const realOutputPath = ready.realFilePath || ready.filePath;
-      assertWithin({ filePath: realOutputPath, allowedRoots: [realArtifactsRoot] });
+      const realOutputPath = await artifactFileInsideRoot(outputPath);
       const text = await fs.readFile(realOutputPath, 'utf8');
       return {
         ...base,
@@ -3335,6 +3347,15 @@ export function startHttpApi({
         return { ok: true, tabId, run };
       }, { expectedBinding: fields.dotBinding });
     }
+    const { tabId, run: resolvedRun } = await withRunLocation({ run, kind: 'open-run', timeoutMs });
+    if (show) await onShow?.({ tabId }).catch(() => {});
+    return { ok: true, tabId, run: resolvedRun };
+  };
+
+  // Brings a tab to a run's saved conversation (or project) under the run's
+  // operation scopes, then runs `atLocation` in the same exclusive controller
+  // section, so nothing can move the tab between arriving and `atLocation`.
+  const withRunLocation = async ({ run, kind, timeoutMs }, atLocation = async () => null) => {
     const savedMeta = getPersistedKeyMeta(run.key);
     const imageGeneration = !!run?.logicalRequest?.imageGeneration;
     const resolvedRun = {
@@ -3367,7 +3388,7 @@ export function startHttpApi({
     const initialScopes = distinctScopes(scope, scopesForListedTab(advisoryTabId));
     const op = {
       id: crypto.randomUUID(),
-      kind: 'open-run',
+      kind,
       tabId: null,
       startedAt: Date.now(),
       source: 'ui',
@@ -3384,7 +3405,7 @@ export function startHttpApi({
       const patch = chatGptTabMetaPatch({ projectUrl: resolvedRun.projectUrl || null, modeIntent: resolvedRun.modeIntent || null, modelIntent: resolvedRun.modelIntent || null });
       if (Object.keys(patch).length) tabs.updateTabMeta?.(tabId, patch);
       const controller = tabs.getControllerById(tabId);
-      await runExclusive(controller, async () => {
+      const value = await runExclusive(controller, async () => {
         await ensureRunLocation({
           controller,
           tabId,
@@ -3392,12 +3413,81 @@ export function startHttpApi({
           conversationUrl: resolvedRun.conversationUrl || null,
           projectUrl: resolvedRun.projectUrl || null
         });
+        return await atLocation({ controller });
       });
-      if (show) await onShow?.({ tabId }).catch(() => {});
-      return { ok: true, tabId, run: resolvedRun };
+      return { tabId, run: resolvedRun, value };
     } finally {
       releaseOperationScopes(heldScopes, op.id);
     }
+  };
+
+  // A finished query whose answer-mode read failed at completion can read it
+  // again: the run saved both inputs, its conversation URL and its answer's
+  // provider message id. The completion read's failure reason moves into
+  // `modeRecheck`, because a successful recheck clears `modeVerificationReason`.
+  const recheckRunModeAction = async ({ runId, timeoutMs } = {}) => {
+    await runsReady;
+    const run = getRunRecordOrThrow(runId);
+    const manifest = run.outputManifest || {};
+    const alreadyObserved = (current) => ({ ok: true, runId: current.id, changed: false, modeVerification: 'observed', modeUsed: current.outputManifest?.modeUsed || null, updatedPaths: [] });
+    if (manifest.modeVerification === 'observed') return alreadyObserved(run);
+    if (run.kind !== 'query' || run.status !== 'success' || run.recipient?.kind === 'dot' || manifest.modeVerification !== 'unverified') {
+      const error = new Error('run_mode_recheck_unsupported');
+      error.data = { runId: run.id, kind: run.kind, status: run.status, modeVerification: manifest.modeVerification ?? null };
+      throw error;
+    }
+    const conversationUrl = run.conversationUrl;
+    const providerMessageId = run.responseDebug?.providerMessageId;
+    // The saved id is the wait loop's last snapshot; when it still equals the
+    // turn before the prompt, it does not name this run's answer.
+    if (!conversationUrl || !providerMessageId || providerMessageId === run.responseDebug?.preSendProviderMessageId) {
+      const error = new Error('run_answer_identity_missing');
+      error.data = { runId: run.id, conversationUrl: conversationUrl || null, providerMessageId: providerMessageId || null };
+      throw error;
+    }
+    // Checked before the page reload, so a file that cannot be rewritten does
+    // not cost a reload and then discard the mode it read.
+    let metadataPath;
+    let metadata;
+    try {
+      metadataPath = await artifactFileInsideRoot(manifest.metadataPath);
+      metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
+    } catch (cause) {
+      const error = new Error('run_metadata_unavailable');
+      error.data = { runId: run.id, metadataPath: manifest.metadataPath || null, reason: String(cause?.message || cause) };
+      throw error;
+    }
+    // Both writes happen while the run's operation scopes are held: a second
+    // recheck is refused as busy until they finish, then finds `observed`.
+    const { value } = await withRunLocation({ run, kind: 'recheck-run-mode', timeoutMs }, async ({ controller }) => {
+      const current = getRunRecordOrThrow(run.id);
+      if (current.outputManifest?.modeVerification === 'observed') return alreadyObserved(current);
+      const { responseModeEvidence, unverifiedReason } = await controller.readAnswerMode({ conversationUrl, providerMessageId });
+      const usage = queryUsageForResult({
+        result: { meta: { providerMessageId, responseModeEvidence, modeVerification: 'unverified', modeVerificationReason: unverifiedReason } },
+        conversationUrl,
+        modeIntent: current.modeIntent
+      });
+      if (usage.modeVerification !== 'observed') return { ok: true, runId: run.id, changed: false, modeVerification: 'unverified', reason: usage.modeVerificationReason, updatedPaths: [] };
+      const modeFields = {
+        modeUsed: usage.modeUsed,
+        degradedFrom: usage.degradedFrom,
+        responseModeEvidence: usage.responseModeEvidence,
+        modeVerification: 'observed',
+        modeVerificationReason: null,
+        modeRecheck: { checkedAt: new Date().toISOString(), completionReason: current.outputManifest?.modeVerificationReason ?? null }
+      };
+      // metadata.json first: if the record write then fails, the record still
+      // says `unverified`, and a later recheck whose read succeeds rewrites both.
+      await atomicWriteFile(metadataPath, `${JSON.stringify({ ...metadata, ...modeFields }, null, 2)}\n`, { mode: 0o600 });
+      await runStore.recordModeRecheck(run.id, {
+        modeFields,
+        label: successLabel({ promptDelivery: current.promptDelivery, modeVerification: 'observed', degradedFrom: modeFields.degradedFrom })
+      });
+      emitRunsChanged();
+      return { ok: true, runId: run.id, changed: true, ...modeFields, updatedPaths: [runRecordPath(stateDir, run.id), metadataPath] };
+    });
+    return value;
   };
 
   const retryRunAction = async ({ runId, timeoutMs = null, fireAndForget = false, show = false, source = 'ui' } = {}) => {
@@ -5169,6 +5259,14 @@ export function startHttpApi({
           show: body.show !== false
         });
         return sendJson(res, 200, opened);
+      }
+
+      if (url.pathname === '/runs/recheck-mode' && req.method === 'POST') {
+        const body = await parseBody(req);
+        return sendJson(res, 200, await recheckRunModeAction({
+          runId: body.runId,
+          timeoutMs: positiveIntOr(body.timeoutMs, 30_000, 5 * 60_000)
+        }));
       }
 
       if (url.pathname === '/runs/retry' && req.method === 'POST') {

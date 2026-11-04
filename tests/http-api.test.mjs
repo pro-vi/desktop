@@ -9980,3 +9980,187 @@ test('http-api: a query result that reports a missing prompt line keeps it on th
   assert.deepEqual((got.data.run || got.data).promptDelivery, promptDelivery);
   assert.equal((got.data.run || got.data).label, 'Response received (prompt incomplete)');
 });
+
+test('http-api: a mode recheck verifies a finished unverified run from its saved answer identity', async (t) => {
+  const conversationUrl = 'https://chatgpt.com/c/recheck-conversation';
+  const seedRun = async (stateDir, id, { modeIntent = 'extended-pro', modeVerification = 'unverified', preSendProviderMessageId = 'prompt-before' } = {}) => {
+    const dir = path.join(stateDir, 'artifacts', 'runs', id);
+    await fs.mkdir(dir, { recursive: true });
+    const responsePath = path.join(dir, 'assistant_response.md');
+    const metadataPath = path.join(dir, 'metadata.json');
+    await fs.writeFile(responsePath, 'APPROVE\n');
+    const modeFields = { modeUsed: null, degradedFrom: null, responseModeEvidence: null, modeVerification, modeVerificationReason: modeVerification === 'unverified' ? 'conversation_response_not_seen' : null };
+    await fs.writeFile(metadataPath, `${JSON.stringify({ runId: id, conversationUrl, modeIntent, ...modeFields, responsePath }, null, 2)}\n`);
+    await fs.mkdir(path.join(stateDir, 'runs'), { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'runs', `${id}.json`), JSON.stringify({
+      id,
+      kind: 'query',
+      status: 'success',
+      label: 'Response received (mode unverified)',
+      key: 'recheck-key',
+      vendorId: 'chatgpt',
+      conversationUrl,
+      modeIntent,
+      startedAt: Date.now() - 2000,
+      finishedAt: Date.now() - 1000,
+      responseDebug: { version: 1, providerMessageId: 'answer-message', preSendProviderMessageId },
+      outputManifest: { dir, responsePath, metadataPath, ...modeFields },
+      completionReceipt: { version: 1, kind: 'assistant-response', responsePath, metadataPath, artifactIds: [], responseSha256: 'a'.repeat(64), conversationUrl, capturedAt: Date.now() - 1000 }
+    }));
+    return { metadataPath, runPath: path.join(stateDir, 'runs', `${id}.json`) };
+  };
+  const startWith = async (t, stateDir, readAnswerMode) => {
+    let currentUrl = 'https://chatgpt.com/';
+    const navigations = [];
+    const reads = [];
+    const controller = {
+      runExclusive: async (fn) => await fn(),
+      getUrl: async () => currentUrl,
+      navigate: async (url) => { navigations.push(url); currentUrl = url; },
+      ensureReady: async () => ({ ok: true }),
+      readAnswerMode: async (input) => { reads.push({ ...input, servedUrl: currentUrl }); return await readAnswerMode(input); }
+    };
+    const tabs = {
+      listTabs: () => [{ id: 't0', key: 'recheck-key', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+      ensureTab: async () => 't0',
+      createTab: async () => 't0',
+      updateTabMeta: () => {},
+      closeTab: async () => true,
+      getControllerById: () => controller
+    };
+    const server = await startHttpApi({
+      providerTabOperations: createProviderTabOperationLeases(),
+      port: 0,
+      token: 'secret',
+      tabs,
+      defaultTabId: 't0',
+      serverId: 'sid-test',
+      stateDir,
+      getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+      getStatus: async ({ tabId }) => ({ ok: true, tabId, url: currentUrl, blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+    });
+    t.after(() => server.close());
+    const port = server.address().port;
+    return { navigations, reads, recheck: async (runId) => await req({ port, token: 'secret', method: 'POST', pth: '/runs/recheck-mode', body: { runId } }), get: async (runId) => await req({ port, token: 'secret', method: 'POST', pth: '/runs/get', body: { runId } }) };
+  };
+  const evidence = (modelSlug) => ({ responseModeEvidence: { source: 'response_metadata', conversationId: 'recheck-conversation', providerMessageId: 'answer-message', modelSlug, resolvedModelSlug: null, requestedModelSlug: null }, unverifiedReason: 'model_slug_unrecognized' });
+
+  await t.test('a read naming Pro records the mode as observed in both files, once', async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-recheck-'));
+    const { metadataPath, runPath } = await seedRun(stateDir, 'run-pro');
+    const api = await startWith(t, stateDir, async () => evidence('gpt-5-6-pro'));
+
+    const response = await api.recheck('run-pro');
+    assert.equal(response.res.status, 200);
+    assert.equal(response.data.changed, true);
+    assert.equal(response.data.modeUsed, 'extended-pro');
+    assert.equal(response.data.modeVerification, 'observed');
+    assert.equal(response.data.modeRecheck.completionReason, 'conversation_response_not_seen');
+    assert.deepEqual(response.data.updatedPaths, [runPath, await fs.realpath(metadataPath)]);
+    assert.deepEqual(api.navigations, [conversationUrl]);
+    assert.deepEqual(api.reads, [{ conversationUrl, providerMessageId: 'answer-message', servedUrl: conversationUrl }]);
+
+    const { run } = (await api.get('run-pro')).data;
+    assert.equal(run.status, 'success');
+    assert.equal(run.label, 'Response received');
+    assert.equal(run.modeUsed, 'extended-pro');
+    assert.equal(run.degradedFrom, null);
+    assert.equal(run.outputManifest.modeVerification, 'observed');
+    assert.equal(run.outputManifest.modeVerificationReason, null);
+    assert.equal(run.outputManifest.responseModeEvidence.modelSlug, 'gpt-5-6-pro');
+    assert.deepEqual(run.outputManifest.modeRecheck, response.data.modeRecheck);
+    const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
+    assert.equal(metadata.runId, 'run-pro');
+    assert.equal(metadata.modeUsed, 'extended-pro');
+    assert.equal(metadata.modeVerification, 'observed');
+    assert.equal(metadata.modeVerificationReason, null);
+    assert.deepEqual(metadata.modeRecheck, response.data.modeRecheck);
+
+    const again = await api.recheck('run-pro');
+    assert.equal(again.data.changed, false);
+    assert.equal(again.data.modeVerification, 'observed');
+    assert.equal(api.reads.length, 1);
+  });
+
+  await t.test('a failed read reports its reason and changes neither file', async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-recheck-'));
+    const { metadataPath, runPath } = await seedRun(stateDir, 'run-unread');
+    const metadataBefore = await fs.readFile(metadataPath, 'utf8');
+    const recordBefore = await fs.readFile(runPath, 'utf8');
+    const api = await startWith(t, stateDir, async () => ({ responseModeEvidence: null, unverifiedReason: 'answer_model_slug_missing' }));
+
+    const response = await api.recheck('run-unread');
+    assert.equal(response.res.status, 200);
+    assert.equal(response.data.changed, false);
+    assert.equal(response.data.reason, 'answer_model_slug_missing');
+    assert.deepEqual(response.data.updatedPaths, []);
+    assert.equal(await fs.readFile(metadataPath, 'utf8'), metadataBefore);
+    assert.equal(await fs.readFile(runPath, 'utf8'), recordBefore);
+  });
+
+  await t.test('a read naming another mode records the downgrade without failing the run', async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-recheck-'));
+    await seedRun(stateDir, 'run-thinking');
+    const api = await startWith(t, stateDir, async () => evidence('gpt-6-thinking'));
+
+    const response = await api.recheck('run-thinking');
+    assert.equal(response.data.modeUsed, 'thinking');
+    assert.deepEqual(response.data.degradedFrom, { modeIntent: 'extended-pro' });
+    const { run } = (await api.get('run-thinking')).data;
+    assert.equal(run.status, 'success');
+    assert.equal(run.modeUsed, 'thinking');
+    assert.deepEqual(run.degradedFrom, { modeIntent: 'extended-pro' });
+    assert.equal(run.label, 'Response received (mode downgraded)');
+  });
+
+  await t.test('an answer id equal to the turn before the prompt, or an unreadable metadata.json, is refused before any browser work', async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-recheck-'));
+    await seedRun(stateDir, 'run-stale-id', { preSendProviderMessageId: 'answer-message' });
+    const { metadataPath } = await seedRun(stateDir, 'run-no-metadata');
+    await fs.rm(metadataPath);
+    const api = await startWith(t, stateDir, async () => evidence('gpt-5-6-pro'));
+
+    const stale = await api.recheck('run-stale-id');
+    assert.equal(stale.res.status, 409);
+    assert.equal(stale.data.error, 'run_answer_identity_missing');
+    const missing = await api.recheck('run-no-metadata');
+    assert.equal(missing.res.status, 409);
+    assert.equal(missing.data.error, 'run_metadata_unavailable');
+    assert.equal(missing.data.data.reason, 'missing_artifact_file');
+    assert.deepEqual(api.navigations, []);
+    assert.deepEqual(api.reads, []);
+  });
+
+  await t.test('a second recheck during the first is refused busy, and both files agree afterwards', async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-recheck-'));
+    const { metadataPath } = await seedRun(stateDir, 'run-overlap');
+    let entered;
+    let release;
+    const reading = new Promise((resolve) => { entered = resolve; });
+    const held = new Promise((resolve) => { release = resolve; });
+    const api = await startWith(t, stateDir, async () => { entered(); await held; return evidence('gpt-5-6-pro'); });
+
+    const first = api.recheck('run-overlap');
+    await reading;
+    const second = await api.recheck('run-overlap');
+    assert.equal(second.res.status, 409);
+    assert.equal(second.data.error, 'tab_busy');
+    release();
+    assert.equal((await first).data.changed, true);
+    assert.equal(api.reads.length, 1);
+    const { run } = (await api.get('run-overlap')).data;
+    assert.deepEqual(JSON.parse(await fs.readFile(metadataPath, 'utf8')).modeRecheck, run.outputManifest.modeRecheck);
+  });
+
+  await t.test('a run with no unverified mode is refused before any browser work', async (t) => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-recheck-'));
+    await seedRun(stateDir, 'run-no-mode', { modeVerification: null });
+    const api = await startWith(t, stateDir, async () => evidence('gpt-5-6-pro'));
+
+    const response = await api.recheck('run-no-mode');
+    assert.equal(response.res.status, 409);
+    assert.equal(response.data.error, 'run_mode_recheck_unsupported');
+    assert.deepEqual(api.navigations, []);
+    assert.deepEqual(api.reads, []);
+  });
+});

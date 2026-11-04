@@ -983,6 +983,26 @@ export class ChatGPTController {
     }
   }
 
+  // Reads which model wrote one saved answer by reloading the page, which must
+  // already be on that answer's conversation. A query runs it once its answer
+  // completes; a finished run whose read failed then runs it again later.
+  // `unverifiedReason` applies only when the evidence maps to no mode.
+  async readAnswerMode({ conversationUrl, providerMessageId } = {}) {
+    if (typeof this.page.readResponseMode !== 'function') return { responseModeEvidence: null, unverifiedReason: 'response_metadata_unsupported' };
+    const observation = await this.#runResponseObservationWithDeadline(
+      async () => await this.page.readResponseMode({ conversationUrl, providerMessageId, timeoutMs: this.navigationTimeoutMs }),
+      // The reader's own timer ends its wait for the network; this deadline
+      // stops only a reader whose browser commands then fail to settle.
+      this.navigationTimeoutMs + this.responseSettlementTimeoutMs,
+      { terminateEvaluation: false }
+    ).catch((error) => ({ unavailable: error?.code === 'response_observation_deadline' ? 'response_metadata_deadline' : 'response_metadata_read_failed' }));
+    const responseModeEvidence = responseModeEvidenceForMessage(observation, { conversationUrl, providerMessageId });
+    return {
+      responseModeEvidence,
+      unverifiedReason: responseModeEvidence ? 'model_slug_unrecognized' : observation?.unavailable ?? 'response_metadata_unavailable'
+    };
+  }
+
   async #evalDeepResearch(js) {
     if (typeof this.page?.evaluateDeepResearch !== 'function') return null;
     return await this.page.evaluateDeepResearch(js);
@@ -7691,22 +7711,12 @@ export class ChatGPTController {
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
       let responseModeEvidence = null;
       let unverifiedReason = 'answer_message_id_missing';
-      if (this.vendorId === 'chatgpt' && !imageGeneration && result?.meta?.providerMessageId && typeof this.page.readResponseMode === 'function') {
+      if (this.vendorId === 'chatgpt' && !imageGeneration && result?.meta?.providerMessageId) {
         await this.#emitProgress({ phase: 'verifying_response_mode' });
-        const conversationUrl = result.meta.conversationUrl;
-        const observation = await this.#runResponseObservationWithDeadline(
-          async () => await this.page.readResponseMode({
-            conversationUrl,
-            providerMessageId: result.meta.providerMessageId,
-            timeoutMs: this.navigationTimeoutMs
-          }),
-          // The reader's own timer ends its wait for the network; this deadline
-          // stops only a reader whose browser commands then fail to settle.
-          this.navigationTimeoutMs + this.responseSettlementTimeoutMs,
-          { terminateEvaluation: false }
-        ).catch((error) => ({ unavailable: error?.code === 'response_observation_deadline' ? 'response_metadata_deadline' : 'response_metadata_read_failed' }));
-        responseModeEvidence = responseModeEvidenceForMessage(observation, { conversationUrl, providerMessageId: result.meta.providerMessageId });
-        unverifiedReason = responseModeEvidence ? 'model_slug_unrecognized' : observation?.unavailable ?? 'response_metadata_unavailable';
+        ({ responseModeEvidence, unverifiedReason } = await this.readAnswerMode({
+          conversationUrl: result.meta.conversationUrl,
+          providerMessageId: result.meta.providerMessageId
+        }));
       }
       const modeUsed = modeIntentForResponseModelSlug(responseModeEvidence?.resolvedModelSlug || responseModeEvidence?.modelSlug);
       const degradedFrom = requestedModeIntent && modeUsed && modeUsed !== requestedModeIntent ? { modeIntent: requestedModeIntent } : null;

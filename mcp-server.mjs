@@ -1777,6 +1777,30 @@ registerTool(
 );
 
 registerTool(
+  'agentify_recheck_run_mode',
+  {
+    description: 'Read again which ChatGPT mode answered a finished query whose mode is "unverified". Reloads the run\'s saved conversation and reads its answer\'s model metadata; nothing is sent. On success the run record and metadata.json record `modeUsed` with `modeVerification: "observed"` and `modeRecheck`; `updatedPaths` names the files to read again. Check `modeUsed` itself: a mode other than the requested one sets `degradedFrom` and the run stays success. A failed read returns `changed: false` with its `reason` and changes nothing.',
+    inputSchema: {
+      runId: z.string().describe('Durable run id of a finished query.'),
+      timeoutMs: z.number().optional().describe('Milliseconds to reopen the run\'s conversation (default 30000); the metadata read after it has its own limit.')
+    }
+  },
+  async ({ runId, timeoutMs }) => {
+    const conn = await getConn();
+    const data = await requestJson({
+      ...conn,
+      method: 'POST',
+      path: '/runs/recheck-mode',
+      body: { runId, timeoutMs: timeoutMs || undefined }
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+registerTool(
   'agentify_archive_run',
   {
     description: 'Archive a durable run so it disappears from the default inbox view.',

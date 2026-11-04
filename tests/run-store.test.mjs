@@ -339,6 +339,58 @@ test('run-store: archive metadata cannot reopen or rewrite a terminal run', asyn
   assert.equal(typeof archived.archivedAt, 'number');
 });
 
+test('run-store: a mode recheck moves only a finished unverified mode to observed, once', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-mode-recheck-'));
+  const store = createRunStore(stateDir);
+  await store.load();
+  const evidence = { source: 'response_metadata', conversationId: 'c1', providerMessageId: 'answer', modelSlug: 'gpt-5-6-pro', resolvedModelSlug: null, requestedModelSlug: null };
+  const recheck = (overrides = {}) => ({
+    label: 'Response received',
+    modeFields: {
+      modeUsed: 'extended-pro',
+      degradedFrom: null,
+      responseModeEvidence: evidence,
+      modeVerification: 'observed',
+      modeVerificationReason: null,
+      modeRecheck: { checkedAt: '2026-11-03T00:00:00.000Z', completionReason: 'conversation_response_not_seen' },
+      ...overrides
+    }
+  });
+  const unverifiedManifest = { responsePath: '/tmp/response.md', modeUsed: null, modeVerification: 'unverified', modeVerificationReason: 'conversation_response_not_seen', responseModeEvidence: null, transcript: { state: 'ready' } };
+
+  await store.create({ id: 'running', kind: 'query', status: 'running', outputManifest: unverifiedManifest });
+  const stillRunning = await store.recordModeRecheck('running', recheck());
+  assert.equal(stillRunning.modeUsed, null);
+  assert.equal(stillRunning.outputManifest.modeVerification, 'unverified');
+
+  await store.create({ id: 'finished', kind: 'query', status: 'running' });
+  const finished = await store.finalize('finished', { status: 'success', label: 'Response received (mode unverified)', modeIntent: 'extended-pro', outputManifest: unverifiedManifest, completionReceipt: completionReceipt() });
+  const rechecked = await store.recordModeRecheck('finished', recheck());
+  assert.equal(rechecked.status, 'success');
+  assert.equal(rechecked.finishedAt, finished.finishedAt);
+  assert.deepEqual(rechecked.completionReceipt, finished.completionReceipt);
+  assert.equal(rechecked.label, 'Response received');
+  assert.equal(rechecked.modeUsed, 'extended-pro');
+  assert.deepEqual(rechecked.outputManifest, {
+    ...unverifiedManifest,
+    modeUsed: 'extended-pro',
+    degradedFrom: null,
+    responseModeEvidence: evidence,
+    modeVerification: 'observed',
+    modeVerificationReason: null,
+    modeRecheck: { checkedAt: '2026-11-03T00:00:00.000Z', completionReason: 'conversation_response_not_seen' }
+  });
+
+  const second = await store.recordModeRecheck('finished', recheck({ modeUsed: 'thinking', degradedFrom: { modeIntent: 'extended-pro' } }));
+  assert.equal(second.revision, rechecked.revision);
+  assert.equal(second.modeUsed, 'extended-pro');
+  await assert.rejects(store.recordModeRecheck('finished', recheck({ responseModeEvidence: null })), /mode_recheck_evidence_required/);
+
+  const restarted = createRunStore(stateDir);
+  await restarted.load();
+  assert.equal(restarted.get('finished').outputManifest.modeVerification, 'observed');
+});
+
 test('run-store: terminal success cannot retain an in-flight phase', async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-run-store-terminal-phase-'));
   const store = createRunStore(stateDir);
