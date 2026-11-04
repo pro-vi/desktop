@@ -7690,6 +7690,7 @@ export class ChatGPTController {
       }
       const requestedModeIntent = normalizeChatGptModeIntent(modeIntent, { fallback: null });
       let responseModeEvidence = null;
+      let unverifiedReason = 'answer_message_id_missing';
       if (this.vendorId === 'chatgpt' && !imageGeneration && result?.meta?.providerMessageId && typeof this.page.readResponseMode === 'function') {
         await this.#emitProgress({ phase: 'verifying_response_mode' });
         const conversationUrl = result.meta.conversationUrl;
@@ -7699,20 +7700,25 @@ export class ChatGPTController {
             providerMessageId: result.meta.providerMessageId,
             timeoutMs: this.navigationTimeoutMs
           }),
-          this.navigationTimeoutMs,
+          // The reader's own timer ends its wait for the network; this deadline
+          // stops only a reader whose browser commands then fail to settle.
+          this.navigationTimeoutMs + this.responseSettlementTimeoutMs,
           { terminateEvaluation: false }
-        ).catch(() => null);
+        ).catch((error) => ({ unavailable: error?.code === 'response_observation_deadline' ? 'response_metadata_deadline' : 'response_metadata_read_failed' }));
         responseModeEvidence = responseModeEvidenceForMessage(observation, { conversationUrl, providerMessageId: result.meta.providerMessageId });
+        unverifiedReason = responseModeEvidence ? 'model_slug_unrecognized' : observation?.unavailable ?? 'response_metadata_unavailable';
       }
       const modeUsed = modeIntentForResponseModelSlug(responseModeEvidence?.resolvedModelSlug || responseModeEvidence?.modelSlug);
       const degradedFrom = requestedModeIntent && modeUsed && modeUsed !== requestedModeIntent ? { modeIntent: requestedModeIntent } : null;
+      const modeVerification = this.vendorId === 'chatgpt' && !imageGeneration ? modeUsed ? 'observed' : 'unverified' : null;
       result.meta = {
         ...result.meta,
         modeUsed,
         actualModeIntent: modeUsed,
         actualModeLabel: modeUsed === 'extended-pro' ? 'Pro' : modeUsed === 'thinking' ? 'Thinking' : modeUsed === 'instant' ? 'Instant' : null,
         actualModeSource: responseModeEvidence ? 'response_metadata' : null,
-        modeVerification: this.vendorId === 'chatgpt' && !imageGeneration ? modeUsed ? 'observed' : 'unverified' : null,
+        modeVerification,
+        modeVerificationReason: modeVerification === 'unverified' ? unverifiedReason : null,
         responseModeEvidence,
         degradedFrom
       };

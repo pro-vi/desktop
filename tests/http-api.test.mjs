@@ -2877,14 +2877,19 @@ test('http-api: response verification controls downgrade errors and saved-answer
   for (const scenario of [
     { name: 'bound downgrade', expectedStatus: 409 },
     { name: 'captured URL survives an unavailable later URL', capturedUrl: true, rejectUrl: true, expectedStatus: 409 },
-    { name: 'unbound metadata clears mode claims and reports unverified', capturedUrl: true, wrongEvidence: true, expectedStatus: 200 }
+    { name: 'unbound metadata clears mode claims and reports unverified', capturedUrl: true, wrongEvidence: true, expectedStatus: 200 },
+    { name: 'unavailable metadata keeps the reader reason', capturedUrl: true, unavailableReason: 'conversation_response_not_seen', expectedStatus: 200 }
   ]) await t.test(scenario.name, async (t) => {
+  const unverified = Boolean(scenario.wrongEvidence || scenario.unavailableReason);
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-mode-downgrade-'));
   let urlReads = 0;
   const controller = {
     runExclusive: async (fn) => await fn(),
     query: async ({ modeIntent }) => {
       assert.equal(modeIntent, 'extended-pro');
+      const unavailable = scenario.unavailableReason
+        ? { modeUsed: null, actualModeIntent: null, actualModeSource: null, modeVerification: 'unverified', modeVerificationReason: scenario.unavailableReason, degradedFrom: null, responseModeEvidence: null }
+        : {};
       return {
         text: 'The completed answer.',
         codeBlocks: [],
@@ -2897,7 +2902,8 @@ test('http-api: response verification controls downgrade errors and saved-answer
           modeVerification: 'observed',
           degradedFrom: { modeIntent: 'extended-pro' },
           responseModeEvidence: { source: 'response_metadata', conversationId: scenario.wrongEvidence ? 'another-conversation' : 'mode-downgraded', providerMessageId: 'downgraded-answer', modelSlug: 'gpt-6-thinking', requestedModelSlug: 'gpt-5-6-pro' },
-          completionEvidence: { version: 1, source: 'assistant-node', observedAt: Date.now() }
+          completionEvidence: { version: 1, source: 'assistant-node', observedAt: Date.now() },
+          ...unavailable
         }
       };
     },
@@ -2948,19 +2954,24 @@ test('http-api: response verification controls downgrade errors and saved-answer
   const outputManifest = response.data.data?.outputManifest || response.data.result?.meta?.outputManifest;
   assert.ok(outputManifest?.responsePath);
   assert.equal(await fs.readFile(outputManifest.responsePath, 'utf8'), 'The completed answer.\n');
-  assert.equal(outputManifest.responseModeEvidence?.modelSlug || null, scenario.wrongEvidence ? null : 'gpt-6-thinking');
+  assert.equal(outputManifest.responseModeEvidence?.modelSlug || null, unverified ? null : 'gpt-6-thinking');
+  const expectedReason = scenario.wrongEvidence ? 'evidence_identity_mismatch' : scenario.unavailableReason || null;
+  assert.equal(outputManifest.modeVerificationReason, expectedReason);
+  assert.equal(JSON.parse(await fs.readFile(outputManifest.metadataPath, 'utf8')).modeVerificationReason, expectedReason);
 
   const runs = await req({ port, token: 'secret', method: 'POST', pth: '/runs/list', body: { includeArchived: true } });
   assert.equal(runs.res.status, 200);
-  assert.equal(runs.data.runs[0]?.status, scenario.wrongEvidence ? 'success' : 'error');
-  assert.equal(runs.data.runs[0]?.phase, scenario.wrongEvidence ? 'completed' : 'failed');
+  assert.equal(runs.data.runs[0]?.status, unverified ? 'success' : 'error');
+  assert.equal(runs.data.runs[0]?.phase, unverified ? 'completed' : 'failed');
   assert.equal(runs.data.runs[0]?.modeIntent, 'extended-pro');
-  assert.equal(runs.data.runs[0]?.modeUsed, scenario.wrongEvidence ? null : 'thinking');
-  assert.deepEqual(runs.data.runs[0]?.degradedFrom, scenario.wrongEvidence ? null : { modeIntent: 'extended-pro' });
+  assert.equal(runs.data.runs[0]?.modeUsed, unverified ? null : 'thinking');
+  assert.deepEqual(runs.data.runs[0]?.degradedFrom, unverified ? null : { modeIntent: 'extended-pro' });
   assert.equal(runs.data.runs[0]?.outputManifest.responsePath, outputManifest.responsePath);
-  if (scenario.wrongEvidence) {
+  if (unverified) {
     assert.ok(runs.data.runs[0]?.completionReceipt);
     assert.equal(outputManifest.modeVerification, 'unverified');
+    assert.equal(runs.data.runs[0]?.outputManifest.modeVerificationReason, expectedReason);
+    assert.equal(response.data.result.meta.modeVerificationReason, expectedReason);
     assert.match(runs.data.runs[0]?.label, /mode unverified/);
     assert.equal(response.data.result.meta.modeVerification, 'unverified');
     assert.equal(response.data.result.meta.actualModeIntent, null);
@@ -2969,7 +2980,7 @@ test('http-api: response verification controls downgrade errors and saved-answer
     assert.equal(response.data.result.meta.responseModeEvidence, null);
   } else assert.equal(runs.data.runs[0]?.completionReceipt, null);
   const waited = await req({ port, token: 'secret', method: 'POST', pth: '/runs/wait', body: { runId: runs.data.runs[0].id, includeOutputText: true } });
-  assert.equal(waited.data.run.status, scenario.wrongEvidence ? 'success' : 'error');
+  assert.equal(waited.data.run.status, unverified ? 'success' : 'error');
   assert.equal(waited.data.outputText, 'The completed answer.\n');
   });
 });

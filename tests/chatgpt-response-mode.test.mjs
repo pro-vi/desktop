@@ -22,21 +22,23 @@ test('response mode uses the exact assistant message, not the conversation defau
   assert.equal(modeIntentForResponseModelSlug('new-provider-model'), null);
 });
 
-test('response mode refuses wrong conversation, wrong message, duplicate identity, and requested-only metadata', () => {
-  for (const change of [
-    (p) => { p.conversation_id = 'other'; },
-    (p) => { p.messages[0].id = 'other'; },
-    (p) => { p.messages[0].author.role = 'user'; },
-    (p) => { p.messages.push({ ...p.messages[0] }); },
-    (p) => { delete p.messages[0].metadata.model_slug; }
+test('response mode names why it refuses a conversation payload', () => {
+  for (const [change, reason] of [
+    [(p) => { delete p.messages; }, 'conversation_messages_missing'],
+    [(p) => { p.conversation_id = 'other'; }, 'answer_metadata_invalid'],
+    [(p) => { p.messages[0].id = 'other'; }, 'answer_message_not_found'],
+    [(p) => { p.messages[0].author.role = 'user'; }, 'answer_message_not_assistant'],
+    [(p) => { p.messages.push({ ...p.messages[0] }); }, 'answer_message_ambiguous'],
+    [(p) => { delete p.messages[0].metadata.model_slug; }, 'answer_model_slug_missing'],
+    [(p) => { p.messages[0].metadata.model_slug = 'gpt 6'; }, 'answer_metadata_invalid']
   ]) {
     const data = payload();
     change(data);
-    assert.equal(responseModeFromConversation(data, { conversationUrl, providerMessageId }), null);
+    assert.deepEqual(responseModeFromConversation(data, { conversationUrl, providerMessageId }), { unavailable: reason });
   }
 });
 
-function transport({ omitResponse = false, invalidBody = false } = {}) {
+function transport({ omitResponse = false, invalidBody = false, unfinishedBody = false, refusedStatus = null, failingCommand = null } = {}) {
   const handlers = new Map();
   const calls = [];
   const emit = async (method, params) => { for (const handler of handlers.get(method) || []) await handler(params); };
@@ -50,7 +52,13 @@ function transport({ omitResponse = false, invalidBody = false } = {}) {
     },
     async sendCommand(method, params) {
       calls.push({ method, params });
-      if (method === 'Page.reload' && !omitResponse) {
+      if (method === failingCommand) throw new Error('Debugger is not attached');
+      if (method === 'Page.reload' && refusedStatus) {
+        await emit('Network.responseReceived', { requestId: 'owned', response: { status: refusedStatus, url: 'https://chatgpt.com/backend-api/conversations/conversation' } });
+        await emit('Network.loadingFinished', { requestId: 'owned' });
+      } else if (method === 'Page.reload' && unfinishedBody) {
+        await emit('Network.responseReceived', { requestId: 'owned', response: { status: 200, url: 'https://chatgpt.com/backend-api/conversations/conversation' } });
+      } else if (method === 'Page.reload' && !omitResponse) {
         await emit('Network.responseReceived', { requestId: 'foreign', response: { status: 200, url: 'https://example.test/backend-api/conversations/conversation' } });
         await emit('Network.loadingFinished', { requestId: 'foreign' });
         await emit('Network.responseReceived', { requestId: 'other', response: { status: 200, url: 'https://chatgpt.com/backend-api/conversations/other' } });
@@ -73,10 +81,18 @@ test('response metadata read reloads the completed conversation without submitti
   assert.ok([...api.handlers.values()].every((group) => group.length === 0));
 });
 
-test('failed or missing response metadata stays unknown and disposes every listener', async () => {
-  for (const options of [{ omitResponse: true }, { invalidBody: true }]) {
+test('failed or missing response metadata stays unknown, names where it stopped, and disposes every listener', async () => {
+  for (const [options, reason] of [
+    [{ omitResponse: true }, 'conversation_response_not_seen'],
+    [{ unfinishedBody: true }, 'conversation_body_timeout'],
+    [{ refusedStatus: 404 }, 'conversation_response_status_404'],
+    [{ invalidBody: true }, 'conversation_body_not_json'],
+    [{ failingCommand: 'Network.getResponseBody' }, 'conversation_body_unreadable'],
+    [{ failingCommand: 'Network.enable' }, 'network_enable_failed'],
+    [{ failingCommand: 'Page.reload' }, 'page_reload_failed']
+  ]) {
     const api = transport(options);
-    assert.equal(await readChatGptResponseMode({ ...api, conversationUrl, providerMessageId, timeoutMs: 5 }), null);
+    assert.deepEqual(await readChatGptResponseMode({ ...api, conversationUrl, providerMessageId, timeoutMs: 5 }), { unavailable: reason });
     assert.ok([...api.handlers.values()].every((group) => group.length === 0));
     assert.equal(api.calls.at(-1).method, 'Network.disable');
   }
@@ -85,7 +101,7 @@ test('failed or missing response metadata stays unknown and disposes every liste
 test('response metadata read does not reload unowned or non-conversation locations', async () => {
   for (const url of ['https://example.test/c/conversation', 'https://chatgpt.com/', 'https://chatgpt.com/dots/home']) {
     const api = transport();
-    assert.equal(await readChatGptResponseMode({ ...api, conversationUrl: url, providerMessageId }), null);
+    assert.deepEqual(await readChatGptResponseMode({ ...api, conversationUrl: url, providerMessageId }), { unavailable: 'conversation_url_unowned' });
     assert.equal(api.calls.length, 0);
   }
 });

@@ -2101,6 +2101,7 @@ export function startHttpApi({
     const degradedFrom = responseModeEvidence && targetIntent && modeUsed && modeUsed !== targetIntent
       ? { modeIntent: targetIntent }
       : null;
+    const modeVerification = responseModeEvidence && modeUsed ? 'observed' : resultMeta.modeVerification != null || resultMeta.responseModeEvidence != null ? 'unverified' : null;
     return {
       modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null }),
       modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
@@ -2108,7 +2109,15 @@ export function startHttpApi({
       modelUsed,
       degradedFrom,
       responseModeEvidence,
-      modeVerification: responseModeEvidence && modeUsed ? 'observed' : resultMeta.modeVerification != null || resultMeta.responseModeEvidence != null ? 'unverified' : null
+      modeVerification,
+      // Only the evidence check against this layer's conversation URL is new
+      // here; every other reason comes from the controller, and a result
+      // carrying none gets `response_metadata_unavailable`.
+      modeVerificationReason: modeVerification !== 'unverified'
+        ? null
+        : !responseModeEvidence && resultMeta.responseModeEvidence != null
+          ? 'evidence_identity_mismatch'
+          : resultMeta.modeVerificationReason ?? 'response_metadata_unavailable'
     };
   };
 
@@ -2474,6 +2483,7 @@ export function startHttpApi({
         degradedFrom: usage.degradedFrom || null,
         responseModeEvidence: usage.responseModeEvidence,
         modeVerification: usage.modeVerification,
+        modeVerificationReason: usage.modeVerificationReason,
         completionEvidence: { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
         responsePath,
         capturedAt: new Date().toISOString()
@@ -2515,6 +2525,7 @@ export function startHttpApi({
       degradedFrom: usage.degradedFrom || null,
       responseModeEvidence: usage.responseModeEvidence,
       modeVerification: usage.modeVerification,
+      modeVerificationReason: usage.modeVerificationReason,
       // Transcript publication state persisted with the manifest: `pending`
       // means the detached post-query publication owes this run a terminal
       // state; `not_applicable` means no publication will run.
@@ -3653,6 +3664,7 @@ export function startHttpApi({
             actualModeSource: outputManifest.responseModeEvidence ? 'response_metadata' : null,
             responseModeEvidence: outputManifest.responseModeEvidence,
             modeVerification: outputManifest.modeVerification,
+            modeVerificationReason: outputManifest.modeVerificationReason,
             modelUsed: outputManifest.modelUsed || null,
             degradedFrom: outputManifest.degradedFrom || null,
             outputManifest,
@@ -4732,6 +4744,7 @@ export function startHttpApi({
                   actualModeSource: outputManifest.responseModeEvidence ? 'response_metadata' : null,
                   responseModeEvidence: outputManifest.responseModeEvidence,
                   modeVerification: outputManifest.modeVerification,
+                  modeVerificationReason: outputManifest.modeVerificationReason,
                   modelUsed: outputManifest.modelUsed || null,
                   degradedFrom: outputManifest.degradedFrom || null,
                   outputManifest,

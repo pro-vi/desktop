@@ -5156,12 +5156,19 @@ test('chatgpt-controller: query fails closed when mode intent cannot be confirme
 });
 
 test('chatgpt-controller: response mode comes from its message metadata rather than the next prompt setting', async (t) => {
-  for (const [modelSlug, expectedMode, stalledCommand, unavailableUrl] of [
-    ['gpt-5-6-pro', 'extended-pro'], ['gpt-6-thinking', 'thinking'], [null, null],
-    ['gpt-5-6-pro', 'extended-pro', null, true],
-    ...['Network.enable', 'Page.reload', 'Network.getResponseBody', 'Network.disable'].map((command) => ['gpt-5-6-pro', null, command])
+  for (const { modelSlug = null, expectedMode = null, stalledCommand = null, unavailableUrl = false, readerShape = null, expectedReason = null } of [
+    { modelSlug: 'gpt-5-6-pro', expectedMode: 'extended-pro' },
+    { modelSlug: 'gpt-6-thinking', expectedMode: 'thinking' },
+    { expectedReason: 'conversation_response_not_seen' },
+    { modelSlug: 'gpt-6', expectedReason: 'model_slug_unrecognized' },
+    { modelSlug: 'gpt-5-6-pro', expectedMode: 'extended-pro', unavailableUrl: true },
+    ...['Network.enable', 'Page.reload', 'Network.getResponseBody', 'Network.disable'].map((command) => ({ modelSlug: 'gpt-5-6-pro', stalledCommand: command, expectedReason: 'response_metadata_deadline' })),
+    // The real reader under the controller's deadline: its own timeout reason must reach the record.
+    { readerShape: 'silent', expectedReason: 'conversation_response_not_seen' },
+    { readerShape: 'unfinished', expectedReason: 'conversation_body_timeout' },
+    { readerShape: 'throws', expectedReason: 'response_metadata_read_failed' }
   ]) {
-    await t.test(unavailableUrl ? 'captured answer does not need another URL read' : stalledCommand ? `stalled ${stalledCommand}` : modelSlug || 'metadata unavailable', async () => {
+    await t.test(unavailableUrl ? 'captured answer does not need another URL read' : stalledCommand ? `stalled ${stalledCommand}` : readerShape ? `reader ${readerShape}` : modelSlug || 'metadata unavailable', async () => {
   const realNow = Date.now;
   let fakeNow = 7_500_000;
   Date.now = () => {
@@ -5183,21 +5190,22 @@ test('chatgpt-controller: response mode comes from its message metadata rather t
   const enteredReader = new Promise((resolve) => { readerStarted = resolve; });
   const blockedCommand = new Promise((resolve) => { releaseCommand = resolve; });
   const page = {
-    async readResponseMode({ conversationUrl, providerMessageId }) {
+    async readResponseMode({ conversationUrl, providerMessageId, timeoutMs }) {
       metadataRead = true;
       assert.equal(conversationUrl, 'https://chatgpt.com/c/instant-mode-run');
       assert.equal(providerMessageId, 'answer-message');
       readerStarted();
-      if (stalledCommand) {
+      if (readerShape === 'throws') throw new Error('reader_crashed');
+      if (stalledCommand || readerShape) {
         const handlers = new Map();
         metadataOperation = readChatGptResponseMode({
-          conversationUrl, providerMessageId, timeoutMs: 5,
+          conversationUrl, providerMessageId, timeoutMs,
           subscribe(method, handler) { handlers.set(method, handler); return () => handlers.delete(method); },
           async sendCommand(method) {
             if (method === stalledCommand) return await blockedCommand;
-            if (method === 'Page.reload') {
+            if (method === 'Page.reload' && readerShape !== 'silent') {
               handlers.get('Network.responseReceived')({ requestId: 'owned', response: { status: 200, url: 'https://chatgpt.com/backend-api/conversations/instant-mode-run' } });
-              handlers.get('Network.loadingFinished')({ requestId: 'owned' });
+              if (readerShape !== 'unfinished') handlers.get('Network.loadingFinished')({ requestId: 'owned' });
             }
             if (method === 'Network.getResponseBody') return { body: JSON.stringify({ conversation_id: 'instant-mode-run', messages: [{ id: providerMessageId, author: { role: 'assistant' }, metadata: { model_slug: modelSlug } }] }) };
             return {};
@@ -5205,7 +5213,7 @@ test('chatgpt-controller: response mode comes from its message metadata rather t
         });
         return await metadataOperation;
       }
-      return modelSlug ? { source: 'response_metadata', conversationId: 'instant-mode-run', providerMessageId, modelSlug, requestedModelSlug: 'gpt-5-6-pro' } : null;
+      return modelSlug ? { source: 'response_metadata', conversationId: 'instant-mode-run', providerMessageId, modelSlug, requestedModelSlug: 'gpt-5-6-pro' } : { unavailable: 'conversation_response_not_seen' };
     },
     async terminateEvaluation() { terminationCalls++; },
     async navigate() {},
@@ -5271,8 +5279,8 @@ test('chatgpt-controller: response mode comes from its message metadata rather t
   const controller = new ChatGPTController({
     page,
     vendorId: 'chatgpt',
-    navigationTimeoutMs: stalledCommand || unavailableUrl ? 5 : 30_000,
-    responseSettlementTimeoutMs: 1,
+    navigationTimeoutMs: readerShape ? 20 : stalledCommand || unavailableUrl ? 5 : 30_000,
+    responseSettlementTimeoutMs: readerShape ? 500 : 1,
     selectors: {
       promptTextarea: '#prompt-textarea',
       sendButton: 'button[data-testid="send-button"]',
@@ -5299,8 +5307,11 @@ test('chatgpt-controller: response mode comes from its message metadata rather t
     assert.ok(result, 'the captured answer returns without a later browser URL read');
     if (unavailableUrl) assert.equal(urlReads, 0);
     assert.equal(result.meta.modeUsed, expectedMode);
-    assert.equal(result.meta.actualModeSource, expectedMode ? 'response_metadata' : null);
-    assert.equal(result.meta.responseModeEvidence?.modelSlug || null, expectedMode ? modelSlug : null);
+    const evidenceKept = Boolean(expectedMode) || expectedReason === 'model_slug_unrecognized';
+    assert.equal(result.meta.actualModeSource, evidenceKept ? 'response_metadata' : null);
+    assert.equal(result.meta.responseModeEvidence?.modelSlug || null, evidenceKept ? modelSlug : null);
+    assert.equal(result.meta.modeVerification, expectedMode ? 'observed' : 'unverified');
+    assert.equal(result.meta.modeVerificationReason, expectedReason || null);
     assert.deepEqual(result.meta.degradedFrom || null, expectedMode === 'thinking' ? { modeIntent: 'extended-pro' } : null);
     assert.equal(result.text, instantPageText);
     assert.equal(metadataRead, true);

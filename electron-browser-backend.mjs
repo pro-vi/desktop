@@ -203,7 +203,7 @@ class ElectronPageAdapter {
   }
 
   async readResponseMode(options) {
-    return await this.#withDebugger(async (debuggerClient) => await readChatGptResponseMode({
+    const observation = await this.#withDebugger(async (debuggerClient) => await readChatGptResponseMode({
       ...options,
       sendCommand: (method, params) => debuggerClient.sendCommand(method, params),
       subscribe: (method, handler) => {
@@ -214,6 +214,7 @@ class ElectronPageAdapter {
         return () => debuggerClient.removeListener('message', listener);
       }
     }));
+    return observation ?? { unavailable: 'debugger_unavailable' };
   }
 
   async beginNavigationGuard(matchesUrl) {

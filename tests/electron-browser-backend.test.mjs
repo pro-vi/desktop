@@ -213,6 +213,26 @@ test('electron-browser-backend: response metadata is scoped to the window and de
   await backend.dispose();
 });
 
+test('electron-browser-backend: response metadata names a debugger that cannot attach', async () => {
+  let commands = 0;
+  class BusyWindow extends MockBrowserWindow {
+    constructor() {
+      super();
+      this.webContents.debugger.attach = () => { throw new Error('Another debugger is already attached'); };
+      this.webContents.debugger.sendCommand = async () => { commands++; return {}; };
+    }
+    async loadURL(url) { this.currentUrl = url; }
+  }
+  const backend = new ElectronBrowserBackend({ BrowserWindowClass: BusyWindow });
+  const { page } = await backend.createSession({ url: 'https://chatgpt.com/c/response' });
+  assert.deepEqual(
+    await page.readResponseMode({ conversationUrl: 'https://chatgpt.com/c/response', providerMessageId: 'answer' }),
+    { unavailable: 'debugger_unavailable' }
+  );
+  assert.equal(commands, 0);
+  await backend.dispose();
+});
+
 test('electron-browser-backend: createSession destroys window if loadURL fails', async () => {
   let createdWindow = null;
   class TestBrowserWindow extends MockBrowserWindow {
