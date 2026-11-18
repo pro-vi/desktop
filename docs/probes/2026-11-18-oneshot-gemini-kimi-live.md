@@ -128,6 +128,27 @@ Still guesses:
 | `2dc20f9b`, `64c00bd5` | A refused send's files stayed in Kimi's composer for the next chat, and chips with the same names passed the upload check. | `78071d7`: a fresh chat must start with no files (the Kimi adapter removes a draft's files); the composer must show exactly the requested files. |
 | `1241deed` | The prompt's last character doubled again, on both typing attempts, so the retype did not help. The cause is still not known; text inserted through DevTools staged exactly in five tries. | `0ca879d`: extra text after the complete prompt is deleted from the end, and the comparison is run again. |
 
+## Probe runs after review round 2
+
+The 2-file probe was run once more per site at `8933fc6`, through public MCP, on a bench started with plain `npm run bench` (no DevTools port, so no watcher).
+
+| Run | Site | Mode | Outcome |
+|---|---|---|---|
+| `e92da7f2` | Gemini | `thinking` | success, 40.2 s |
+| `704dda68` | Kimi | `instant` | `send_refused` after Kimi took the prompt (capacity notice), 13.8 s |
+| `32fced69` | Kimi | `instant` | the same, 10.5 s |
+| `60346b4d` | Kimi | `instant` | the same, 7.1 s |
+
+What they showed:
+- **Gemini `e92da7f2`:**
+  - The mode was confirmed: "Solves complex problems", 4 Hydrogen Thinking, both before Send and after the answer.
+  - Both files matched: `probe-brief.pdf` by stem and extension, `probe-notes.docx` by stem.
+  - Typing took one attempt, and prompt delivery was complete.
+  - The answer cited the two attached files. They were saved in `sources.json` as file sources with no URL, which is the first live check of file citations. Both chips gave their sources (`sourcesComplete: true`).
+  - `tool_use.json` is `none`: no chip named a web page, the sources list was present and empty, and no thinking panel showed. The answer named Paris without a web source.
+  - Attachment delivery reads "not checked", because Gemini's profile has no anchor for files in the sent turn.
+- **Kimi:** each refusal was recorded with `failureStage: after_send` and a detail saying Kimi took the prompt first. No answer, so no tool use was saved. Each run reached Send, so the two probe files were found inside `div.chat-editor-attachment-area`: the composer's attachment area confirmed on the live page. Kimi had put back the earlier refused draft before these runs (seen at 12:42 UTC). Runs that reached Send therefore removed that draft inside the area first. This is inferred: a failed run's record does not list removed files.
+
 ## Review round 1 items checked live
 
 | Item | What the live pages showed |
