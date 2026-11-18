@@ -27,13 +27,29 @@ function renderKimi(state) {
       rows.push(el('div', { matches: [sel('user-turn')], children: [el('div', { text: turn.text })] }));
       continue;
     }
+    const flow = turn.toolFlow ? [renderToolFlow(state, turn)] : [];
     rows.push(el('div', {
       matches: [sel('assistant-turn')],
       children: [
-        el('div', { matches: [sel('answer-exclude')], children: [el('div', { matches: [sel('answer-body')], text: 'Thinking process' })] }),
-        el('div', { children: [el('div', { matches: [sel('answer-body')], children: turn.body })] })
+        el('div', { matches: [sel('answer-exclude')], children: [el('div', { matches: [sel('answer-body')], text: 'Thinking process' }), ...flow] }),
+        el('div', { children: [el('div', { matches: [sel('answer-body')], children: turn.body })] }),
+        ...(state.stop ? [] : [el('div', {
+          matches: [sel('idle-signal')],
+          children: turn.references ? [el('div', {
+            matches: [sel('reference-toggle')],
+            rect: { x: 400, y: 520, w: 80, h: 20 },
+            onClick: () => { state.panelOpen = true; },
+            text: 'Reference'
+          })] : []
+        })])
       ]
     }));
+    if (turn.references && state.panelOpen) {
+      rows.push(el('div', {
+        matches: [sel('source-panel')],
+        children: turn.references.map((ref) => el('a', { matches: [sel('source-item'), 'a[href]'], attrs: { href: ref.url }, text: ref.title }))
+      }));
+    }
   }
   rows.push(el('div', { matches: [sel('composer')], text: state.composerText, rect: { x: 100, y: 600, w: 400, h: 40 } }));
   const hasText = !!state.composerText.trim();
@@ -92,7 +108,54 @@ function renderKimi(state) {
   return rows;
 }
 
-function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer = null, url = 'https://www.kimi.ai/chat/old' } = {}) {
+// The answer's tool-call flow as read live on 2026-11-18: a summary toggle,
+// a thinking step, and a web-search step whose trigger reveals the pages.
+function renderToolFlow(state, turn) {
+  const steps = turn.toolFlow.map((step, index) => {
+    const detailId = `toolcall-detail-${index}`;
+    if (step.thinking) {
+      return el('div', { matches: [sel('tool-step'), sel('tool-step-thinking')], attrs: { class: 'toolcall-container thinking-container' }, children: [el('span', { matches: [sel('tool-step-title')], text: step.title })] });
+    }
+    const expanded = !!state.expandedSteps?.[index];
+    return el('div', {
+      matches: [sel('tool-step')],
+      attrs: { class: `toolcall-container default toolcall-${step.tool}` },
+      children: [
+        el('div', {
+          matches: [sel('tool-step-trigger')],
+          attrs: { 'aria-controls': detailId, 'aria-expanded': String(expanded) },
+          rect: { x: 300, y: 100 + index * 40, w: 200, h: 30 },
+          hidden: !state.flowOpen,
+          onClick: () => { state.expandedSteps = { ...(state.expandedSteps || {}), [index]: true }; },
+          children: [el('span', { matches: [sel('tool-step-title')], text: step.title })]
+        }),
+        el('div', {
+          attrs: { id: detailId },
+          children: expanded ? step.pages.map((page) => el('a', {
+            matches: [sel('tool-step-link')],
+            attrs: { href: page.url },
+            children: [el('span', { matches: [sel('tool-step-link-title')], text: page.title }), el('span', { matches: [sel('tool-step-link-site')], text: page.site })]
+          })) : []
+        })
+      ]
+    });
+  });
+  return el('div', {
+    matches: [sel('tool-flow')],
+    children: [
+      el('button', {
+        matches: [sel('tool-flow-toggle')],
+        attrs: { 'aria-expanded': String(!!state.flowOpen) },
+        rect: { x: 300, y: 60, w: 300, h: 30 },
+        onClick: () => { state.flowOpen = true; },
+        text: 'Summarized two files'
+      }),
+      ...steps
+    ]
+  });
+}
+
+function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer = null, toolFlow = null, references = null, url = 'https://www.kimi.ai/chat/old' } = {}) {
   const state = {
     model,
     effort,
@@ -118,7 +181,7 @@ function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer 
     onEvaluate: (js, fake) => {
       if (!js.includes('function readTurns(') || !fake.state.sent) return;
       fake.state.reads += 1;
-      if (fake.state.reads === 2) fake.state.turns.push({ role: 'assistant', body: answer || ['Answer'] });
+      if (fake.state.reads === 2) fake.state.turns.push({ role: 'assistant', body: answer || ['Answer'], toolFlow, references });
       if (fake.state.reads === 3) fake.state.stop = false;
     }
   });
@@ -144,7 +207,6 @@ test('oneshot-kimi: a fresh chat stays on the Kimi site the tab is on', () => {
   assert.equal(kimiFreshChatUrl('https://www.kimi.ai/chat/abc'), 'https://www.kimi.ai/');
   assert.equal(kimiFreshChatUrl('https://chatgpt.com/'), 'https://www.kimi.ai/');
   assert.equal(kimiFreshChatUrl('not a url'), 'https://www.kimi.ai/');
-  assert.equal(kimiFreshChatUrl('https://www.kimi.ai/', { path: '/deep-research' }), 'https://www.kimi.ai/deep-research');
 });
 
 test('oneshot-kimi: k3.1-pro selects the model and High effort, confirmed on the trigger, before typing', async () => {
@@ -152,7 +214,7 @@ test('oneshot-kimi: k3.1-pro selects the model and High effort, confirmed on the
   const result = await kimiController(page).query({ prompt: 'probe', modeIntent: 'k3.1-pro', timeoutMs: 2_000 });
   assert.equal(state.model, 'K3.1 Pro');
   assert.equal(state.effort, 'High');
-  assert.deepEqual(result.meta.modeApplied, { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High' } });
+  assert.deepEqual(result.meta.modeApplied, { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High' }, label: 'K3.1 Pro | High' });
   assert.deepEqual(result.meta.answerSettings, {
     model: 'K3.1 Pro',
     mode: 'Thinking effort: High',
@@ -198,12 +260,54 @@ test('oneshot-kimi: an intent Kimi does not offer is refused with the supported 
   assert.equal(page.navigations.length, 0);
 });
 
-test('oneshot-kimi: deep-research opens the Deep Research page and records it as the mode', async () => {
-  const { page } = makeKimi({ model: 'K3', effort: 'High' });
-  const result = await kimiController(page).query({ prompt: 'probe', modeIntent: 'deep-research', timeoutMs: 2_000 });
-  assert.deepEqual(page.navigations, ['https://www.kimi.ai/deep-research']);
-  assert.deepEqual(result.meta.modeApplied.shown, { page: '/deep-research', model: 'K3', effort: 'High' });
-  assert.equal(result.meta.answerSettings.mode, 'Deep Research; Thinking effort: High');
+test('oneshot-kimi: deep-research is refused before any page work, since its final report has no completion check', async () => {
+  const { page } = makeKimi();
+  await assert.rejects(kimiController(page).query({ prompt: 'probe', modeIntent: 'deep-research' }), /mode_intent_unsupported/);
+  assert.equal(page.navigations.length, 0);
+});
+
+test('oneshot-kimi: the tool-call flow is expanded and read into tool use, skipping thinking steps', async () => {
+  const toolFlow = [
+    { thinking: true, title: 'Summarized two files and cited France capital' },
+    { tool: 'web_search', title: 'Found 2 web pages', pages: [
+      { url: 'https://www.britannica.com/place/Paris', title: 'Paris | Definition', site: 'www.britannica.com' },
+      { url: 'https://en.wikipedia.org/wiki/Paris', title: 'Paris', site: 'en.wikipedia.org' }
+    ] },
+    { thinking: true, title: 'Thinking complete' }
+  ];
+  const { state, page } = makeKimi({ toolFlow });
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(state.flowOpen, true);
+  assert.deepEqual(result.meta.toolUse, {
+    state: 'shown',
+    reason: null,
+    steps: [{
+      tool: 'web_search',
+      title: 'Found 2 web pages',
+      query: null,
+      count: 2,
+      pages: [
+        { url: 'https://www.britannica.com/place/Paris', title: 'Paris | Definition', site: 'www.britannica.com' },
+        { url: 'https://en.wikipedia.org/wiki/Paris', title: 'Paris', site: 'en.wikipedia.org' }
+      ]
+    }]
+  });
+  assert.doesNotMatch(JSON.stringify(result.meta.toolUse), /Summarized two files|Thinking complete/);
+});
+
+test('oneshot-kimi: an answer with no tool-call flow records tool use as none', async () => {
+  const { page } = makeKimi();
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.toolUse, { state: 'none', reason: null, steps: [] });
+});
+
+test('oneshot-kimi: the Reference panel is opened and its links become the answer sources', async () => {
+  const references = [{ url: 'https://www.britannica.com/place/Paris', title: 'Paris | Britannica' }];
+  const { state, page } = makeKimi({ references });
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(state.panelOpen, true);
+  assert.deepEqual(result.meta.sources, [{ index: 1, url: 'https://www.britannica.com/place/Paris', title: 'Paris | Britannica', kinds: ['panel'] }]);
+  assert.match(result.text, /## Sources\n\n1\. \[Paris \| Britannica\]\(https:\/\/www\.britannica\.com\/place\/Paris\)/);
 });
 
 test('oneshot-kimi: the answer is read from the Markdown outside the thinking rollup, without code-block chrome', async () => {

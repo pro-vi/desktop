@@ -2,15 +2,16 @@
   "schemaVersion": 1,
   "vendorId": "gemini",
   "contractVersion": "2026-11-18",
-  "capturedAt": "2026-11-18T12:00:00.000Z",
+  "capturedAt": "2026-11-18T11:20:00.000Z",
   "capabilities": [
     { "id": "readiness", "anchorIds": ["composer", "signed-out-marker", "terms-gate"] },
     { "id": "composer", "anchorIds": ["composer"] },
     { "id": "attachment", "anchorIds": ["upload-menu-button", "file-input", "attachment-item", "attachment-pending", "attachment-error"] },
     { "id": "submit", "anchorIds": ["send-button", "send-disabled", "stop-button"] },
-    { "id": "response", "anchorIds": ["user-turn", "assistant-turn", "answer-body", "answer-exclude", "answer-error", "stop-button"] },
+    { "id": "response", "anchorIds": ["user-turn", "assistant-turn", "answer-body", "answer-exclude", "answer-error", "stop-button", "idle-signal"] },
     { "id": "answer", "anchorIds": ["answer-body", "answer-skip", "code-language", "citation", "citation-button", "source-card-link"] },
-    { "id": "mode", "anchorIds": ["mode-trigger", "mode-trigger-label", "mode-option", "mode-option-label", "mode-option-sublabel", "tool-item", "tool-more", "deep-research-chip"] }
+    { "id": "mode", "anchorIds": ["mode-trigger", "mode-trigger-label", "mode-option", "mode-option-label", "mode-option-sublabel"] },
+    { "id": "tool-use", "anchorIds": ["sources-list", "thoughts-panel"] }
   ],
   "anchors": [
     {
@@ -46,8 +47,7 @@
     {
       "id": "stop-button",
       "branches": [
-        { "id": "stop-response", "kind": "canonical", "source": "guess", "selector": "button[aria-label=\"Stop response\"]" },
-        { "id": "stop-class", "kind": "legacy", "source": "guess", "selector": "button.send-button.stop" }
+        { "id": "stop-response", "kind": "canonical", "source": "live-page", "selector": "button[aria-label=\"Stop response\"]" }
       ]
     },
     {
@@ -65,15 +65,14 @@
     {
       "id": "attachment-item",
       "branches": [
-        { "id": "file-preview", "kind": "canonical", "source": "guess", "selector": "uploader-file-preview" },
-        { "id": "file-preview-chip", "kind": "legacy", "source": "guess", "selector": "[class*=\"file-preview\"]" }
+        { "id": "file-preview", "kind": "canonical", "source": "live-page", "selector": "uploader-file-preview" }
       ]
     },
     {
       "id": "attachment-pending",
       "branches": [
-        { "id": "progress-spinner", "kind": "canonical", "source": "guess", "selector": "mat-progress-spinner" },
-        { "id": "progressbar", "kind": "legacy", "source": "guess", "selector": "[role=\"progressbar\"]" }
+        { "id": "attachment-loading", "kind": "canonical", "source": "live-page", "selector": ".gem-attachment-content.loading" },
+        { "id": "attachment-spinner", "kind": "legacy", "source": "live-page", "selector": "mat-spinner" }
       ]
     },
     {
@@ -85,20 +84,19 @@
     {
       "id": "user-turn",
       "branches": [
-        { "id": "user-query", "kind": "canonical", "source": "share-page", "selector": "user-query" }
+        { "id": "user-query", "kind": "canonical", "source": "live-page", "selector": "user-query" }
       ]
     },
     {
       "id": "assistant-turn",
       "branches": [
-        { "id": "model-response", "kind": "canonical", "source": "guess", "selector": "model-response" },
-        { "id": "response-container", "kind": "legacy", "source": "share-page", "selector": "response-container" }
+        { "id": "model-response", "kind": "canonical", "source": "live-page", "selector": "model-response" }
       ]
     },
     {
       "id": "answer-body",
       "branches": [
-        { "id": "message-markdown", "kind": "canonical", "source": "share-page", "selector": "message-content .markdown" }
+        { "id": "message-markdown", "kind": "canonical", "source": "live-page", "selector": "message-content .markdown" }
       ]
     },
     {
@@ -128,13 +126,13 @@
     {
       "id": "citation",
       "branches": [
-        { "id": "source-inline-chip", "kind": "canonical", "source": "share-page", "selector": "source-inline-chip" }
+        { "id": "source-inline-chip", "kind": "canonical", "source": "live-page", "selector": "source-inline-chip" }
       ]
     },
     {
       "id": "citation-button",
       "branches": [
-        { "id": "source-chip-button", "kind": "canonical", "source": "share-page", "selector": "button[aria-haspopup=\"dialog\"]" }
+        { "id": "source-chip-button", "kind": "canonical", "source": "live-page", "selector": "button[aria-haspopup=\"dialog\"]" }
       ]
     },
     {
@@ -174,21 +172,21 @@
       ]
     },
     {
-      "id": "tool-item",
+      "id": "idle-signal",
       "branches": [
-        { "id": "tool-checkbox", "kind": "canonical", "source": "live-page", "selector": "button[role=\"menuitemcheckbox\"]" }
+        { "id": "message-actions", "kind": "canonical", "source": "live-page", "selector": "message-actions" }
       ]
     },
     {
-      "id": "tool-more",
+      "id": "sources-list",
       "branches": [
-        { "id": "more-tools", "kind": "canonical", "source": "live-page", "selector": "[data-test-id=\"more-tools-button\"]" }
+        { "id": "sources-list", "kind": "canonical", "source": "live-page", "selector": "sources-list" }
       ]
     },
     {
-      "id": "deep-research-chip",
+      "id": "thoughts-panel",
       "branches": [
-        { "id": "deselect-deep-research", "kind": "canonical", "source": "live-page", "selector": "button[aria-label=\"Deselect Deep research\"]" }
+        { "id": "model-thoughts", "kind": "canonical", "source": "guess", "selector": "model-thoughts" }
       ]
     }
   ]

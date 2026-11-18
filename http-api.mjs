@@ -79,7 +79,7 @@ import {
   catalogHttpStatusForErrorCode,
   transcriptHttpStatusForErrorCode
 } from './library-http-errors.mjs';
-import { ONESHOT_ERRORS } from './oneshot-engine.mjs';
+import { ONESHOT_ERRORS, normalizeToolUse, toolUseCounts } from './oneshot-engine.mjs';
 import { oneShotAdapterFor } from './oneshot-sites/index.mjs';
 
 function isLoopback(remoteAddress) {
@@ -879,17 +879,23 @@ async function writeQueryResponseFile({ outDir, text }) {
 // Markdown answer, so a caller can grade either without re-parsing Markdown.
 async function writeOneShotAnswerFiles({ outDir, meta }) {
   const sources = Array.isArray(meta?.sources) ? meta.sources : [];
+  const toolUse = normalizeToolUse(meta?.toolUse);
   const responseTextPath = path.join(outDir, 'assistant_response.txt');
   const sourcesPath = path.join(outDir, 'sources.json');
+  const toolUsePath = path.join(outDir, 'tool_use.json');
   await atomicWriteFile(responseTextPath, responseMarkdownContent(meta?.plainText || ''), { mode: 0o600 });
   await atomicWriteJson(sourcesPath, { sources }, { mode: 0o600 });
+  await atomicWriteJson(toolUsePath, toolUse, { mode: 0o600 });
   return {
     answerSettings: meta?.answerSettings || null,
     modeApplied: meta?.modeApplied || null,
     freshChatUrl: meta?.freshChatUrl || null,
     responseTextPath,
     sourcesPath,
-    sourceCount: sources.length
+    sourceCount: sources.length,
+    attachments: Array.isArray(meta?.attachments) ? meta.attachments : [],
+    toolUsePath,
+    toolUse: toolUseCounts(toolUse)
   };
 }
 
@@ -1843,6 +1849,7 @@ export function startHttpApi({
         status: 'error',
         label: known.label,
         detail: known.detail(detail),
+        ...(detail?.conversationUrl ? { conversationUrl: detail.conversationUrl } : {}),
         ...(known.attachment ? { attachmentDebug: detail || null } : {})
       };
     }
@@ -2511,7 +2518,7 @@ export function startHttpApi({
     const oneShot = result?.meta?.oneShot === true;
     const usage = {
       ...queryUsageForResult({ result, conversationUrl, modeIntent, modelIntent, activeQuery }),
-      ...(oneShot ? { modeIntent: trimOrNull(modeIntent) } : {})
+      ...(oneShot ? { modeIntent: trimOrNull(modeIntent), degradedFrom: result.meta.degradedFrom || null } : {})
     };
     const responsePath = await writeQueryResponseFile({ outDir, text: result?.text || '' });
     const oneShotRecord = oneShot ? await writeOneShotAnswerFiles({ outDir, meta: result.meta }) : null;
@@ -2535,7 +2542,7 @@ export function startHttpApi({
         modeVerificationReason: usage.modeVerificationReason,
         completionEvidence: { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
         responsePath,
-        ...(oneShotRecord ? { ...oneShotRecord, attachments: Array.isArray(result.meta.attachments) ? result.meta.attachments : [] } : {}),
+        ...(oneShotRecord || {}),
         capturedAt: new Date().toISOString()
       }, null, 2)}\n`,
       { mode: 0o600 }
@@ -2566,7 +2573,8 @@ export function startHttpApi({
         },
         ...(oneShotRecord ? [
           { kind: 'file', filePath: oneShotRecord.responseTextPath, originalName: path.basename(oneShotRecord.responseTextPath), mime: 'text/plain', source: 'agentify_query', meta: { role: 'assistant_response_text' } },
-          { kind: 'file', filePath: oneShotRecord.sourcesPath, originalName: path.basename(oneShotRecord.sourcesPath), mime: 'application/json', source: 'agentify_query', meta: { role: 'sources' } }
+          { kind: 'file', filePath: oneShotRecord.sourcesPath, originalName: path.basename(oneShotRecord.sourcesPath), mime: 'application/json', source: 'agentify_query', meta: { role: 'sources' } },
+          { kind: 'file', filePath: oneShotRecord.toolUsePath, originalName: path.basename(oneShotRecord.toolUsePath), mime: 'application/json', source: 'agentify_query', meta: { role: 'tool_use' } }
         ] : [])
       ]
     });
@@ -5064,6 +5072,12 @@ export function startHttpApi({
           const settings = await getSettings?.() || {};
           const isChatGpt = normalizeVendorToken(tabMeta?.vendorId || '') === 'chatgpt';
           if (suppliedChatUrl && !isChatGpt) throw new Error('invalid_vendor');
+          // A one-shot site has no follow-up send: every query is a fresh chat.
+          if (oneShotAdapterFor(tabMeta?.vendorId)) {
+            const error = new Error('oneshot_send_unsupported');
+            error.data = { vendorId: tabMeta?.vendorId || null };
+            throw error;
+          }
           const chatProfile = isChatGpt
             ? resolveChatGptChatProfile({
               key: effectiveKey,

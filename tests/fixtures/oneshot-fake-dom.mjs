@@ -92,7 +92,7 @@ export function createDocument({ url = 'https://site.example/', readyState = 'co
     get activeElement() { return focused(); },
     querySelectorAll: (selector) => bodyNode.querySelectorAll(selector),
     querySelector: (selector) => bodyNode.querySelector(selector),
-    getElementById: () => null,
+    getElementById: (id) => descendants(bodyNode).find((node) => node.attrs.id === id) || null,
     allNodes: () => descendants(bodyNode)
   };
 }

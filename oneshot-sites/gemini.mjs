@@ -7,12 +7,12 @@ import { ONESHOT_REQUIRED_ANCHORS, parseOneShotProfile } from '../oneshot-profil
 // "Everyday help" (4 Hydrogen), "Solves complex problems" (4 Hydrogen
 // Thinking), "Detailed research" (3.1 Pro). Intents name the purpose, which
 // outlives a model rename; the run records the model the page showed.
-// Deep research is a tool under "Upload & tools" > "More tools".
+// The Deep research tool is not offered: its final report has no completion
+// check yet (ADR 0017).
 export const GEMINI_MODE_INTENTS = Object.freeze({
   fast: Object.freeze({ option: 'Everyday help' }),
   thinking: Object.freeze({ option: 'Solves complex problems' }),
-  pro: Object.freeze({ option: 'Detailed research' }),
-  'deep-research': Object.freeze({ tool: 'Deep research' })
+  pro: Object.freeze({ option: 'Detailed research' })
 });
 
 // Citation chips opened per answer to read their sources; a longer answer's
@@ -50,32 +50,23 @@ export function readGeminiModePicker(a, h) {
   };
 }
 
-export function readGeminiTools(a, h) {
-  const rectOfFirst = (selectors) => {
-    const node = h.all(selectors).find(h.visible);
-    return node ? h.rectOf(node) : null;
-  };
-  return {
-    upload: rectOfFirst(a.uploadMenu),
-    more: rectOfFirst(a.toolMore),
-    tools: h.all(a.toolItem).filter(h.visible).map((node) => ({
-      label: h.textOf(node).trim(),
-      checked: node.getAttribute('aria-checked') === 'true',
-      rect: h.rectOf(node)
-    })),
-    deepResearchChip: h.all(a.deepResearchChip).some(h.visible),
-    fileInputs: h.all(a.fileInput).length
-  };
+export function readGeminiUploadMenu(a, h) {
+  const upload = h.first(a.uploadMenu);
+  return { upload: upload ? h.rectOf(upload) : null, fileInputs: h.all(a.fileInput).length };
 }
 
+// Chips in the answer only: one inside the thinking area, or with no size,
+// is skipped rather than clicked.
 export function locateGeminiCitation(a, h) {
   const turns = h.all(a.assistantTurn);
   const turn = turns[turns.length - 1];
   const chips = turn ? h.all(a.citation, turn) : [];
   const chip = chips[a.index];
   if (!chip) return { count: chips.length, found: false };
+  if (h.insideAny(chip, a.answerExclude, turn)) return { count: chips.length, found: false, skipped: 'excluded' };
   const button = h.all(a.citationButton, chip)[0] || chip;
   button.scrollIntoView?.({ block: 'center' });
+  if (!h.visible(button)) return { count: chips.length, found: false, skipped: 'no_size' };
   return { count: chips.length, found: true, rect: h.rectOf(button) };
 }
 
@@ -94,6 +85,25 @@ export function stampGeminiCitation(a, h) {
   return { links: links.length, stamped: links.length };
 }
 
+// What the answer shows of Gemini's tool use. On 2026-11-18 a Pro answer had
+// an empty sources-list and no thinking panel; links in that list are the
+// sites Gemini shows it used. A thinking panel is not read (its text is
+// reasoning), so its presence makes tool use unread rather than none.
+export function readGeminiToolSurfaces(a, h) {
+  const turns = h.all(a.assistantTurn);
+  const turn = turns[turns.length - 1];
+  if (!turn) return { found: false };
+  const list = h.all(a.sourcesList, turn)[0] || null;
+  return {
+    found: true,
+    thoughts: h.all(a.thoughtsPanel, turn).length > 0,
+    links: list ? Array.from(list.querySelectorAll('a[href]')).map((link) => ({
+      url: link.getAttribute('href'),
+      title: h.textOf(link).replace(/\s+/g, ' ').trim()
+    })) : []
+  };
+}
+
 function selectors(ctx) {
   return {
     trigger: ctx.selectorsFor('mode-trigger'),
@@ -102,14 +112,14 @@ function selectors(ctx) {
     optionLabel: ctx.selectorsFor('mode-option-label'),
     optionSublabel: ctx.selectorsFor('mode-option-sublabel'),
     uploadMenu: ctx.selectorsFor('upload-menu-button'),
-    toolItem: ctx.selectorsFor('tool-item'),
-    toolMore: ctx.selectorsFor('tool-more'),
-    deepResearchChip: ctx.selectorsFor('deep-research-chip'),
     fileInput: ctx.selectorsFor('file-input'),
     assistantTurn: ctx.selectorsFor('assistant-turn'),
+    answerExclude: ctx.selectorsFor('answer-exclude'),
     citation: ctx.selectorsFor('citation'),
     citationButton: ctx.selectorsFor('citation-button'),
-    cardLink: ctx.selectorsFor('source-card-link')
+    cardLink: ctx.selectorsFor('source-card-link'),
+    sourcesList: ctx.selectorsFor('sources-list'),
+    thoughtsPanel: ctx.selectorsFor('thoughts-panel')
   };
 }
 
@@ -150,52 +160,46 @@ async function selectOption(ctx, sel, mode) {
     });
   }
   if (!choice.checked) await ctx.click(choice.rect);
-  picker = await waitFor(ctx, read, (value) => value.model === choice.sublabel);
+  picker = await waitFor(ctx, read, (value) => !value.expanded);
   if (picker.expanded) await closeMenus(ctx);
-  if (picker.model !== choice.sublabel) {
-    throw selectionError('model_not_selected', { shown: { model: picker.model }, expected: choice.sublabel });
+  // The picker's own label can shorten the model ("3.1 Pro" showed as "Pro"
+  // on 2026-11-18), so the selection is confirmed by the option's checked
+  // state in the reopened menu.
+  const checked = await readCheckedOption(ctx, sel);
+  if (checked?.label !== mode.option) {
+    throw selectionError('model_not_selected', {
+      shown: { option: checked?.label || null, model: checked?.sublabel || null },
+      expected: mode.option
+    });
   }
-  return { model: picker.model, option: choice.label };
+  const after = await read();
+  return { shown: { model: checked.sublabel, option: checked.label }, label: after.model };
 }
 
-async function selectTool(ctx, sel, mode) {
-  const read = () => ctx.evaluate(readGeminiTools, sel);
-  let state = await read();
-  if (state.deepResearchChip) return;
-  if (!state.upload) throw selectionError('tools_menu_missing');
-  await ctx.click(state.upload);
-  state = await waitFor(ctx, read, (value) => value.tools.length > 0 || !!value.more);
-  let tool = state.tools.find((item) => item.label === mode.tool);
-  if (!tool && state.more) {
-    await ctx.click(state.more);
-    state = await waitFor(ctx, read, (value) => value.tools.some((item) => item.label === mode.tool));
-    tool = state.tools.find((item) => item.label === mode.tool);
-  }
-  if (!tool) {
-    await closeMenus(ctx);
-    throw selectionError('tool_not_found', { options: state.tools.map((item) => item.label) });
-  }
-  await ctx.click(tool.rect);
-  state = await waitFor(ctx, read, (value) => value.deepResearchChip);
-  if (state.tools.length) await closeMenus(ctx);
-  if (!state.deepResearchChip) throw selectionError('tool_not_selected', { shown: { tool: null } });
+async function readCheckedOption(ctx, sel) {
+  const read = () => ctx.evaluate(readGeminiModePicker, sel);
+  let picker = await read();
+  if (!picker.found) return null;
+  if (!picker.expanded) await ctx.click(picker.rect);
+  picker = await waitFor(ctx, read, (value) => value.options.length > 0);
+  await closeMenus(ctx);
+  return picker.options.find((item) => item.checked) || null;
 }
 
 async function applyGeminiMode(ctx, mode) {
-  const sel = selectors(ctx);
-  const shown = {};
-  if (mode.option) Object.assign(shown, await selectOption(ctx, sel, mode));
-  if (mode.tool) {
-    await selectTool(ctx, sel, mode);
-    shown.tool = mode.tool;
-  }
-  return { confirmed: true, shown };
+  const selected = await selectOption(ctx, selectors(ctx), mode);
+  return { confirmed: true, ...selected };
+}
+
+async function readGeminiModeLabel(ctx) {
+  const picker = await ctx.evaluate(readGeminiModePicker, selectors(ctx));
+  return picker.found ? picker.model : null;
 }
 
 // The documents input exists only after "Upload & tools" is opened.
 async function revealGeminiFileInput(ctx) {
   const sel = selectors(ctx);
-  const read = () => ctx.evaluate(readGeminiTools, sel);
+  const read = () => ctx.evaluate(readGeminiUploadMenu, sel);
   let state = await read();
   if (state.fileInputs > 0) return null;
   if (!state.upload) return null;
@@ -208,34 +212,45 @@ async function prepareGeminiCapture(ctx) {
   const sel = selectors(ctx);
   const first = await ctx.evaluate(locateGeminiCitation, { ...sel, index: 0 });
   const count = Math.min(first.count, MAX_CITATION_CHIPS);
+  const cardLinks = () => ctx.evaluate(stampGeminiCitation, { ...sel, countOnly: true });
   let stamped = 0;
+  let skipped = 0;
   for (let index = 0; index < count; index += 1) {
     ctx.throwIfStopRequested();
     await ctx.evaluate(locateGeminiCitation, { ...sel, index });
     await ctx.sleep(Math.min(100, ctx.timings.menuMs));
     const chip = await ctx.evaluate(locateGeminiCitation, { ...sel, index });
-    if (!chip.found) continue;
+    if (!chip.found) {
+      skipped += 1;
+      continue;
+    }
+    // A card still open from the previous chip would be read as this one's.
+    if ((await cardLinks()).links > 0) return { citations: first.count, opened: index, stamped, skipped, stopped: 'card_still_open' };
     await ctx.click(chip.rect);
     const result = await waitFor(ctx, () => ctx.evaluate(stampGeminiCitation, { ...sel, index }), (value) => value.stamped > 0);
     if (result.stamped > 0) stamped += 1;
     await closeMenus(ctx);
-    // The next chip's card must not be read while this one is still open.
-    await waitFor(ctx, () => ctx.evaluate(stampGeminiCitation, { ...sel, countOnly: true }), (value) => value.links === 0);
+    await waitFor(ctx, cardLinks, (value) => value.links === 0);
   }
-  return { citations: first.count, opened: count, stamped };
+  return { citations: first.count, opened: count, stamped, skipped };
+}
+
+async function readGeminiToolUse(ctx) {
+  const shown = await ctx.evaluate(readGeminiToolSurfaces, selectors(ctx));
+  if (!shown.found) return { state: 'unread', reason: 'assistant_turn_missing' };
+  if (shown.links.length) {
+    return { state: 'shown', steps: [{ tool: 'sources_list', title: 'Sources', count: shown.links.length, pages: shown.links }] };
+  }
+  if (shown.thoughts) return { state: 'unread', reason: 'thinking_panel_not_read' };
+  return { state: 'none' };
 }
 
 async function readGeminiAnswerSettings(ctx) {
-  const sel = selectors(ctx);
-  const picker = await ctx.evaluate(readGeminiModePicker, sel);
-  if (!picker.found) return { unreadReason: 'mode_picker_missing' };
-  const tools = await ctx.evaluate(readGeminiTools, sel);
-  // Gemini shows the model on the composer's picker, not on the answer.
-  return {
-    model: picker.model,
-    mode: tools.deepResearchChip ? 'Deep research' : null,
-    source: 'mode-picker-after-answer'
-  };
+  // Gemini shows the model on the composer's picker, not on the answer; the
+  // checked option in its menu names both the model and its purpose.
+  const checked = await readCheckedOption(ctx, selectors(ctx));
+  if (!checked) return { unreadReason: 'mode_picker_missing' };
+  return { model: checked.sublabel || null, mode: checked.label || null, source: 'mode-picker-menu-after-answer' };
 }
 
 const profile = parseOneShotProfile(
@@ -253,7 +268,9 @@ export const geminiAdapter = Object.freeze({
   progressLabels: Object.freeze(['just a sec', 'thinking']),
   freshChatUrl: geminiFreshChatUrl,
   applyMode: applyGeminiMode,
+  readModeLabel: readGeminiModeLabel,
   revealFileInput: revealGeminiFileInput,
   prepareCapture: prepareGeminiCapture,
+  readToolUse: readGeminiToolUse,
   readAnswerSettings: readGeminiAnswerSettings
 });

@@ -44,7 +44,8 @@ function renderGemini(state) {
       children: [el('button', {
         matches: [sel('citation-button')],
         rect: { x: 300 + index * 80, y: 300, w: 60, h: 20 },
-        onClick: () => { state.openCard = index; },
+        hidden: state.zeroSizeChip === index,
+        onClick: () => { state.openCard = index; state.cardClicks.push(index); },
         text: index ? 'PMC +1' : 'NIH'
       })]
     }));
@@ -52,13 +53,15 @@ function renderGemini(state) {
     rows.push(el('model-response', {
       matches: [sel('assistant-turn')],
       children: [
-        el('model-thoughts', { matches: [sel('answer-exclude')], children: [el('message-content', { children: [el('div', { matches: [sel('answer-body')], text: 'Show thinking' })] })] }),
+        ...(state.thoughts ? [el('model-thoughts', { matches: [sel('answer-exclude')], children: [el('message-content', { children: [el('div', { matches: [sel('answer-body')], text: 'Show thinking' })] })] })] : []),
         el('message-content', {
           children: [el('div', {
             matches: [sel('answer-body')],
             children: [el('p', { children: ['Control blood sugar.', turn.chips[0], ' Treat gum disease.', turn.chips[1]] })]
           })]
-        })
+        }),
+        el('sources-list', { matches: [sel('sources-list')], children: (state.listedSources || []).map((site) => el('a', { matches: ['a[href]'], attrs: { href: site.url }, text: site.title })) }),
+        ...(state.stop ? [] : [el('message-actions', { matches: [sel('idle-signal')], text: 'Copy' })])
       ]
     }));
   }
@@ -92,7 +95,8 @@ function renderGemini(state) {
     attrs: { 'aria-expanded': String(state.menu === 'mode') },
     rect: { x: 700, y: 640, w: 120, h: 30 },
     onClick: () => { state.menu = state.menu === 'mode' ? null : 'mode'; },
-    children: [el('div', { matches: [sel('mode-trigger-label')], text: state.model })]
+    // The live picker shortened "3.1 Pro" to "Pro" once selected (2026-11-18).
+    children: [el('div', { matches: [sel('mode-trigger-label')], text: state.model === '3.1 Pro' ? 'Pro' : state.model })]
   }));
   if (state.menu === 'mode') {
     OPTIONS.forEach((option, i) => rows.push(el('gem-menu-item', {
@@ -110,22 +114,8 @@ function renderGemini(state) {
   rows.push(el('button', {
     matches: [sel('upload-menu-button')],
     rect: { x: 60, y: 640, w: 30, h: 30 },
-    onClick: () => { state.menu = state.menu === 'tools' || state.menu === 'more' ? null : 'tools'; state.inputsCreated = true; }
+    onClick: () => { state.menu = state.menu === 'tools' ? null : 'tools'; state.inputsCreated = true; }
   }));
-  if (state.menu === 'tools' || state.menu === 'more') {
-    rows.push(el('button', { matches: [sel('tool-item')], attrs: { 'aria-checked': 'false' }, rect: { x: 60, y: 500, w: 200, h: 30 }, text: 'Canvas' }));
-    rows.push(el('button', { matches: [sel('tool-more')], rect: { x: 60, y: 540, w: 200, h: 30 }, onClick: () => { state.menu = 'more'; }, text: 'More tools' }));
-  }
-  if (state.menu === 'more') {
-    rows.push(el('button', {
-      matches: [sel('tool-item')],
-      attrs: { 'aria-checked': String(state.deepResearch) },
-      rect: { x: 280, y: 540, w: 200, h: 30 },
-      onClick: () => { state.deepResearch = true; state.menu = null; },
-      text: 'Deep research'
-    }));
-  }
-  if (state.deepResearch) rows.push(el('button', { matches: [sel('deep-research-chip')], text: 'Deep research' }));
   if (state.inputsCreated) {
     rows.push(el('input', {
       attrs: { type: 'file' },
@@ -141,7 +131,7 @@ function renderGemini(state) {
 function makeGemini({ model = '4 Hydrogen', locked = [], url = 'https://gemini.google.com/app' } = {}) {
   const state = {
     model, locked, url,
-    menu: null, openCard: null, deepResearch: false, inputsCreated: false,
+    menu: null, openCard: null, inputsCreated: false, cardClicks: [], zeroSizeChip: null, stickyCard: false,
     signedOut: false, terms: false,
     composerText: '', selectAll: false, turns: [], chips: [], stop: false, sent: 0, reads: 0
   };
@@ -149,7 +139,7 @@ function makeGemini({ model = '4 Hydrogen', locked = [], url = 'https://gemini.g
     state,
     render: renderGemini,
     url,
-    onNavigate: (next, fake) => { fake.state.turns = []; fake.state.deepResearch = false; },
+    onNavigate: (next, fake) => { fake.state.turns = []; },
     onEvaluate: (js, fake) => {
       if (!js.includes('function readTurns(') || !fake.state.sent) return;
       fake.state.reads += 1;
@@ -159,7 +149,7 @@ function makeGemini({ model = '4 Hydrogen', locked = [], url = 'https://gemini.g
   });
   const sendKey = page.sendKey;
   page.sendKey = async (key, options) => {
-    if (key === 'Escape') state.openCard = null;
+    if (key === 'Escape' && !state.stickyCard) state.openCard = null;
     await sendKey(key, options);
   };
   return { state, page };
@@ -184,8 +174,8 @@ test('oneshot-gemini: pro selects the Detailed research option and records the m
   const { state, page } = makeGemini();
   const result = await geminiController(page).query({ prompt: 'probe', modeIntent: 'pro', timeoutMs: 2_000 });
   assert.equal(state.model, '3.1 Pro');
-  assert.deepEqual(result.meta.modeApplied, { intent: 'pro', shown: { model: '3.1 Pro', option: 'Detailed research' } });
-  assert.deepEqual(result.meta.answerSettings, { model: '3.1 Pro', mode: null, source: 'mode-picker-after-answer', unreadReason: null });
+  assert.deepEqual(result.meta.modeApplied, { intent: 'pro', shown: { model: '3.1 Pro', option: 'Detailed research' }, label: 'Pro' });
+  assert.deepEqual(result.meta.answerSettings, { model: '3.1 Pro', mode: 'Detailed research', source: 'mode-picker-menu-after-answer', unreadReason: null });
 });
 
 test('oneshot-gemini: a disabled option fails closed before the composer is touched', async () => {
@@ -199,12 +189,27 @@ test('oneshot-gemini: a disabled option fails closed before the composer is touc
   assert.equal(state.sent, 0);
 });
 
-test('oneshot-gemini: deep-research turns on the tool under More tools and is confirmed by its chip', async () => {
+test('oneshot-gemini: deep-research is refused before any page work, since its final report has no completion check', async () => {
+  const { page } = makeGemini();
+  await assert.rejects(geminiController(page).query({ prompt: 'probe', modeIntent: 'deep-research' }), /mode_intent_unsupported/);
+  assert.equal(page.navigations.length, 0);
+});
+
+test('oneshot-gemini: a citation chip with no size is skipped, not clicked', async () => {
   const { state, page } = makeGemini();
-  const result = await geminiController(page).query({ prompt: 'probe', modeIntent: 'deep-research', timeoutMs: 2_000 });
-  assert.equal(state.deepResearch, true);
-  assert.deepEqual(result.meta.modeApplied.shown, { tool: 'Deep research' });
-  assert.equal(result.meta.answerSettings.mode, 'Deep research');
+  state.zeroSizeChip = 0;
+  const result = await geminiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(state.cardClicks, [1]);
+  assert.deepEqual(result.meta.sources.map((item) => item.url), ['https://pmc.ncbi.nlm.nih.gov/b', 'https://pmc.ncbi.nlm.nih.gov/c']);
+});
+
+test('oneshot-gemini: a source card that does not close stops the chip loop instead of mislabeling the next chip', async () => {
+  const { state, page } = makeGemini();
+  state.stickyCard = true;
+  const result = await geminiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(state.cardClicks, [0]);
+  assert.equal(result.meta.captureNotes.stopped, 'card_still_open');
+  assert.deepEqual(result.meta.sources.map((item) => item.url), ['https://www.nih.gov/a']);
 });
 
 test('oneshot-gemini: files go into the documents input that Upload & tools creates, and the menu is closed after', async () => {
@@ -220,7 +225,8 @@ test('oneshot-gemini: files go into the documents input that Upload & tools crea
 });
 
 test('oneshot-gemini: citation chips are opened one at a time and their card links become the answer sources', async () => {
-  const { page } = makeGemini();
+  const { state, page } = makeGemini();
+  state.thoughts = true;
   const result = await geminiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.equal(result.text, [
     'Control blood sugar. [1](https://www.nih.gov/a) Treat gum disease. [2](https://pmc.ncbi.nlm.nih.gov/b) [3](https://pmc.ncbi.nlm.nih.gov/c)',
@@ -245,7 +251,25 @@ test('oneshot-gemini: a terms gate blocks the run as needing the page made ready
 });
 
 test('oneshot-gemini: intents name purposes, not ChatGPT modes', async () => {
-  assert.deepEqual(Object.keys(GEMINI_MODE_INTENTS), ['fast', 'thinking', 'pro', 'deep-research']);
+  assert.deepEqual(Object.keys(GEMINI_MODE_INTENTS), ['fast', 'thinking', 'pro']);
   const { page } = makeGemini();
   await assert.rejects(geminiController(page).query({ prompt: 'probe', modeIntent: 'extended-pro' }), /mode_intent_unsupported/);
+});
+
+test('oneshot-gemini: tool use is the sources list when it has links, unread behind a thinking panel, and none otherwise', async () => {
+  const listed = makeGemini();
+  listed.state.listedSources = [{ url: 'https://www.nih.gov/a', title: 'NIH' }, { url: 'https://example.org/b', title: 'Example' }];
+  const shown = await geminiController(listed.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(shown.meta.toolUse, { state: 'shown', reason: null, steps: [{ tool: 'sources_list', title: 'Sources', query: null, count: 2, pages: [
+    { url: 'https://www.nih.gov/a', title: 'NIH', site: null },
+    { url: 'https://example.org/b', title: 'Example', site: null }
+  ] }] });
+
+  const thinking = makeGemini();
+  thinking.state.thoughts = true;
+  const unread = await geminiController(thinking.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(unread.meta.toolUse, { state: 'unread', reason: 'thinking_panel_not_read', steps: null });
+
+  const plain = await geminiController(makeGemini().page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(plain.meta.toolUse, { state: 'none', reason: null, steps: [] });
 });

@@ -9,10 +9,11 @@ export const ONESHOT_PROFILE_SCHEMA_VERSION = 1;
 // the signed-in page from one read off a public share page or written blind.
 export const ONESHOT_BRANCH_SOURCES = Object.freeze(['live-page', 'share-page', 'guess']);
 
-// Anchors the engine cannot run a query without. Every other anchor the
-// engine reads (stop control, citations, a sign-in marker) is optional.
+// Anchors the engine cannot run a query without. Completion needs both a stop
+// control to watch and an idle signal to see. Every other anchor the engine
+// reads (citations, a sign-in marker, a refusal notice) is optional.
 export const ONESHOT_REQUIRED_ANCHORS = Object.freeze([
-  'composer', 'send-button', 'file-input', 'attachment-item', 'user-turn', 'assistant-turn', 'answer-body'
+  'composer', 'send-button', 'stop-button', 'idle-signal', 'file-input', 'attachment-item', 'user-turn', 'assistant-turn', 'answer-body'
 ]);
 
 const BRANCH_KINDS = new Set(['canonical', 'legacy']);

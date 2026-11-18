@@ -42,7 +42,21 @@ export function pageHelpers() {
     return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
   };
   const textOf = (node) => String(node?.innerText ?? node?.textContent ?? '');
-  const first = (selectors, root) => all(selectors, root).find(visible) || null;
+  // The first visible node, checking each branch in order: a branch that
+  // matches only hidden nodes falls through to the next branch.
+  const first = (selectors, root = document) => {
+    for (const selector of selectors || []) {
+      let nodes = [];
+      try {
+        nodes = Array.from(root.querySelectorAll(selector));
+      } catch {
+        nodes = [];
+      }
+      const shown = nodes.find(visible);
+      if (shown) return shown;
+    }
+    return null;
+  };
   return { visible, all, first, matchesAny, insideAny, rectOf, textOf };
 }
 
@@ -109,16 +123,20 @@ export function readTurns(a, h) {
     const bodies = h.all(a.answerBody, last).filter((node) => !h.insideAny(node, a.answerExclude, last));
     lastAssistant = {
       answerText: bodies.map(h.textOf).join('\n').trim(),
-      error: h.all(a.answerError, last).some(h.visible)
+      error: !!h.first(a.answerError, last),
+      // A control the page shows only on a finished answer, such as its action bar.
+      idle: !!h.first(a.idle, last)
     };
   }
   const composer = h.first(a.composer);
+  const notice = h.first(a.notice);
   return {
     userTurns: h.all(a.userTurn).length,
     assistantTurns: assistants.length,
     lastAssistant,
     stopVisible: !!h.first(a.stop),
-    composerEmpty: composer ? !String(composer.matches('textarea, input') ? composer.value : h.textOf(composer)).trim() : null
+    composerEmpty: composer ? !String(composer.matches('textarea, input') ? composer.value : h.textOf(composer)).trim() : null,
+    notice: notice ? h.textOf(notice).replace(/\s+/g, ' ').trim().slice(0, 300) : null
   };
 }
 
@@ -128,7 +146,10 @@ export function readLastUserText(a, h) {
 }
 
 export function readAttachments(a, h) {
-  const items = h.all(a.attachmentItem).filter(h.visible).map((node) => ({
+  const nodes = h.all(a.attachmentItem).filter(h.visible);
+  // A chip's own child nodes can match the same selector; keep only chips.
+  const outermost = nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
+  const items = outermost.map((node) => ({
     text: h.textOf(node).replace(/\s+/g, ' ').trim().slice(0, 200),
     pending: h.matchesAny(node, a.attachmentPending) || h.all(a.attachmentPending, node).some(h.visible),
     error: h.matchesAny(node, a.attachmentError) || h.all(a.attachmentError, node).some(h.visible)
@@ -304,8 +325,13 @@ export function captureAnswer(a, h) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   const markdown = tidy(bodies.map(render).join('\n\n'));
-  for (const item of h.all(a.sourceItem)) {
-    for (const cited of citedSources(item)) addSource(cited.url, cited.title, 'panel');
+  // Panel sources come from this answer's turn or the panel the site opens
+  // for it, never from the rest of the page.
+  const panel = h.first(a.sourcePanel);
+  for (const root of [turn, panel].filter(Boolean)) {
+    for (const item of h.all(a.sourceItem, root)) {
+      for (const cited of citedSources(item)) addSource(cited.url, cited.title, 'panel');
+    }
   }
   return {
     found: true,

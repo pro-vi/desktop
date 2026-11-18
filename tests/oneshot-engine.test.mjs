@@ -8,7 +8,10 @@ import {
   OneShotController,
   compareStagedPrompt,
   matchAttachments,
-  promptDeliveryFor
+  modeVerificationFor,
+  normalizeToolUse,
+  promptDeliveryFor,
+  toolUseCounts
 } from '../oneshot-engine.mjs';
 import { parseOneShotProfile, ONESHOT_REQUIRED_ANCHORS } from '../oneshot-profile.mjs';
 import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
@@ -42,7 +45,10 @@ const TEST_PROFILE = parseOneShotProfile({
     anchor('citation', '.cite'),
     anchor('source-item', '.source-link'),
     anchor('signed-out-marker', '#login'),
-    anchor('terms-gate', '#terms')
+    anchor('terms-gate', '#terms'),
+    anchor('idle-signal', '.turn-actions'),
+    anchor('blocking-notice', '#notice'),
+    anchor('source-panel', '#source-panel')
   ]
 }, { vendorId: 'testsite', requiredAnchorIds: ONESHOT_REQUIRED_ANCHORS });
 
@@ -87,6 +93,7 @@ function siteState(overrides = {}) {
 function renderSite(state) {
   const rows = [];
   if (state.signedOut) rows.push(el('button', { attrs: { id: 'login' }, matches: ['#login'], text: 'Log in' }));
+  if (state.notice) rows.push(el('div', { matches: ['#notice'], text: state.notice }));
   if (state.termsGate) rows.push(el('div', { attrs: { id: 'terms' }, matches: ['#terms'], text: 'Accept terms' }));
   for (const turn of state.turns) {
     if (turn.role === 'user') {
@@ -96,6 +103,7 @@ function renderSite(state) {
       if (turn.thinking) children.push(el('div', { matches: ['.thinking'], children: [el('div', { matches: ['.answer'], text: turn.thinking })] }));
       children.push(el('div', { matches: ['.answer'], children: turn.body }));
       if (turn.error) children.push(el('div', { matches: ['.turn-error'], text: 'Something went wrong' }));
+      if (turn.idle) children.push(el('div', { matches: ['.turn-actions'], text: 'Copy' }));
       rows.push(el('div', { matches: ['.turn-assistant'], children }));
     }
   }
@@ -112,7 +120,9 @@ function renderSite(state) {
     rect: { x: 520, y: 600, w: 30, h: 30 },
     onClick: () => state.onSend?.(state)
   }));
+  if (state.hiddenStop) rows.push(el('div', { matches: ['#stop-hidden'], hidden: true }));
   if (state.stop) rows.push(el('div', { attrs: { id: 'stop' }, matches: ['#stop'], rect: { x: 560, y: 600, w: 30, h: 30 } }));
+  rows.push(...(state.extraRows || []));
   rows.push(el('input', {
     attrs: { type: 'file', id: 'files' },
     matches: ['input#files'],
@@ -167,13 +177,14 @@ function makeSite(overrides = {}) {
       if (assistant && step.body) assistant.body = step.body;
       if (assistant && step.thinking !== undefined) assistant.thinking = step.thinking;
       if (assistant && step.error) assistant.error = true;
+      if (assistant && step.idle !== undefined) assistant.idle = step.idle;
       if (step.stop !== undefined) fake.state.stop = step.stop;
     }
   });
   return { state, page };
 }
 
-function adapterFor({ modeConfirmed = true, onApplyMode = null } = {}) {
+function adapterFor({ modeConfirmed = true, onApplyMode = null, labelBeforeSend = () => 'Model X' } = {}) {
   return {
     vendorId: 'testsite',
     vendorName: 'Test Site',
@@ -183,8 +194,9 @@ function adapterFor({ modeConfirmed = true, onApplyMode = null } = {}) {
     freshChatUrl: (currentUrl, mode) => `https://site.example/new${mode ? `?mode=${mode.intent}` : ''}`,
     applyMode: async (ctx, mode) => {
       onApplyMode?.(mode);
-      return { confirmed: modeConfirmed, shown: { model: 'Model X', mode: 'Strong' } };
+      return { confirmed: modeConfirmed, shown: { model: 'Model X', mode: 'Strong' }, label: 'Model X' };
     },
+    readModeLabel: async () => labelBeforeSend(),
     readAnswerSettings: async () => ({ model: 'Model X', mode: 'Strong', source: 'test-label' })
   };
 }
@@ -207,7 +219,7 @@ async function tempFiles(names) {
 const stableAnswer = (body, extra = {}) => [
   { stop: true, body: answerTree.plain('') },
   { stop: true, body },
-  { stop: false, body, ...extra }
+  { stop: false, idle: true, body, ...extra }
 ];
 
 test('oneshot-engine: a query opens a fresh chat, applies the mode, uploads, types, sends and captures Markdown with sources', async () => {
@@ -234,7 +246,7 @@ test('oneshot-engine: a query opens a fresh chat, applies the mode, uploads, typ
   assert.equal(result.meta.completionEvidence.source, 'assistant-node');
   assert.equal(result.meta.oneShot, true);
   assert.equal(result.meta.requestedModeIntent, 'strong');
-  assert.deepEqual(result.meta.modeApplied, { intent: 'strong', shown: { model: 'Model X', mode: 'Strong' } });
+  assert.deepEqual(result.meta.modeApplied, { intent: 'strong', shown: { model: 'Model X', mode: 'Strong' }, label: 'Model X' });
   assert.deepEqual(result.meta.answerSettings, { model: 'Model X', mode: 'Strong', source: 'test-label', unreadReason: null });
   assert.equal(result.meta.freshChatUrl, 'https://site.example/new?mode=strong');
   assert.deepEqual(result.meta.attachments.map((item) => [item.name, item.matchedBy]), [['brief.pdf', 'name'], ['cv.docx', 'name']]);
@@ -362,7 +374,7 @@ test('oneshot-engine: a chat that opens with turns already in it is not used', a
 });
 
 test('oneshot-engine: a stable answer with the stop control still showing does not complete', async () => {
-  const { page } = makeSite({ timeline: [{ stop: true, body: answerTree.plain('Looks done') }] });
+  const { page } = makeSite({ timeline: [{ stop: true, idle: true, body: answerTree.plain('Looks done') }] });
   await assert.rejects(
     controllerFor(page).query({ prompt: 'probe', timeoutMs: 120 }),
     (error) => error.message === 'timeout_waiting_for_response' && error.data.stopVisible === true
@@ -371,7 +383,7 @@ test('oneshot-engine: a stable answer with the stop control still showing does n
 
 test('oneshot-engine: a progress-only label and thinking text outside the answer do not complete', async () => {
   const { page } = makeSite({
-    timeline: [{ stop: false, body: answerTree.plain('Thinking…'), thinking: 'Reasoning about the request at length' }]
+    timeline: [{ stop: false, idle: true, body: answerTree.plain('Thinking…'), thinking: 'Reasoning about the request at length' }]
   });
   await assert.rejects(
     controllerFor(page).query({ prompt: 'probe', timeoutMs: 120 }),
@@ -450,16 +462,26 @@ test('oneshot-engine: compareStagedPrompt folds whitespace for rich text and nam
   assert.equal(diff.firstDifference.expected.startsWith('beta'), true);
 });
 
-test('oneshot-engine: matchAttachments matches by name, falls back to count, and waits on pending chips', () => {
+test('oneshot-engine: matchAttachments matches full names, then stem and extension, then a unique stem, never by count', () => {
   const expected = [{ name: 'brief.pdf' }, { name: 'a-very-long-client-profile.docx' }];
-  const byName = matchAttachments(expected, { items: [] }, { items: [{ text: 'brief.pdf 12KB' }, { text: 'a-very-long-client-profile.docx' }] });
+  const byName = matchAttachments(expected, { items: [{ text: 'brief.pdf 12KB' }, { text: 'a-very-long-client-profile.docx' }] });
   assert.equal(byName.done, true);
-  const shortened = matchAttachments(expected, { items: [] }, { items: [{ text: 'brief.pdf' }, { text: 'a-very-lon….docx' }] });
-  assert.deepEqual(shortened.report.map((item) => item.matchedBy), ['name', 'count']);
-  const pending = matchAttachments(expected, { items: [] }, { items: [{ text: 'brief.pdf', pending: true }, { text: 'x.docx' }] });
+  // Kimi and Gemini show the stem with the extension apart ("probe-brief PDF").
+  const shown = matchAttachments([{ name: 'probe-brief.pdf' }, { name: 'probe-notes.docx' }], { items: [{ text: 'probe-brief PDF 622 Bytes' }, { text: 'DOCX probe-notes' }] });
+  assert.deepEqual(shown.report.map((item) => item.matchedBy), ['stem-and-extension', 'stem-and-extension']);
+  // A chip that names neither file is not counted as either.
+  const shortened = matchAttachments(expected, { items: [{ text: 'brief.pdf' }, { text: 'a-very-lon….docx' }] });
+  assert.deepEqual(shortened.report.map((item) => item.matchedBy), ['name', null]);
+  assert.equal(shortened.done, false);
+  // Two files with one stem: the docx chip cannot stand for the missing pdf.
+  const sameStem = matchAttachments([{ name: 'case-brief.pdf' }, { name: 'case-brief.docx' }], { items: [{ text: 'case-brief DOCX' }] });
+  assert.deepEqual(sameStem.report.map((item) => item.matchedBy), [null, 'stem-and-extension']);
+  assert.equal(sameStem.done, false);
+  // A chip showing only a shared stem names neither file for certain.
+  const bareStem = matchAttachments([{ name: 'case-brief.pdf' }, { name: 'case-brief.docx' }], { items: [{ text: 'case-brief' }] });
+  assert.deepEqual(bareStem.report.map((item) => item.matchedBy), [null, null]);
+  const pending = matchAttachments(expected, { items: [{ text: 'brief.pdf', pending: true }, { text: 'a-very-long-client-profile.docx' }] });
   assert.equal(pending.done, false);
-  const extra = matchAttachments(expected, { items: [] }, { items: [{ text: 'brief.pdf' }, { text: 'one' }, { text: 'two' }] });
-  assert.equal(extra.done, false);
 });
 
 test('oneshot-engine: promptDeliveryFor reports lines missing from the recorded user turn', () => {
@@ -515,4 +537,214 @@ test('oneshot-engine: modeIntent none leaves the page selection alone, as it doe
   const result = await controllerFor(page, adapterFor({ onApplyMode: () => { applied += 1; } })).query({ prompt: 'probe', modeIntent: 'none', timeoutMs: 2_000 });
   assert.equal(applied, 0);
   assert.equal(result.meta.requestedModeIntent, null);
+});
+
+test('oneshot-engine: an answer that pauses with no stop control does not complete until the turn shows its idle signal', async () => {
+  const { page } = makeSite({
+    timeline: [
+      { stop: true, body: answerTree.plain('Part one.') },
+      // A search pause: the stop control is gone but the answer is not done.
+      ...Array.from({ length: 30 }, () => ({ stop: false, idle: false, body: answerTree.plain('Part one.') })),
+      { stop: false, idle: true, body: answerTree.plain('Part one. Part two.') }
+    ]
+  });
+  const result = await controllerFor(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(result.text, 'Part one. Part two.');
+});
+
+test('oneshot-engine: a stop branch that matches only a hidden node falls through to a visible one', async () => {
+  const profile = parseOneShotProfile({
+    schemaVersion: 1,
+    vendorId: 'testsite',
+    contractVersion: 'test',
+    capabilities: [],
+    anchors: [...TEST_PROFILE.anchors.values()].map((item) => (item.id === 'stop-button'
+      ? { id: 'stop-button', branches: [
+        { id: 'stop-hidden', kind: 'canonical', source: 'guess', selector: '#stop-hidden' },
+        { id: 'stop-shown', kind: 'legacy', source: 'guess', selector: '#stop' }
+      ] }
+      : { id: item.id, branches: item.branches.map((branch) => ({ ...branch })) }))
+  }, { vendorId: 'testsite', requiredAnchorIds: ONESHOT_REQUIRED_ANCHORS });
+  const { page } = makeSite({ timeline: [{ stop: true, idle: true, body: answerTree.plain('Looks done') }] });
+  const render = page.render;
+  const adapter = { ...adapterFor(), profile };
+  const originalEvaluate = page.evaluate;
+  page.evaluate = async (js) => {
+    page.state.hiddenStop = true;
+    return await originalEvaluate(js);
+  };
+  void render;
+  await assert.rejects(
+    controllerFor(page, adapter).query({ prompt: 'probe', timeoutMs: 150 }),
+    (error) => error.message === 'timeout_waiting_for_response' && error.data.stopVisible === true
+  );
+});
+
+test('oneshot-engine: an assistant turn that appeared before Send is not taken as the answer', async () => {
+  const { state, page } = makeSite({
+    // The page adds an assistant turn once the files are in, before the prompt.
+    onFiles: (site, list) => {
+      for (const file of list) site.chips.push({ name: file.name });
+      site.turns.push({ role: 'assistant', body: answerTree.plain('Files received.'), idle: true });
+    }
+  });
+  const files = await tempFiles(['brief.pdf']);
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', attachments: files, timeoutMs: 150 }),
+    (error) => error.message === 'timeout_waiting_for_response'
+  );
+  assert.equal(state.sendClicks, 1);
+});
+
+test('oneshot-engine: a refusal notice after Send ends the run as send_refused', async () => {
+  const { page } = makeSite({
+    onSend: (site) => {
+      site.sendClicks += 1;
+      site.notice = 'Too many people are chatting right now.';
+    }
+  });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 400 }),
+    (error) => error.message === 'send_refused' && /Too many people/.test(error.data.notice)
+  );
+});
+
+test('oneshot-engine: an emptied composer alone is not taken as a sent prompt', async () => {
+  const { page } = makeSite({
+    onSend: (site) => {
+      site.sendClicks += 1;
+      site.composerText = '';
+    }
+  });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 400 }),
+    (error) => error.message === 'send_not_triggered'
+  );
+});
+
+test('oneshot-engine: a page that sends on Shift+Return fails as prompt_sent_early', async () => {
+  const { state, page } = makeSite();
+  const sendKey = page.sendKey;
+  page.sendKey = async (key, options) => {
+    if (key === 'Return' && options?.modifiers?.includes('shift')) {
+      state.turns.push({ role: 'user', text: state.composerText });
+      state.composerText = '';
+      return;
+    }
+    await sendKey(key, options);
+  };
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'line one\nline two', timeoutMs: 400 }),
+    (error) => error.message === 'prompt_sent_early'
+  );
+  assert.equal(state.sendClicks, 0);
+});
+
+test('oneshot-engine: attachments and mode are read again just before Send', async () => {
+  const files = await tempFiles(['brief.pdf']);
+  const cleared = makeSite();
+  const insertText = cleared.page.insertText;
+  cleared.page.insertText = async (text) => {
+    cleared.state.chips = [];
+    await insertText(text);
+  };
+  await assert.rejects(
+    controllerFor(cleared.page).query({ prompt: 'probe', attachments: files, timeoutMs: 400 }),
+    (error) => error.message === 'attachment_not_shown' && error.data.stage === 'before_send' && error.data.missing[0] === 'brief.pdf'
+  );
+  assert.equal(cleared.state.sendClicks, 0);
+
+  const reset = makeSite();
+  await assert.rejects(
+    controllerFor(reset.page, adapterFor({ labelBeforeSend: () => 'Fast model' })).query({ prompt: 'probe', modeIntent: 'strong', timeoutMs: 400 }),
+    (error) => error.message === 'mode_intent_unavailable' && error.data.reason === 'mode_changed_before_send'
+  );
+  assert.equal(reset.state.sendClicks, 0);
+});
+
+test('oneshot-engine: a model that changed between Send and the answer is recorded as downgraded', () => {
+  const mode = { intent: 'strong' };
+  const modeApplied = { intent: 'strong', shown: { model: 'Pro' } };
+  assert.deepEqual(modeVerificationFor({ mode, modeApplied, answerSettings: { model: 'Pro' } }), {});
+  assert.deepEqual(modeVerificationFor({ mode, modeApplied, answerSettings: { model: 'Fast' } }), {
+    modeVerification: 'unverified',
+    modeVerificationReason: 'mode_changed_after_send',
+    degradedFrom: { modeIntent: 'strong', shownBeforeSend: 'Pro', shownAfterAnswer: 'Fast' }
+  });
+  assert.deepEqual(modeVerificationFor({ mode, modeApplied, answerSettings: { unreadReason: 'menu_missing' } }), {
+    modeVerification: 'unverified',
+    modeVerificationReason: 'menu_missing'
+  });
+});
+
+test('oneshot-engine: intents resolve as own properties only', async () => {
+  const { page } = makeSite();
+  for (const intent of ['constructor', '__proto__', 'toString']) {
+    await assert.rejects(controllerFor(page).query({ prompt: 'probe', modeIntent: intent, timeoutMs: 400 }), /mode_intent_unsupported/);
+  }
+  assert.equal(page.navigations.length, 0);
+});
+
+test('oneshot-engine: a failure while preparing sources keeps the finished answer', async () => {
+  const { page } = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  const adapter = adapterFor();
+  adapter.prepareCapture = async () => { throw new Error('click_target_missing'); };
+  const result = await controllerFor(page, adapter).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(result.text, 'Hello');
+  assert.deepEqual(result.meta.captureNotes, { failed: true, reason: 'click_target_missing' });
+});
+
+test('oneshot-engine: a failure after Send records the chat that holds the reply', async () => {
+  const { page } = makeSite({ timeline: stableAnswer(answerTree.plain('Partial text'), { error: true }) });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 2_000 }),
+    (error) => error.message === 'provider_response_error' && error.data.conversationUrl === 'https://site.example/new'
+  );
+});
+
+test('oneshot-engine: panel sources come from the answer turn and the named panel only', async () => {
+  const { page } = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  const render = page.evaluate;
+  page.evaluate = async (js) => {
+    page.state.extraRows = [
+      el('div', { matches: ['#source-panel'], children: [el('a', { matches: ['.source-link', 'a[href]'], attrs: { href: 'https://panel.example/cited' }, text: 'Cited page' })] }),
+      el('div', { children: [el('a', { matches: ['.source-link', 'a[href]'], attrs: { href: 'https://elsewhere.example/settings' }, text: 'Preferences' })] })
+    ];
+    return await render(js);
+  };
+  const result = await controllerFor(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.sources.map((item) => item.url), ['https://panel.example/cited']);
+});
+
+test('oneshot-engine: tool use keeps three states apart and never writes an empty list for unread', () => {
+  assert.deepEqual(normalizeToolUse({ state: 'none' }), { state: 'none', reason: null, steps: [] });
+  assert.deepEqual(normalizeToolUse({ state: 'unread', reason: 'expander_missing' }), { state: 'unread', reason: 'expander_missing', steps: null });
+  assert.deepEqual(normalizeToolUse(undefined), { state: 'unread', reason: 'tool_use_unread', steps: null });
+  assert.deepEqual(normalizeToolUse({ state: 'shown', steps: [] }), { state: 'unread', reason: 'tool_use_shown_without_steps', steps: null });
+  const shown = normalizeToolUse({ state: 'shown', steps: [{ tool: 'web_search', title: ' Found 2 web pages ', count: 2, pages: [{ url: 'https://a.example/', title: 'A' }, { url: '' }] }] });
+  assert.deepEqual(shown, { state: 'shown', reason: null, steps: [{ tool: 'web_search', title: 'Found 2 web pages', query: null, count: 2, pages: [{ url: 'https://a.example/', title: 'A', site: null }] }] });
+  assert.deepEqual(toolUseCounts(shown), { state: 'shown', reason: null, stepCount: 1, searchCount: 1, pageCount: 1 });
+  assert.deepEqual(toolUseCounts(normalizeToolUse({ state: 'unread', reason: 'x' })), { state: 'unread', reason: 'x', stepCount: null, searchCount: null, pageCount: null });
+});
+
+test('oneshot-engine: an adapter without a tool-use reader records tool use as unread with that reason', async () => {
+  const { page } = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  const result = await controllerFor(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.toolUse, { state: 'unread', reason: 'adapter_has_no_tool_use_reader', steps: null });
+});
+
+test('oneshot-engine: a chip whose child nodes match the chip selector counts as one chip', async () => {
+  const { runInDocument, createDocument } = await import('./fixtures/oneshot-fake-dom.mjs');
+  const { pageScript, readAttachments } = await import('../oneshot-page-scripts.mjs');
+  const chip = el('div', {
+    matches: ['[class*="file-card"]'],
+    children: [
+      el('span', { matches: ['[class*="file-card"]'], text: 'a.pdf' }),
+      el('span', { matches: ['[class*="file-card"]'], text: 'PDF 12 KB' })
+    ]
+  });
+  const document = createDocument({ body: [chip] });
+  const shown = await runInDocument(pageScript(readAttachments, { attachmentItem: ['[class*="file-card"]'], attachmentPending: [], attachmentError: [] }), document);
+  assert.equal(shown.items.length, 1);
+  assert.equal(shown.items[0].text, 'a.pdfPDF 12 KB');
 });

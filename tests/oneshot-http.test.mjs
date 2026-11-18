@@ -91,6 +91,10 @@ test('oneshot-http: a Kimi query writes the Markdown answer, plain text, sources
       modeApplied: { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High' } },
       answerSettings: { model: 'K3.1 Pro', mode: 'Thinking effort: High', source: 'composer-model-menu-after-answer', unreadReason: null },
       attachments: [{ name: 'brief.pdf', bytes: 10, sha256: 'a'.repeat(64), matchedBy: 'name' }],
+      toolUse: { state: 'shown', steps: [{ tool: 'web_search', title: 'Found 2 web pages', count: 2, pages: [
+        { url: 'https://example.org/a', title: 'A', site: 'example.org' },
+        { url: 'https://news.example.com/b', title: 'B', site: 'news.example.com' }
+      ] }] },
       promptDelivery: { checked: true, complete: true, missingLineCount: 0 }
     }
   }));
@@ -120,7 +124,17 @@ test('oneshot-http: a Kimi query writes the Markdown answer, plain text, sources
   assert.equal(path.basename(manifest.sourcesPath), 'sources.json');
   assert.equal(manifest.sourceCount, 2);
   assert.deepEqual(manifest.answerSettings, { model: 'K3.1 Pro', mode: 'Thinking effort: High', source: 'composer-model-menu-after-answer', unreadReason: null });
-  assert.deepEqual(manifest.files.map((file) => file.role).sort(), ['assistant_response', 'assistant_response_text', 'metadata', 'sources']);
+  assert.deepEqual(manifest.files.map((file) => file.role).sort(), ['assistant_response', 'assistant_response_text', 'metadata', 'sources', 'tool_use']);
+  assert.deepEqual(manifest.attachments, [{ name: 'brief.pdf', bytes: 10, sha256: 'a'.repeat(64), matchedBy: 'name' }]);
+  assert.deepEqual(manifest.toolUse, { state: 'shown', reason: null, stepCount: 1, searchCount: 1, pageCount: 2 });
+  assert.deepEqual(JSON.parse(await fs.readFile(manifest.toolUsePath, 'utf8')), {
+    state: 'shown',
+    reason: null,
+    steps: [{ tool: 'web_search', title: 'Found 2 web pages', query: null, count: 2, pages: [
+      { url: 'https://example.org/a', title: 'A', site: 'example.org' },
+      { url: 'https://news.example.com/b', title: 'B', site: 'news.example.com' }
+    ] }]
+  });
   assert.match(await fs.readFile(manifest.responsePath, 'utf8'), /^Answer with \[a link\]\(https:\/\/example\.org\/a\)\./);
   assert.equal(await fs.readFile(manifest.responseTextPath, 'utf8'), 'Answer with a link.\n');
   const sources = JSON.parse(await fs.readFile(manifest.sourcesPath, 'utf8')).sources;
@@ -205,4 +219,64 @@ test('oneshot-http: a Kimi answer whose model the page did not show is labeled m
   const fetched = await req({ port, method: 'POST', pth: '/runs/get', body: { runId: response.data.runId } });
   assert.equal(fetched.data.run.label, 'Response received (mode unverified)');
   assert.equal(fetched.data.run.outputManifest.modeVerificationReason, 'model_menu_missing');
+});
+
+test('oneshot-http: an unread tool use is saved as unread with its reason, never as an empty list', async (t) => {
+  const controller = engineController(async () => ({
+    text: 'Answer',
+    meta: { oneShot: true, completionEvidence: { source: 'assistant-node', observedAt: 1 }, plainText: 'Answer', sources: [], toolUse: { state: 'unread', reason: 'tool_flow_did_not_expand', steps: null } }
+  }));
+  const { port } = await startWithController(t, controller);
+  const response = await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi' } });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  const run = (await req({ port, method: 'POST', pth: '/runs/get', body: { runId: response.data.runId } })).data.run;
+  assert.deepEqual(run.outputManifest.toolUse, { state: 'unread', reason: 'tool_flow_did_not_expand', stepCount: null, searchCount: null, pageCount: null });
+  assert.deepEqual(JSON.parse(await fs.readFile(run.outputManifest.toolUsePath, 'utf8')), { state: 'unread', reason: 'tool_flow_did_not_expand', steps: null });
+});
+
+test('oneshot-http: a model that changed after Send is labeled mode downgraded', async (t) => {
+  const controller = engineController(async () => ({
+    text: 'Answer',
+    meta: {
+      oneShot: true,
+      completionEvidence: { source: 'assistant-node', observedAt: 1 },
+      plainText: 'Answer',
+      sources: [],
+      modeApplied: { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High' } },
+      answerSettings: { model: 'Instant', mode: 'Thinking effort: High', source: 'composer-model-menu-after-answer', unreadReason: null },
+      modeVerification: 'unverified',
+      modeVerificationReason: 'mode_changed_after_send',
+      degradedFrom: { modeIntent: 'k3.1-pro', shownBeforeSend: 'K3.1 Pro', shownAfterAnswer: 'Instant' }
+    }
+  }));
+  const { port } = await startWithController(t, controller);
+  const response = await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi', modeIntent: 'k3.1-pro' } });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  const run = (await req({ port, method: 'POST', pth: '/runs/get', body: { runId: response.data.runId } })).data.run;
+  assert.equal(run.label, 'Response received (mode unverified; mode downgraded)');
+  assert.deepEqual(run.degradedFrom, { modeIntent: 'k3.1-pro', shownBeforeSend: 'K3.1 Pro', shownAfterAnswer: 'Instant' });
+});
+
+test('oneshot-http: a failure after Send keeps the chat URL on the run', async (t) => {
+  const controller = engineController(async () => {
+    const error = new Error('answer_capture_failed');
+    error.data = { reason: 'answer_empty', conversationUrl: 'https://www.kimi.ai/chat/held-reply' };
+    throw error;
+  });
+  const { port } = await startWithController(t, controller);
+  const response = await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi' } });
+  assert.equal(response.status, 409);
+  const run = (await req({ port, method: 'POST', pth: '/runs/list', body: {} })).data.runs[0];
+  assert.equal(run.label, 'Answer not captured');
+  assert.equal(run.conversationUrl, 'https://www.kimi.ai/chat/held-reply');
+});
+
+test('oneshot-http: /send on a Kimi tab is refused before any run is recorded', async (t) => {
+  const controller = engineController(async () => { throw new Error('query must not run'); });
+  const { port } = await startWithController(t, controller);
+  const response = await req({ port, method: 'POST', pth: '/send', body: { text: 'follow up', vendorId: 'kimi', key: 'bench-kimi' } });
+  assert.equal(response.status, 400);
+  assert.equal(response.data.error, 'oneshot_send_unsupported');
+  const listed = await req({ port, method: 'POST', pth: '/runs/list', body: {} });
+  assert.equal(listed.data.runs.length, 0);
 });

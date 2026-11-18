@@ -53,7 +53,8 @@ const MIME_BY_EXTENSION = Object.freeze({
 });
 
 // The engine's own error codes, with the HTTP status and run outcome each one
-// gets. Every code except the last three ends the run before anything is sent.
+// gets. Every code whose detail says "No prompt was sent" ends the run before
+// Send; the others happen after it and record the chat's URL.
 export const ONESHOT_ERRORS = Object.freeze({
   mode_intent_unsupported: {
     status: 400,
@@ -66,6 +67,7 @@ export const ONESHOT_ERRORS = Object.freeze({
     detail: (d) => `${d?.vendorId || 'This site'} runs every query in a fresh chat; ${(d?.fields || []).join(', ') || 'a chat location'} cannot be used. No prompt was sent.`
   },
   image_generation_unsupported: { status: 400, label: 'Image generation unsupported', detail: () => 'This site runs text queries only. No prompt was sent.' },
+  oneshot_send_unsupported: { status: 400, label: 'Send not supported', detail: (d) => `${d?.vendorId || 'This site'} answers one query per fresh chat; use agentify_query. Nothing was sent.` },
   attachment_unreadable: { status: 400, attachment: true, label: 'Attachment unreadable', detail: (d) => `An attachment could not be read from disk${d?.file ? `: ${d.file}` : ''}. No prompt was sent.` },
   attachment_too_large: { status: 400, attachment: true, label: 'Attachment too large', detail: () => 'The attachments exceed the size limit. No prompt was sent.' },
   mode_intent_unavailable: {
@@ -75,7 +77,9 @@ export const ONESHOT_ERRORS = Object.freeze({
   },
   fresh_chat_unavailable: { status: 409, label: 'Fresh chat unavailable', detail: () => 'The provider did not open an empty chat. No prompt was sent.' },
   attachment_input_missing: { status: 409, attachment: true, label: 'Attachment not sent', detail: () => 'No file input was found on the page. No prompt was sent.' },
-  attachment_not_shown: { status: 409, attachment: true, label: 'Attachment not shown', detail: () => 'The page never showed every attached file as uploaded. No prompt was sent.' },
+  attachment_not_shown: { status: 409, attachment: true, label: 'Attachment not shown', detail: (d) => `The page did not show every attached file as uploaded${d?.stage === 'before_send' ? ' when the prompt was ready to send' : ''}. No prompt was sent.` },
+  prompt_sent_early: { status: 409, label: 'Prompt sent while typing', detail: () => 'The page sent part of the prompt before typing finished; the chat holds an incomplete prompt.' },
+  send_refused: { status: 409, label: 'Send refused', detail: (d) => `The provider refused the send${d?.notice ? `: "${d.notice}"` : ''}. No answer was produced.` },
   click_target_missing: { status: 409, label: 'Page control not found', detail: () => 'A control the run needed had no size on the page. No prompt was sent.' },
   answer_capture_failed: { status: 409, label: 'Answer not captured', detail: () => 'The answer finished but could not be read from the page.' },
   provider_response_error: { status: 409, label: 'Provider error', detail: () => 'The provider showed an error in place of an answer.' }
@@ -154,6 +158,25 @@ export function promptDeliveryFor(prompt, recorded) {
   };
 }
 
+// What the run can say about its mode once the answer is in: unverified when
+// the page's setting could not be read, and downgraded when the page shows a
+// different model after the answer than it confirmed before Send.
+export function modeVerificationFor({ mode, modeApplied, answerSettings }) {
+  if (answerSettings?.unreadReason) {
+    return { modeVerification: 'unverified', modeVerificationReason: answerSettings.unreadReason };
+  }
+  const before = modeApplied?.shown?.model || null;
+  const after = answerSettings?.model || null;
+  if (mode && before && after && before !== after) {
+    return {
+      modeVerification: 'unverified',
+      modeVerificationReason: 'mode_changed_after_send',
+      degradedFrom: { modeIntent: mode.intent, shownBeforeSend: before, shownAfterAnswer: after }
+    };
+  }
+  return {};
+}
+
 // Citation and panel sources are listed under the answer; inline links are
 // already in its text. Returns the Markdown with that list appended.
 export function appendSourcesSection(markdown, sources) {
@@ -163,32 +186,79 @@ export function appendSourcesSection(markdown, sources) {
   return `${markdown}\n\n## Sources\n\n${lines.join('\n')}`;
 }
 
-// A file the page shows counts as uploaded when its chip names it and is not
-// pending. A site that shortens long names is matched by count instead: as
-// many new chips as files, none pending.
-export function matchAttachments(expected, before, after) {
-  const items = Array.isArray(after?.items) ? after.items : [];
-  const newCount = items.length - (Array.isArray(before?.items) ? before.items.length : 0);
+// Tool use is what the page showed of the model's searches and the pages it
+// read, never its reasoning text. Three states stay apart: "shown" with the
+// steps in page order, "none" when the page showed no tool use, and "unread"
+// with a reason when the adapter could not read it; "unread" never carries an
+// empty list that would read as "none".
+export function normalizeToolUse(read) {
+  const text = (value) => (typeof value === 'string' && value.trim() ? value.replace(/\s+/g, ' ').trim() : null);
+  if (read?.state === 'none') return { state: 'none', reason: null, steps: [] };
+  if (read?.state !== 'shown') return { state: 'unread', reason: text(read?.reason) || 'tool_use_unread', steps: null };
+  const steps = (Array.isArray(read.steps) ? read.steps : []).map((step) => ({
+    tool: text(step?.tool) || 'unknown',
+    title: text(step?.title),
+    query: text(step?.query),
+    count: Number.isFinite(step?.count) ? step.count : null,
+    pages: (Array.isArray(step?.pages) ? step.pages : [])
+      .filter((page) => text(page?.url))
+      .map((page) => ({ url: text(page.url), title: text(page.title), site: text(page.site) }))
+  }));
+  if (!steps.length) return { state: 'unread', reason: 'tool_use_shown_without_steps', steps: null };
+  return { state: 'shown', reason: null, steps };
+}
+
+export function toolUseCounts(toolUse) {
+  const steps = Array.isArray(toolUse?.steps) ? toolUse.steps : [];
+  return {
+    state: toolUse?.state || 'unread',
+    reason: toolUse?.reason || null,
+    stepCount: toolUse?.state === 'unread' ? null : steps.length,
+    searchCount: toolUse?.state === 'unread' ? null : steps.filter((step) => /search/i.test(step.tool) || step.query).length,
+    pageCount: toolUse?.state === 'unread' ? null : steps.reduce((sum, step) => sum + step.pages.length, 0)
+  };
+}
+
+// A file counts as uploaded when a chip names it and is not pending. Full
+// names are matched first; then a chip showing the file's stem and its
+// extension as a word (Kimi and Gemini drop the extension from the name and
+// show it apart); then the stem alone, only when no other expected file shares
+// it. A chip is used for one file at most.
+export function matchAttachments(expected, after) {
+  const items = (Array.isArray(after?.items) ? after.items : []).map((item) => ({ ...item, text: String(item.text || '').toLowerCase() }));
   const used = new Set();
-  const report = expected.map((file) => {
-    const name = file.name.toLowerCase();
-    const stem = name.replace(/\.[^.]+$/, '');
-    const index = items.findIndex((item, i) => {
-      if (used.has(i)) return false;
-      const text = String(item.text || '').toLowerCase();
-      return text.includes(name) || (stem.length >= 4 && text.includes(stem));
-    });
-    if (index === -1) return { ...file, matchedBy: null, pending: false };
+  const parts = (name) => {
+    const lower = name.toLowerCase();
+    const dot = lower.lastIndexOf('.');
+    return dot > 0 ? { stem: lower.slice(0, dot), ext: lower.slice(dot + 1) } : { stem: lower, ext: '' };
+  };
+  const report = expected.map((file) => ({ ...file, matchedBy: null, pending: false }));
+  const claim = (entry, accept, how) => {
+    const index = items.findIndex((item, i) => !used.has(i) && accept(item.text));
+    if (index === -1) return;
     used.add(index);
-    return { ...file, matchedBy: 'name', pending: !!items[index].pending };
-  });
-  const anyPending = items.some((item) => item.pending);
-  const unmatched = report.filter((item) => !item.matchedBy);
-  if (unmatched.length && newCount === expected.length && !anyPending) {
-    for (const item of unmatched) item.matchedBy = 'count';
+    entry.matchedBy = how;
+    entry.pending = !!items[index].pending;
+  };
+  for (const entry of report) claim(entry, (text) => text.includes(entry.name.toLowerCase()), 'name');
+  for (const entry of report) {
+    if (entry.matchedBy) continue;
+    const { stem, ext } = parts(entry.name);
+    if (stem.length < 4 || !/^[a-z0-9]+$/.test(ext)) continue;
+    const extWord = new RegExp(`(^|[^a-z0-9])${ext}([^a-z0-9]|$)`);
+    claim(entry, (text) => text.includes(stem) && extWord.test(text), 'stem-and-extension');
   }
-  const done = report.every((item) => item.matchedBy && !item.pending);
-  return { done, report, anyPending };
+  for (const entry of report) {
+    if (entry.matchedBy) continue;
+    const { stem } = parts(entry.name);
+    if (stem.length < 4 || report.some((other) => other !== entry && parts(other.name).stem === stem)) continue;
+    claim(entry, (text) => text.includes(stem), 'stem');
+  }
+  return {
+    done: report.every((entry) => entry.matchedBy && !entry.pending),
+    report,
+    anyPending: items.some((item) => item.pending)
+  };
 }
 
 export class OneShotController {
@@ -235,7 +305,10 @@ export class OneShotController {
       citation: sel('citation'),
       sourceItem: sel('source-item'),
       signedOut: sel('signed-out-marker'),
-      termsGate: sel('terms-gate')
+      termsGate: sel('terms-gate'),
+      idle: sel('idle-signal'),
+      notice: sel('blocking-notice'),
+      sourcePanel: sel('source-panel')
     });
   }
 
@@ -366,22 +439,29 @@ export class OneShotController {
     const mode = this.#resolveModeIntent(modeIntent);
     const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress };
     this.currentRun = run;
+    let sent = false;
     try {
       const freshChat = await this.#openFreshChat({ mode, timeoutMs });
       const modeApplied = mode ? await this.#applyMode(mode) : null;
       const attachmentReport = await this.#attachFiles(attachments);
       const baseline = await this.#eval(readTurns);
-      await this.#typePrompt(prompt);
+      await this.#typePrompt(prompt, baseline);
+      await this.#recheckBeforeSend({ modeApplied, attachmentReport });
       const sendDebug = await this.#clickSend(baseline);
+      sent = true;
       await this.#waitForAnswer({ baseline, timeoutMs });
-      if (typeof this.adapter.prepareCapture === 'function') await this.adapter.prepareCapture(this.#adapterContext());
+      // Opening citation cards only adds sources; a failure there must not
+      // cost the finished answer.
+      const captureNotes = await this.#prepareCapture();
       const capture = await this.#eval(captureAnswer);
       if (!capture?.found || !String(capture.markdown || '').trim()) {
         throw namedError('answer_capture_failed', { reason: capture?.reason || 'answer_empty' });
       }
+      const toolUse = await this.#readToolUse();
       const promptDelivery = await this.#readPromptDelivery(prompt);
       const answerSettings = await this.#readAnswerSettings();
       const conversationUrl = await this.getUrl().catch(() => null);
+      const verification = modeVerificationFor({ mode, modeApplied, answerSettings });
       await this.#emitProgress({ phase: 'answer_captured' });
       return {
         text: appendSourcesSection(capture.markdown, capture.sources),
@@ -393,17 +473,25 @@ export class OneShotController {
           freshChatUrl: freshChat.url,
           plainText: capture.text,
           sources: capture.sources,
+          toolUse,
           requestedModeIntent: mode?.intent || null,
           modeApplied,
           answerSettings,
-          // The HTTP layer labels a run "mode unverified" from these fields.
-          ...(answerSettings.unreadReason ? { modeVerification: 'unverified', modeVerificationReason: answerSettings.unreadReason } : {}),
+          ...verification,
           attachments: attachmentReport,
           promptDelivery,
           sendDebug,
+          ...(captureNotes ? { captureNotes } : {}),
           profileContractVersion: this.adapter.profile.contractVersion
         }
       };
+    } catch (error) {
+      // After Send the provider holds a reply; the record must say where.
+      if (sent && error && typeof error === 'object') {
+        const conversationUrl = await this.getUrl().catch(() => null);
+        error.data = { ...(error.data || {}), conversationUrl: error.data?.conversationUrl || conversationUrl };
+      }
+      throw error;
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
@@ -413,7 +501,9 @@ export class OneShotController {
     const requested = typeof modeIntent === 'string' ? modeIntent.trim() : '';
     // "none" leaves the page's selection as it is, as it does for ChatGPT.
     if (!requested || requested.toLowerCase() === 'none') return null;
-    const definition = this.adapter.modeIntents?.[requested.toLowerCase()];
+    const key = requested.toLowerCase();
+    // Own properties only: "constructor" must not resolve through the prototype.
+    const definition = Object.hasOwn(this.adapter.modeIntents || {}, key) ? this.adapter.modeIntents[key] : null;
     if (!definition) {
       throw namedError('mode_intent_unsupported', {
         vendorId: this.vendorId,
@@ -421,7 +511,7 @@ export class OneShotController {
         supported: Object.keys(this.adapter.modeIntents || {})
       });
     }
-    return { intent: requested.toLowerCase(), ...definition };
+    return { intent: key, ...definition };
   }
 
   async #openFreshChat({ mode, timeoutMs }) {
@@ -469,7 +559,7 @@ export class OneShotController {
       });
     }
     await this.#emitProgress({ phase: 'mode_intent_confirmed', modeIntent: mode.intent });
-    return { intent: mode.intent, shown: applied.shown || null };
+    return { intent: mode.intent, shown: applied.shown || null, label: applied.label ?? null };
   }
 
   async #attachFiles(files) {
@@ -502,7 +592,6 @@ export class OneShotController {
     const revealed = typeof this.adapter.revealFileInput === 'function'
       ? await this.adapter.revealFileInput(this.#adapterContext())
       : null;
-    const before = await this.#eval(readAttachments);
     let injected = await this.#eval(injectFiles, { ...this.selectors, files: prepared.map(({ name, mime, data }) => ({ name, mime, data })) });
     if (!injected?.ok && injected?.reason === 'file_input_single') {
       for (const file of prepared) {
@@ -515,7 +604,7 @@ export class OneShotController {
       throw namedError('attachment_input_missing', { reason: injected?.reason || 'file_input_not_found', files: expected.map((item) => item.name) });
     }
     const start = Date.now();
-    let after = before;
+    let after = null;
     let match = null;
     while (Date.now() - start < this.timings.uploadMs) {
       this.#throwIfStopRequested();
@@ -532,7 +621,7 @@ export class OneShotController {
           files: expected.map((item) => item.name)
         });
       }
-      match = matchAttachments(expected, before, after);
+      match = matchAttachments(expected, after);
       if (match.done) {
         await this.#emitProgress({ attachmentDebug: { stage: 'uploaded', files: match.report.map((item) => item.name) } });
         return match.report.map(({ name, bytes, sha256, matchedBy }) => ({ name, bytes, sha256, matchedBy }));
@@ -549,7 +638,7 @@ export class OneShotController {
     });
   }
 
-  async #typePrompt(prompt) {
+  async #typePrompt(prompt, baseline) {
     this.#throwIfStopRequested();
     await this.#emitProgress({ phase: 'typing_prompt' });
     const composer = await this.#eval(readComposer);
@@ -566,10 +655,51 @@ export class OneShotController {
       if (lines[i]) await this.page.insertText(lines[i]);
       if (i < lines.length - 1) await this.page.sendKey('Return', { modifiers: ['shift'] });
     }
+    // Shift+Return must add a line, never send; a user turn that appeared
+    // while typing means part of the prompt went out.
+    const afterTyping = await this.#eval(readTurns);
+    if (afterTyping.userTurns > baseline.userTurns) throw namedError('prompt_sent_early', { userTurns: afterTyping.userTurns });
     const staged = await this.#eval(readComposer);
     if (!staged?.found) throw namedError('missing_staged_prompt', { reason: 'composer_not_found' });
     const mismatch = compareStagedPrompt(prompt, staged.text, { usesValue: staged.usesValue });
     if (mismatch) throw namedError('prompt_staging_failed', mismatch);
+  }
+
+  // Typing can reset a picker or clear attachment chips, so both are read
+  // again right before Send.
+  async #recheckBeforeSend({ modeApplied, attachmentReport }) {
+    if (modeApplied?.label != null && typeof this.adapter.readModeLabel === 'function') {
+      const label = await this.adapter.readModeLabel(this.#adapterContext()).catch(() => null);
+      if (label !== modeApplied.label) {
+        throw namedError('mode_intent_unavailable', {
+          vendorId: this.vendorId,
+          modeIntent: modeApplied.intent,
+          reason: 'mode_changed_before_send',
+          shown: { label }
+        });
+      }
+    }
+    if (attachmentReport.length) {
+      const expected = attachmentReport.map(({ name, bytes, sha256 }) => ({ name, bytes, sha256 }));
+      const match = matchAttachments(expected, await this.#eval(readAttachments));
+      if (!match.done) {
+        throw namedError('attachment_not_shown', {
+          stage: 'before_send',
+          expected: expected.map((item) => item.name),
+          missing: match.report.filter((item) => !item.matchedBy || item.pending).map((item) => item.name)
+        });
+      }
+    }
+  }
+
+  async #prepareCapture() {
+    if (typeof this.adapter.prepareCapture !== 'function') return null;
+    try {
+      return await this.adapter.prepareCapture(this.#adapterContext());
+    } catch (error) {
+      if (error?.message === 'query_aborted') throw error;
+      return { failed: true, reason: error?.message || 'prepare_capture_failed' };
+    }
   }
 
   async #clickSend(baseline) {
@@ -589,17 +719,21 @@ export class OneShotController {
     const ackStart = Date.now();
     while (Date.now() - ackStart < this.timings.sendAckMs) {
       await sleep(this.timings.pollMs);
+      // Only a new user turn or a stop control proves the send; a composer can
+      // empty for a moment and refill when the provider refuses (Kimi did).
       const turns = await this.#eval(readTurns);
       if (turns.userTurns > baseline.userTurns) return { acknowledgedBy: 'user_turn' };
       if (turns.stopVisible) return { acknowledgedBy: 'stop_control' };
-      if (turns.composerEmpty) return { acknowledgedBy: 'composer_cleared' };
+      if (turns.notice) throw namedError('send_refused', { notice: turns.notice });
     }
     throw namedError('send_not_triggered', { sendDebug: { found: true, enabled: true, clicked: true } });
   }
 
   // Complete only on an assistant node that did not exist before send, whose
-  // answer text is not a progress label, has stopped changing for stableMs,
-  // with no stop control showing and no provider error in the turn.
+  // answer text is not a progress label and has stopped changing for
+  // stableMs, with no stop control showing, the turn's idle signal showing,
+  // and no provider error in the turn. A missing stop control alone is not
+  // proof the answer is done: a search pause can look like that.
   async #waitForAnswer({ baseline, timeoutMs }) {
     await this.#emitProgress({ phase: 'waiting_for_response' });
     const start = Date.now();
@@ -615,7 +749,7 @@ export class OneShotController {
       // more than the baseline count (ADR 0009's rule, without message ids).
       const isNew = !!answer && last.assistantTurns > baseline.assistantTurns;
       const text = String(answer?.answerText || '');
-      if (!isNew || last.stopVisible || this.#isProgressOnly(text)) {
+      if (!isNew || last.stopVisible || !answer.idle || this.#isProgressOnly(text)) {
         lastText = null;
         stableSince = null;
         continue;
@@ -635,6 +769,7 @@ export class OneShotController {
       conversationUrl: await this.getUrl().catch(() => null),
       assistantTurns: last?.assistantTurns ?? null,
       stopVisible: last?.stopVisible ?? null,
+      idleVisible: last?.lastAssistant?.idle ?? null,
       answerChars: String(last?.lastAssistant?.answerText || '').length
     });
   }
@@ -652,6 +787,20 @@ export class OneShotController {
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), this.timings.promptDeliveryMs); })
     ]).finally(() => clearTimeout(timer));
     return promptDeliveryFor(prompt, recorded);
+  }
+
+  // Read after the answer is captured, so opening tool-use expanders cannot
+  // change the answer text.
+  async #readToolUse() {
+    if (typeof this.adapter.readToolUse !== 'function') {
+      return normalizeToolUse({ state: 'unread', reason: 'adapter_has_no_tool_use_reader' });
+    }
+    try {
+      return normalizeToolUse(await this.adapter.readToolUse(this.#adapterContext()));
+    } catch (error) {
+      if (error?.message === 'query_aborted') throw error;
+      return normalizeToolUse({ state: 'unread', reason: error?.message || 'tool_use_read_failed' });
+    }
   }
 
   // What the page shows as the model and mode once the answer is in. The
