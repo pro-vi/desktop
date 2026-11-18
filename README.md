@@ -18,7 +18,7 @@ Agentify Desktop is a local-first control center for AI work: connect your real,
 - `grok.com`
 
 **Planned**
-- `www.kimi.com` (mainland China accounts) and `www.kimi.ai` (international accounts): one Kimi app on two sites with separate sign-in. Tabs open; queries are not built yet.
+- `www.kimi.ai` (international accounts) and `www.kimi.com` (mainland China accounts): one Kimi app on two sites with separate sign-in. Queries run on the one-shot engine (see [One-shot sites](#one-shot-sites-gemini-and-kimi)); not yet verified with a live send.
 - Additional vendor profiles via `vendors.json` + selector overrides.
 
 ## CAPTCHA policy (human-in-the-loop)
@@ -65,7 +65,7 @@ npm run start
 
 The Agentify Control Center opens. Use it to:
 - Show/hide tabs (each tab is a separate window)
-- Create tabs for ChatGPT, Perplexity, Claude, Google AI Studio, Gemini, and Grok
+- Create tabs for ChatGPT, Perplexity, Claude, Google AI Studio, Gemini, Grok, and Kimi
 - Tune automation safety limits (governor)
 
 Sign in to your target vendor in the tab window.
@@ -463,6 +463,17 @@ npm run mcp:bench    # MCP server bound to that state dir
 
 The bench instance has its own state dir, so its own token, sign-ins, settings, run records and provider slots. Electron's single-instance lock lives in the state dir's `electron-user-data`, so the bench runs beside the default instance (checked 2026-11-18 on Electron 39.6.0). If port 47811 is taken it takes the next free one; `~/.agentify-bench/state.json` holds the port in use and `~/.agentify-bench/token.txt` the token. An MCP server started with `npm run mcp:bench` starts the bench app itself when it is not running, on a random port. The Chrome backend flags above work here too, and keep their profile in `~/.agentify-bench/chrome-user-data/`.
 
+### One-shot sites (Gemini and Kimi)
+
+Gemini and Kimi queries run on a separate engine (ADR 0017): every `agentify_query` opens a fresh chat, applies the requested mode, uploads the attachments, types the prompt, checks the composer holds it exactly, sends, and waits for an answer that stopped changing with no stop control showing. Pass the vendor with `model` (MCP) or `vendorId` (HTTP).
+
+| Site | `modeIntent` values |
+|---|---|
+| Gemini | `fast`, `thinking`, `pro`, `deep-research` |
+| Kimi | `instant`, `k2.8-preview`, `k3`, `k3.1-pro`, `deep-research` |
+
+An intent the page cannot confirm fails the run before anything is typed (`mode_intent_unavailable`); omitting it, or passing `none`, leaves the page's selection alone. `modelIntent`, `imageGeneration`, `chatUrl`, `projectUrl` and `liveSourceId` are refused. Beside `assistant_response.md` (Markdown with inline links and a Sources list), each run writes `assistant_response.txt` (plain text) and `sources.json`, and records in `metadata.json` and the run's `outputManifest.answerSettings` the model and mode the page showed after the answer.
+
 ### Personal Dot messages
 
 The three Dot tools are available in the core MCP profile. Live talk/read/wait
@@ -707,7 +718,7 @@ ChatGPT query, image, research, and direct-send requests use **Chat**. Work is n
 - **Use ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok normally (manual):** write a plan/spec in the UI, then in your MCP client call `agentify_read_page` to pull the visible page text into your workflow. For a complete long ChatGPT thread, call `agentify_read_conversation`; it scrolls through virtualized turns, saves the complete rendered capture as a private local artifact, and returns `transcriptPath`, `servedUrl` (the page the tab served), `totalChars`, SHA-256, capture status, and a bounded inline preview. Read the file at `transcriptPath` when the preview is shortened. Pass `chatUrl` to read a specific conversation — Agentify navigates there and captures without sending anything, so reading a thread never adds a turn to it. When `chatUrl` names a conversation, the read fails with `read_location_mismatch` and saves nothing unless the tab ended on that conversation.
 - **Download files attached anywhere in a ChatGPT conversation:** call `agentify_read_conversation`, select `artifactKey` values from its separate `artifactInventory`, then pass those keys and the same `chatUrl` to `agentify_download_conversation_artifacts`. Agentify clicks the exact authenticated file cards without opening a native Save dialog, applies per-file time and size limits, registers validated local files, and returns one terminal outcome per key. Transcript completeness and artifact-inventory completeness remain separate; do not treat a complete transcript as proof that the file inventory is complete.
   Canvas editor documents are not file cards and are not supported by this workflow. Keep them unsupported until a live Canvas surface can be probed and given its own explicit contract.
-- **Drive ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok from your MCP client:** call `agentify_ensure_ready`, then `agentify_query` with a `prompt`. Use a stable `key` per project to keep parallel jobs isolated.
+- **Drive ChatGPT/Perplexity/Claude/AI Studio/Gemini/Grok/Kimi from your MCP client:** call `agentify_ensure_ready`, then `agentify_query` with a `prompt`. Use a stable `key` per project to keep parallel jobs isolated.
 - **Parallel jobs:** create/ensure a tab per project with `agentify_tab_create(key: ...)`, then use that `key` for `agentify_query`, `agentify_read_page`, and `agentify_download_images`.
 - **Upload files:** pass local paths via `attachments` to `agentify_query` or `agentify_image_gen` (best-effort; depends on the site UI).
 - **Generate/save/reuse artifacts:** use `agentify_image_gen` with optional reference attachments to generate and save images in one call. For general prompts, call `agentify_query`, then `agentify_save_artifacts` or `agentify_download_images`; reuse returned paths in the next `attachments` array.
@@ -776,7 +787,7 @@ The supported product surface is the local browser-control + MCP workflow descri
 ## Limitations / robustness notes
 - **ChatGPT UI changes:** follow the structured contract workflow above. `~/.agentify-desktop/selectors.override.json` remains a visible degraded legacy branch, not a silent repair or second authority.
 - **Perplexity selectors:** Perplexity support is best-effort and may require selector overrides in `~/.agentify-desktop/selectors.override.json` if UI changes.
-- **Gemini selectors:** Gemini support is best-effort and may require selector overrides in `~/.agentify-desktop/selectors.override.json` if UI changes.
+- **Gemini and Kimi page elements:** these sites run on the one-shot engine, whose page elements live in `oneshot-sites/<site>.json`; `selectors.override.json` does not apply to them.
 - **Completion detection:** waiting for “stop generating” to disappear + text stability works well, but can mis-detect on very long outputs or intermittent streaming pauses.
 - **Image-only transcript turns:** transcript capture never invents text from image pixels or changing image metadata. An otherwise structurally valid mapped message with no text makes sync partial (`conversation_message_text_unavailable`), so it cannot create or advance a complete tracked snapshot. Malformed, duplicate, or reordered provider structure still reports compatibility drift, and so does a fully served conversation of four or more messages in which none produced any text — that pattern means text extraction stopped matching ChatGPT's markup, not that the thread is entirely images.
 - **Missing opening turn:** when the transcript scroll quiets at the top of the served thread and that first turn is an assistant turn, the capture is partial with reason `conversation_leading_turn_missing` (`leading_turn_missing` through `agentify_read_conversation`). The top boundary is still reported as proven, because it was — retrying the scroll will not produce turn 1. Recover such a conversation through the ChatGPT export import instead. This condition does not distinguish a thread that genuinely opens with an assistant turn from one whose opening prompt the provider withheld.
