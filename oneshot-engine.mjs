@@ -786,6 +786,11 @@ export class OneShotController {
       // more than the baseline count (ADR 0009's rule, without message ids).
       const isNew = !!answer && last.assistantTurns > baseline.assistantTurns;
       const text = String(answer?.answerText || '');
+      // Kimi took a prompt, opened a chat, then showed its capacity notice and
+      // went back to an empty page (2026-11-18): no answer will come.
+      if (last.notice && !(isNew && text.trim())) {
+        throw namedError('send_refused', { notice: last.notice, stage: 'after_send' });
+      }
       if (!isNew || last.stopVisible || !answer.idle || this.#isProgressOnly(text)) {
         lastText = null;
         stableSince = null;

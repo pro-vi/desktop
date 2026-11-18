@@ -179,6 +179,7 @@ function makeSite(overrides = {}) {
       if (assistant && step.error) assistant.error = true;
       if (assistant && step.idle !== undefined) assistant.idle = step.idle;
       if (step.stop !== undefined) fake.state.stop = step.stop;
+      if (step.notice !== undefined) fake.state.notice = step.notice;
     }
   });
   return { state, page };
@@ -793,4 +794,13 @@ test('oneshot-engine: a rewritten model line is not a change of selection', () =
   const modeApplied = { intent: 'pro', shown: { model: '3.1 Pro', option: 'Detailed research', selection: 'Detailed research' } };
   assert.deepEqual(modeVerificationFor({ mode, modeApplied, answerSettings: { model: 'Limit resets Nov 18, 7:03 AM', mode: 'Detailed research', selection: 'Detailed research' } }), {});
   assert.equal(modeVerificationFor({ mode, modeApplied, answerSettings: { model: '4 Hydrogen', mode: 'Everyday help', selection: 'Everyday help' } }).degradedFrom.shownAfterAnswer, 'Everyday help');
+});
+
+test('oneshot-engine: a refusal notice after the send was acknowledged ends the run instead of waiting it out', async () => {
+  const { page } = makeSite({ timeline: [{ stop: false, notice: 'Too many people are chatting right now.' }] });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 5_000 }),
+    (error) => error.message === 'send_refused' && error.data.stage === 'after_send' &&
+      error.data.conversationUrl === 'https://site.example/new'
+  );
 });
