@@ -1,0 +1,725 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+import { completionEvidenceFor } from './chatgpt-completion-evidence.mjs';
+import {
+  captureAnswer,
+  focusComposer,
+  injectFiles,
+  pageScript,
+  readAttachments,
+  readComposer,
+  readLastUserText,
+  readPageState,
+  readPageText,
+  readSendButton,
+  readTurns
+} from './oneshot-page-scripts.mjs';
+
+// One fresh chat, one prompt, one answer, on a site described by an adapter
+// (ADR 0017). ChatGPT keeps its own controller; this engine serves the sites
+// whose adapters are registered in oneshot-sites/index.mjs.
+
+const DEFAULT_TIMINGS = Object.freeze({
+  pollMs: 500,
+  // The answer text must hold still this long, with no stop control showing.
+  stableMs: 3_000,
+  sendAckMs: 8_000,
+  sendEnableMs: 3_000,
+  uploadMs: 120_000,
+  navigationMs: 30_000,
+  promptDeliveryMs: 2_000,
+  uiCheckMs: 5_000,
+  // How long an adapter waits for a menu it opened to show its options.
+  menuMs: 3_000
+});
+
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MIME_BY_EXTENSION = Object.freeze({
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.doc': 'application/msword',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp'
+});
+
+// The engine's own error codes, with the HTTP status and run outcome each one
+// gets. Every code except the last three ends the run before anything is sent.
+export const ONESHOT_ERRORS = Object.freeze({
+  mode_intent_unsupported: {
+    status: 400,
+    label: 'Mode not offered',
+    detail: (d) => `${d?.vendorId || 'This site'} has no mode intent "${d?.modeIntent || ''}"${Array.isArray(d?.supported) ? ` (supported: ${d.supported.join(', ')})` : ''}. No prompt was sent.`
+  },
+  oneshot_location_unsupported: {
+    status: 400,
+    label: 'Location not supported',
+    detail: (d) => `${d?.vendorId || 'This site'} runs every query in a fresh chat; ${(d?.fields || []).join(', ') || 'a chat location'} cannot be used. No prompt was sent.`
+  },
+  image_generation_unsupported: { status: 400, label: 'Image generation unsupported', detail: () => 'This site runs text queries only. No prompt was sent.' },
+  attachment_unreadable: { status: 400, attachment: true, label: 'Attachment unreadable', detail: (d) => `An attachment could not be read from disk${d?.file ? `: ${d.file}` : ''}. No prompt was sent.` },
+  attachment_too_large: { status: 400, attachment: true, label: 'Attachment too large', detail: () => 'The attachments exceed the size limit. No prompt was sent.' },
+  mode_intent_unavailable: {
+    status: 409,
+    label: 'Mode unavailable',
+    detail: (d) => `The page did not confirm mode "${d?.modeIntent || ''}" (${d?.reason || 'unconfirmed'}). No prompt was sent.`
+  },
+  fresh_chat_unavailable: { status: 409, label: 'Fresh chat unavailable', detail: () => 'The provider did not open an empty chat. No prompt was sent.' },
+  attachment_input_missing: { status: 409, attachment: true, label: 'Attachment not sent', detail: () => 'No file input was found on the page. No prompt was sent.' },
+  attachment_not_shown: { status: 409, attachment: true, label: 'Attachment not shown', detail: () => 'The page never showed every attached file as uploaded. No prompt was sent.' },
+  click_target_missing: { status: 409, label: 'Page control not found', detail: () => 'A control the run needed had no size on the page. No prompt was sent.' },
+  answer_capture_failed: { status: 409, label: 'Answer not captured', detail: () => 'The answer finished but could not be read from the page.' },
+  provider_response_error: { status: 409, label: 'Provider error', detail: () => 'The provider showed an error in place of an answer.' }
+});
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function namedError(message, data = null) {
+  const error = new Error(message);
+  if (data) error.data = data;
+  return error;
+}
+
+function letterCore(text) {
+  return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function clipText(value, max = 160) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// The same comparison the ChatGPT controller makes before send: exact for a
+// textarea value, whitespace-folded for rendered rich text. Returns null when
+// the composer holds the prompt, else the prompt_staging_failed detail.
+export function compareStagedPrompt(expected, staged, { usesValue = false } = {}) {
+  const normalize = usesValue
+    ? (text) => String(text || '').replace(/\r\n?/g, '\n')
+    : (text) => String(text || '').replace(/\s+/gu, ' ').trim();
+  const want = normalize(expected);
+  const got = normalize(staged);
+  if (got === want) return null;
+  let at = 0;
+  while (at < want.length && want[at] === got[at]) at += 1;
+  let line = 1;
+  if (usesValue) {
+    line = want.slice(0, at + 1).split('\n').length;
+  } else {
+    let start = 0;
+    const lines = String(expected || '').split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const part = normalize(lines[i]);
+      if (!part) continue;
+      line = i + 1;
+      if (at < start + part.length) break;
+      start += part.length + 1;
+    }
+  }
+  return {
+    expectedChars: String(expected || '').length,
+    stagedChars: String(staged || '').length,
+    // Quote only the caller's prompt: the composer may hold a draft from elsewhere.
+    firstDifference: { at, line, expected: want.slice(at, at + 60) }
+  };
+}
+
+// Each prompt line's letters and digits must appear in the user turn the site
+// recorded (ADR 0014). Reports; never fails the run.
+export function promptDeliveryFor(prompt, recorded) {
+  if (typeof recorded !== 'string') return { checked: false };
+  const core = letterCore(recorded);
+  const missing = String(prompt || '')
+    .split('\n')
+    .map((text, index) => ({ text, lineNumber: index + 1 }))
+    .filter(({ text }) => letterCore(text) && !core.includes(letterCore(text)));
+  return {
+    checked: true,
+    complete: missing.length === 0,
+    missingLineCount: missing.length,
+    firstMissingLine: missing.length ? clipText(missing[0].text) : null,
+    firstMissingLineNumber: missing[0]?.lineNumber ?? null,
+    lastMissingLineNumber: missing.at(-1)?.lineNumber ?? null,
+    missingLines: missing.slice(0, 10).map(({ text }) => clipText(text))
+  };
+}
+
+// Citation and panel sources are listed under the answer; inline links are
+// already in its text. Returns the Markdown with that list appended.
+export function appendSourcesSection(markdown, sources) {
+  const listed = (sources || []).filter((source) => source.kinds.includes('citation') || source.kinds.includes('panel'));
+  if (!listed.length) return markdown;
+  const lines = listed.map((source) => `${source.index}. [${source.title || source.url}](${source.url})`);
+  return `${markdown}\n\n## Sources\n\n${lines.join('\n')}`;
+}
+
+// A file the page shows counts as uploaded when its chip names it and is not
+// pending. A site that shortens long names is matched by count instead: as
+// many new chips as files, none pending.
+export function matchAttachments(expected, before, after) {
+  const items = Array.isArray(after?.items) ? after.items : [];
+  const newCount = items.length - (Array.isArray(before?.items) ? before.items.length : 0);
+  const used = new Set();
+  const report = expected.map((file) => {
+    const name = file.name.toLowerCase();
+    const stem = name.replace(/\.[^.]+$/, '');
+    const index = items.findIndex((item, i) => {
+      if (used.has(i)) return false;
+      const text = String(item.text || '').toLowerCase();
+      return text.includes(name) || (stem.length >= 4 && text.includes(stem));
+    });
+    if (index === -1) return { ...file, matchedBy: null, pending: false };
+    used.add(index);
+    return { ...file, matchedBy: 'name', pending: !!items[index].pending };
+  });
+  const anyPending = items.some((item) => item.pending);
+  const unmatched = report.filter((item) => !item.matchedBy);
+  if (unmatched.length && newCount === expected.length && !anyPending) {
+    for (const item of unmatched) item.matchedBy = 'count';
+  }
+  const done = report.every((item) => item.matchedBy && !item.pending);
+  return { done, report, anyPending };
+}
+
+export class OneShotController {
+  constructor({
+    page,
+    adapter,
+    vendorId = null,
+    vendorName = null,
+    onBlocked = null,
+    onUnblocked = null,
+    timings = {}
+  } = {}) {
+    for (const hook of ['freshChatUrl', 'applyMode', 'readAnswerSettings']) {
+      if (typeof adapter?.[hook] !== 'function') throw namedError('oneshot_adapter_invalid', { missing: hook });
+    }
+    if (!adapter.profile) throw namedError('oneshot_adapter_invalid', { missing: 'profile' });
+    this.page = page;
+    this.adapter = adapter;
+    this.vendorId = vendorId || adapter.vendorId;
+    this.vendorName = vendorName || adapter.vendorName || null;
+    this.onBlocked = onBlocked;
+    this.onUnblocked = onUnblocked;
+    this.timings = Object.freeze({ ...DEFAULT_TIMINGS, ...timings });
+    this.exclusiveTail = Promise.resolve();
+    this.blocked = false;
+    this.currentRun = null;
+    const sel = (anchorId) => adapter.profile.selectorsFor(anchorId);
+    this.selectors = Object.freeze({
+      composer: sel('composer'),
+      send: sel('send-button'),
+      sendDisabled: sel('send-disabled'),
+      stop: sel('stop-button'),
+      fileInput: sel('file-input'),
+      attachmentItem: sel('attachment-item'),
+      attachmentPending: sel('attachment-pending'),
+      attachmentError: sel('attachment-error'),
+      userTurn: sel('user-turn'),
+      assistantTurn: sel('assistant-turn'),
+      answerBody: sel('answer-body'),
+      answerExclude: sel('answer-exclude'),
+      answerSkip: sel('answer-skip'),
+      answerError: sel('answer-error'),
+      codeLanguage: sel('code-language'),
+      citation: sel('citation'),
+      sourceItem: sel('source-item'),
+      signedOut: sel('signed-out-marker'),
+      termsGate: sel('terms-gate')
+    });
+  }
+
+  async #eval(fn, args = this.selectors) {
+    return await this.page.evaluate(pageScript(fn, args));
+  }
+
+  // One page operation at a time, in arrival order; a failed one frees the next.
+  runExclusive(fn) {
+    const run = this.exclusiveTail.then(fn);
+    this.exclusiveTail = run.catch(() => {});
+    return run;
+  }
+
+  async navigate(url) {
+    let timer = null;
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(namedError('timeout_waiting_for_navigation', { timeoutMs: this.timings.navigationMs })),
+        this.timings.navigationMs
+      );
+    });
+    try {
+      await Promise.race([Promise.resolve().then(() => this.page.navigate(url)), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async getUrl() {
+    return await this.page.getUrl();
+  }
+
+  async readPageText({ maxChars = 200_000 } = {}) {
+    const cap = Math.max(0, Math.floor(Number(maxChars) || 0));
+    const result = await this.#eval(readPageText, { maxChars: cap });
+    const text = String(result?.text || '');
+    const totalChars = Number.isFinite(Number(result?.totalChars)) ? Number(result.totalChars) : text.length;
+    return { text, truncated: totalChars > cap, totalChars };
+  }
+
+  async detectChallenge() {
+    const state = await this.#eval(readPageState);
+    const kind = state.captcha || state.verifyText
+      ? 'captcha'
+      : state.signedOut || state.authInput
+        ? 'login'
+        : state.termsGate
+          ? 'ui'
+          : null;
+    return {
+      url: state.url,
+      readyState: state.readyState,
+      blocked: !!kind,
+      promptVisible: state.composerVisible && !kind,
+      kind,
+      turns: { user: state.userTurns, assistant: state.assistantTurns },
+      indicators: {
+        captcha: state.captcha,
+        verifyText: state.verifyText,
+        signedOut: state.signedOut,
+        authInput: state.authInput,
+        termsGate: state.termsGate,
+        rawPromptVisible: state.composerVisible
+      }
+    };
+  }
+
+  // Waits until the composer shows with no sign-in wall, terms gate or
+  // challenge in front of it. A blocked page puts the tab in needs-attention.
+  async ensureReady({ timeoutMs = 10 * 60_000 } = {}) {
+    await this.#emitProgress({ phase: 'waiting_for_ready', blocked: false, blockedKind: null, blockedTitle: null });
+    const start = Date.now();
+    let last = null;
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      last = await this.detectChallenge().catch(() => null);
+      if (last?.promptVisible) {
+        await this.#exitBlockedStateIfNeeded();
+        return last;
+      }
+      if (last?.blocked) {
+        await this.#enterBlockedState(last);
+      } else if (!this.blocked && Date.now() - start > this.timings.uiCheckMs && last?.readyState === 'complete') {
+        await this.#enterBlockedState({ ...last, blocked: true, kind: 'ui' });
+      }
+      await sleep(this.timings.pollMs);
+    }
+    throw namedError('timeout_waiting_for_prompt', last);
+  }
+
+  async requestStop({ reason = 'user_stop' } = {}) {
+    if (this.currentRun) {
+      this.currentRun.requested = true;
+      this.currentRun.requestedAt = Date.now();
+      this.currentRun.reason = reason || 'user_stop';
+    }
+    const clicked = await this.#eval((a, h) => {
+      const stop = h.first(a.stop);
+      if (!stop) return false;
+      stop.click();
+      return true;
+    }).catch(() => false);
+    return { ok: true, requested: !!this.currentRun || !!clicked, clicked: !!clicked };
+  }
+
+  async query({
+    prompt,
+    attachments = [],
+    timeoutMs = 10 * 60_000,
+    onProgress = null,
+    modeIntent = null,
+    modelIntent = null,
+    imageGeneration = false,
+    recipient = undefined
+  } = {}) {
+    if (recipient?.kind && recipient.kind !== 'chat') throw new Error('recipient_conflict');
+    if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('missing_prompt');
+    if (prompt.length > 200_000) throw new Error('prompt_too_large');
+    if (imageGeneration) throw namedError('image_generation_unsupported', { vendorId: this.vendorId });
+    if (modelIntent) {
+      throw namedError('model_intent_unsupported', {
+        modelIntent,
+        reason: `${this.vendorName || this.vendorId} takes modeIntent only.`
+      });
+    }
+    // An intent the adapter does not know fails here, before any page work.
+    const mode = this.#resolveModeIntent(modeIntent);
+    const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress };
+    this.currentRun = run;
+    try {
+      const freshChat = await this.#openFreshChat({ mode, timeoutMs });
+      const modeApplied = mode ? await this.#applyMode(mode) : null;
+      const attachmentReport = await this.#attachFiles(attachments);
+      const baseline = await this.#eval(readTurns);
+      await this.#typePrompt(prompt);
+      const sendDebug = await this.#clickSend(baseline);
+      await this.#waitForAnswer({ baseline, timeoutMs });
+      if (typeof this.adapter.prepareCapture === 'function') await this.adapter.prepareCapture(this.#adapterContext());
+      const capture = await this.#eval(captureAnswer);
+      if (!capture?.found || !String(capture.markdown || '').trim()) {
+        throw namedError('answer_capture_failed', { reason: capture?.reason || 'answer_empty' });
+      }
+      const promptDelivery = await this.#readPromptDelivery(prompt);
+      const answerSettings = await this.#readAnswerSettings();
+      const conversationUrl = await this.getUrl().catch(() => null);
+      await this.#emitProgress({ phase: 'answer_captured' });
+      return {
+        text: appendSourcesSection(capture.markdown, capture.sources),
+        meta: {
+          oneShot: true,
+          vendorId: this.vendorId,
+          completionEvidence: completionEvidenceFor('assistant-node'),
+          conversationUrl,
+          freshChatUrl: freshChat.url,
+          plainText: capture.text,
+          sources: capture.sources,
+          requestedModeIntent: mode?.intent || null,
+          modeApplied,
+          answerSettings,
+          // The HTTP layer labels a run "mode unverified" from these fields.
+          ...(answerSettings.unreadReason ? { modeVerification: 'unverified', modeVerificationReason: answerSettings.unreadReason } : {}),
+          attachments: attachmentReport,
+          promptDelivery,
+          sendDebug,
+          profileContractVersion: this.adapter.profile.contractVersion
+        }
+      };
+    } finally {
+      if (this.currentRun === run) this.currentRun = null;
+    }
+  }
+
+  #resolveModeIntent(modeIntent) {
+    const requested = typeof modeIntent === 'string' ? modeIntent.trim() : '';
+    // "none" leaves the page's selection as it is, as it does for ChatGPT.
+    if (!requested || requested.toLowerCase() === 'none') return null;
+    const definition = this.adapter.modeIntents?.[requested.toLowerCase()];
+    if (!definition) {
+      throw namedError('mode_intent_unsupported', {
+        vendorId: this.vendorId,
+        modeIntent: requested,
+        supported: Object.keys(this.adapter.modeIntents || {})
+      });
+    }
+    return { intent: requested.toLowerCase(), ...definition };
+  }
+
+  async #openFreshChat({ mode, timeoutMs }) {
+    await this.#emitProgress({ phase: 'opening_fresh_chat' });
+    const currentUrl = await this.getUrl().catch(() => '');
+    const url = this.adapter.freshChatUrl(currentUrl, mode);
+    await this.navigate(url);
+    const ready = await this.ensureReady({ timeoutMs });
+    if (ready.turns.user || ready.turns.assistant) {
+      throw namedError('fresh_chat_unavailable', {
+        requestedUrl: url,
+        servedUrl: ready.url,
+        userTurns: ready.turns.user,
+        assistantTurns: ready.turns.assistant
+      });
+    }
+    return { url: ready.url };
+  }
+
+  // Selecting a mode must be confirmed on the page before the composer is
+  // touched; anything short of that fails the run without sending, the rule
+  // ADR 0005 set for ChatGPT's modelIntent.
+  async #applyMode(mode) {
+    this.#throwIfStopRequested();
+    await this.#emitProgress({ phase: 'applying_mode', modeIntent: mode.intent });
+    let applied;
+    try {
+      applied = await this.adapter.applyMode(this.#adapterContext(), mode);
+    } catch (error) {
+      if (error?.message === 'query_aborted') throw error;
+      throw namedError('mode_intent_unavailable', {
+        vendorId: this.vendorId,
+        modeIntent: mode.intent,
+        reason: error?.data?.reason || error?.message || 'mode_selection_failed',
+        shown: error?.data?.shown || null,
+        options: error?.data?.options || null
+      });
+    }
+    if (!applied?.confirmed) {
+      throw namedError('mode_intent_unavailable', {
+        vendorId: this.vendorId,
+        modeIntent: mode.intent,
+        reason: 'selection_not_confirmed',
+        shown: applied?.shown || null
+      });
+    }
+    await this.#emitProgress({ phase: 'mode_intent_confirmed', modeIntent: mode.intent });
+    return { intent: mode.intent, shown: applied.shown || null };
+  }
+
+  async #attachFiles(files) {
+    if (!Array.isArray(files) || !files.length) return [];
+    await this.#emitProgress({ phase: 'uploading_files' });
+    const filePaths = files.map((file) => path.resolve(String(file)));
+    let totalBytes = 0;
+    for (const filePath of filePaths) {
+      const stat = await fs.stat(filePath).catch((error) => {
+        throw namedError('attachment_unreadable', { file: path.basename(filePath), code: error?.code || null });
+      });
+      totalBytes += stat.size;
+    }
+    if (totalBytes > MAX_ATTACHMENT_BYTES) throw namedError('attachment_too_large', { maxBytes: MAX_ATTACHMENT_BYTES, totalBytes });
+    const prepared = [];
+    for (const filePath of filePaths) {
+      const bytes = await fs.readFile(filePath).catch((error) => {
+        throw namedError('attachment_unreadable', { file: path.basename(filePath), code: error?.code || null });
+      });
+      prepared.push({
+        name: path.basename(filePath),
+        mime: MIME_BY_EXTENSION[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+        data: bytes.toString('base64'),
+        bytes: bytes.length,
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex')
+      });
+    }
+    const expected = prepared.map(({ name, bytes, sha256 }) => ({ name, bytes, sha256 }));
+    // An adapter may open a menu to make the input exist; it returns how to close it.
+    const revealed = typeof this.adapter.revealFileInput === 'function'
+      ? await this.adapter.revealFileInput(this.#adapterContext())
+      : null;
+    const before = await this.#eval(readAttachments);
+    let injected = await this.#eval(injectFiles, { ...this.selectors, files: prepared.map(({ name, mime, data }) => ({ name, mime, data })) });
+    if (!injected?.ok && injected?.reason === 'file_input_single') {
+      for (const file of prepared) {
+        injected = await this.#eval(injectFiles, { ...this.selectors, files: [{ name: file.name, mime: file.mime, data: file.data }] });
+        if (!injected?.ok) break;
+      }
+    }
+    await revealed?.close?.();
+    if (!injected?.ok) {
+      throw namedError('attachment_input_missing', { reason: injected?.reason || 'file_input_not_found', files: expected.map((item) => item.name) });
+    }
+    const start = Date.now();
+    let after = before;
+    let match = null;
+    while (Date.now() - start < this.timings.uploadMs) {
+      this.#throwIfStopRequested();
+      await sleep(this.timings.pollMs);
+      after = await this.#eval(readAttachments);
+      const providerErrors = [
+        ...(after?.errorTexts || []),
+        ...(after?.items || []).filter((item) => item.error).map((item) => item.text)
+      ].filter(Boolean);
+      if (providerErrors.length) {
+        throw namedError('attachment_upload_failed', {
+          reason: 'provider_error',
+          detail: clipText(providerErrors[0], 200),
+          files: expected.map((item) => item.name)
+        });
+      }
+      match = matchAttachments(expected, before, after);
+      if (match.done) {
+        await this.#emitProgress({ attachmentDebug: { stage: 'uploaded', files: match.report.map((item) => item.name) } });
+        return match.report.map(({ name, bytes, sha256, matchedBy }) => ({ name, bytes, sha256, matchedBy }));
+      }
+    }
+    if (match?.anyPending) {
+      throw namedError('attachment_upload_stalled', {
+        pendingText: clipText((after?.items || []).filter((item) => item.pending).map((item) => item.text).join(' | '), 200)
+      });
+    }
+    throw namedError('attachment_not_shown', {
+      expected: expected.map((item) => item.name),
+      shown: (after?.items || []).map((item) => item.text)
+    });
+  }
+
+  async #typePrompt(prompt) {
+    this.#throwIfStopRequested();
+    await this.#emitProgress({ phase: 'typing_prompt' });
+    const composer = await this.#eval(readComposer);
+    if (!composer?.found) throw namedError('prompt_focus_failed', { reason: 'composer_not_found' });
+    await this.#clickRect(composer.rect);
+    const focus = await this.#eval(focusComposer);
+    if (!focus?.found) throw namedError('prompt_focus_failed', { reason: 'composer_not_found' });
+    // A fresh chat's composer should be empty; clearing also removes any draft.
+    await this.page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
+    await this.page.sendKey('Backspace');
+    const lines = prompt.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      this.#throwIfStopRequested();
+      if (lines[i]) await this.page.insertText(lines[i]);
+      if (i < lines.length - 1) await this.page.sendKey('Return', { modifiers: ['shift'] });
+    }
+    const staged = await this.#eval(readComposer);
+    if (!staged?.found) throw namedError('missing_staged_prompt', { reason: 'composer_not_found' });
+    const mismatch = compareStagedPrompt(prompt, staged.text, { usesValue: staged.usesValue });
+    if (mismatch) throw namedError('prompt_staging_failed', mismatch);
+  }
+
+  async #clickSend(baseline) {
+    this.#throwIfStopRequested();
+    await this.#emitProgress({ phase: 'sending' });
+    const start = Date.now();
+    let send = await this.#eval(readSendButton);
+    while ((!send?.found || !send.enabled) && Date.now() - start < this.timings.sendEnableMs) {
+      await sleep(this.timings.pollMs);
+      send = await this.#eval(readSendButton);
+    }
+    if (!send?.found || !send.enabled) {
+      throw namedError('send_not_triggered', { sendDebug: { found: !!send?.found, enabled: !!send?.enabled, clicked: false } });
+    }
+    this.#throwIfStopRequested();
+    await this.#clickRect(send.rect);
+    const ackStart = Date.now();
+    while (Date.now() - ackStart < this.timings.sendAckMs) {
+      await sleep(this.timings.pollMs);
+      const turns = await this.#eval(readTurns);
+      if (turns.userTurns > baseline.userTurns) return { acknowledgedBy: 'user_turn' };
+      if (turns.stopVisible) return { acknowledgedBy: 'stop_control' };
+      if (turns.composerEmpty) return { acknowledgedBy: 'composer_cleared' };
+    }
+    throw namedError('send_not_triggered', { sendDebug: { found: true, enabled: true, clicked: true } });
+  }
+
+  // Complete only on an assistant node that did not exist before send, whose
+  // answer text is not a progress label, has stopped changing for stableMs,
+  // with no stop control showing and no provider error in the turn.
+  async #waitForAnswer({ baseline, timeoutMs }) {
+    await this.#emitProgress({ phase: 'waiting_for_response' });
+    const start = Date.now();
+    let lastText = null;
+    let stableSince = null;
+    let last = null;
+    while (Date.now() - start < timeoutMs) {
+      this.#throwIfStopRequested();
+      await sleep(this.timings.pollMs);
+      last = await this.#eval(readTurns);
+      const answer = last.lastAssistant;
+      // A fresh chat has no assistant turn before send, so a new turn is one
+      // more than the baseline count (ADR 0009's rule, without message ids).
+      const isNew = !!answer && last.assistantTurns > baseline.assistantTurns;
+      const text = String(answer?.answerText || '');
+      if (!isNew || last.stopVisible || this.#isProgressOnly(text)) {
+        lastText = null;
+        stableSince = null;
+        continue;
+      }
+      if (text !== lastText) {
+        lastText = text;
+        stableSince = Date.now();
+        continue;
+      }
+      if (Date.now() - stableSince < this.timings.stableMs) continue;
+      if (answer.error) {
+        throw namedError('provider_response_error', { preview: clipText(text, 180) });
+      }
+      return;
+    }
+    throw namedError('timeout_waiting_for_response', {
+      conversationUrl: await this.getUrl().catch(() => null),
+      assistantTurns: last?.assistantTurns ?? null,
+      stopVisible: last?.stopVisible ?? null,
+      answerChars: String(last?.lastAssistant?.answerText || '').length
+    });
+  }
+
+  #isProgressOnly(text) {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/[.…]+$/u, '');
+    if (!normalized) return true;
+    return (this.adapter.progressLabels || []).includes(normalized);
+  }
+
+  async #readPromptDelivery(prompt) {
+    let timer = null;
+    const recorded = await Promise.race([
+      this.#eval(readLastUserText).catch(() => null),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), this.timings.promptDeliveryMs); })
+    ]).finally(() => clearTimeout(timer));
+    return promptDeliveryFor(prompt, recorded);
+  }
+
+  // What the page shows as the model and mode once the answer is in. The
+  // reading never comes from the request; an unreadable page says why.
+  async #readAnswerSettings() {
+    try {
+      const shown = await this.adapter.readAnswerSettings(this.#adapterContext());
+      const model = typeof shown?.model === 'string' && shown.model.trim() ? shown.model.trim() : null;
+      const mode = typeof shown?.mode === 'string' && shown.mode.trim() ? shown.mode.trim() : null;
+      return {
+        model,
+        mode,
+        source: shown?.source || null,
+        unreadReason: model || mode ? null : shown?.unreadReason || 'not_shown'
+      };
+    } catch (error) {
+      return { model: null, mode: null, source: null, unreadReason: error?.message || 'read_failed' };
+    }
+  }
+
+  #adapterContext() {
+    return {
+      evaluate: async (fn, args) => await this.#eval(fn, args),
+      selectorsFor: (anchorId) => this.adapter.profile.selectorsFor(anchorId),
+      click: async (rect) => await this.#clickRect(rect),
+      pressKey: async (key, options) => await this.page.sendKey(key, options),
+      sleep,
+      timings: this.timings,
+      throwIfStopRequested: () => this.#throwIfStopRequested(),
+      getUrl: async () => await this.getUrl()
+    };
+  }
+
+  async #clickRect(rect) {
+    if (!rect || !(rect.w > 0) || !(rect.h > 0)) throw namedError('click_target_missing', { rect: rect || null });
+    const x = Math.floor(rect.x + rect.w / 2);
+    const y = Math.floor(rect.y + rect.h / 2);
+    await this.page.moveMouse(x, y);
+    await this.page.mouseDown(x, y, { button: 'left', clickCount: 1 });
+    await this.page.mouseUp(x, y, { button: 'left', clickCount: 1 });
+  }
+
+  #throwIfStopRequested() {
+    if (!this.currentRun?.requested) return;
+    throw namedError('query_aborted', {
+      reason: this.currentRun.reason || 'user_stop',
+      requestedAt: this.currentRun.requestedAt || null
+    });
+  }
+
+  async #emitProgress(patch) {
+    if (!this.currentRun?.onProgress || !patch || typeof patch !== 'object') return;
+    try {
+      await this.currentRun.onProgress({ ...patch });
+    } catch {}
+  }
+
+  async #enterBlockedState(state) {
+    if (this.blocked) return;
+    this.blocked = true;
+    await this.#emitProgress({ phase: 'awaiting_user', blocked: true, blockedKind: state?.kind || 'blocked' });
+    await this.onBlocked?.(state);
+  }
+
+  async #exitBlockedStateIfNeeded() {
+    if (!this.blocked) return;
+    this.blocked = false;
+    await this.#emitProgress({ blocked: false, blockedKind: null, blockedTitle: null });
+    await this.onUnblocked?.();
+  }
+}

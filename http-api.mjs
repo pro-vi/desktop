@@ -74,11 +74,13 @@ import { createRunStore, parseResponseDebug, parseResponseRecovery, runRecordPat
 import { createProviderSlotLeases } from './provider-slot-leases.mjs';
 import { providerTabOperationEvidence } from './provider-tab-operation-leases.mjs';
 import { isTerminalRunStatus } from './run-lifecycle.mjs';
-import { atomicWriteFile } from './fs-utils.mjs';
+import { atomicWriteFile, atomicWriteJson } from './fs-utils.mjs';
 import {
   catalogHttpStatusForErrorCode,
   transcriptHttpStatusForErrorCode
 } from './library-http-errors.mjs';
+import { ONESHOT_ERRORS } from './oneshot-engine.mjs';
+import { oneShotAdapterFor } from './oneshot-sites/index.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -147,6 +149,7 @@ function mapErrorToHttp(error) {
   if (msg === 'invalid_vendor') return { code: 400, body: { error: 'invalid_vendor', data: error?.data || null } };
   if (msg === 'invalid_artifact_mode') return { code: 400, body: { error: 'invalid_artifact_mode', data: error?.data || null } };
   if (msg === 'model_intent_unsupported') return { code: 400, body: { error: 'model_intent_unsupported', data: error?.data || null } };
+  if (Object.hasOwn(ONESHOT_ERRORS, msg)) return { code: ONESHOT_ERRORS[msg].status, body: { error: msg, data: error?.data || null } };
   if (msg === 'invalid_chatgpt_url') return { code: 400, body: { error: 'invalid_chatgpt_url', data: error?.data || null } };
   if (msg === 'chatgpt_location_conflict') return { code: 400, body: { error: 'chatgpt_location_conflict', data: error?.data || null } };
   if (msg === 'chat_url_unsupported_for_image') return { code: 400, body: { error: 'chat_url_unsupported_for_image' } };
@@ -870,6 +873,24 @@ async function writeQueryResponseFile({ outDir, text }) {
   const responsePath = path.join(outDir, 'assistant_response.md');
   await atomicWriteFile(responsePath, responseMarkdownContent(text), { mode: 0o600 });
   return responsePath;
+}
+
+// A one-shot answer keeps its plain text and its structured sources beside the
+// Markdown answer, so a caller can grade either without re-parsing Markdown.
+async function writeOneShotAnswerFiles({ outDir, meta }) {
+  const sources = Array.isArray(meta?.sources) ? meta.sources : [];
+  const responseTextPath = path.join(outDir, 'assistant_response.txt');
+  const sourcesPath = path.join(outDir, 'sources.json');
+  await atomicWriteFile(responseTextPath, responseMarkdownContent(meta?.plainText || ''), { mode: 0o600 });
+  await atomicWriteJson(sourcesPath, { sources }, { mode: 0o600 });
+  return {
+    answerSettings: meta?.answerSettings || null,
+    modeApplied: meta?.modeApplied || null,
+    freshChatUrl: meta?.freshChatUrl || null,
+    responseTextPath,
+    sourcesPath,
+    sourceCount: sources.length
+  };
 }
 
 async function collectRegisteredArtifacts({
@@ -1815,6 +1836,16 @@ export function startHttpApi({
         attachmentDebug: error?.attachmentDebug || detail || null
       };
     }
+    if (Object.hasOwn(ONESHOT_ERRORS, message)) {
+      const known = ONESHOT_ERRORS[message];
+      return {
+        ...base,
+        status: 'error',
+        label: known.label,
+        detail: known.detail(detail),
+        ...(known.attachment ? { attachmentDebug: detail || null } : {})
+      };
+    }
     if (message === 'missing_staged_prompt') {
       return {
         ...base,
@@ -2017,7 +2048,8 @@ export function startHttpApi({
     projectUrl,
     imageGeneration,
     modeIntent,
-    modelIntent
+    modelIntent,
+    oneShot = false
   }) => ({
     prompt: String(prompt || ''),
     promptPrefix: String(promptPrefix || ''),
@@ -2037,7 +2069,8 @@ export function startHttpApi({
     chatUrl: String(chatUrl || '').trim() || null,
     projectUrl: String(projectUrl || '').trim() || null,
     imageGeneration: !!imageGeneration,
-    modeIntent: normalizeChatGptModeIntent(modeIntent, { fallback: null }),
+    // A one-shot site's intents are its own words; ChatGPT normalization would drop them.
+    modeIntent: oneShot ? trimOrNull(modeIntent) : normalizeChatGptModeIntent(modeIntent, { fallback: null }),
     modelIntent: normalizeChatGptModelIntent(modelIntent, { fallback: null }),
   });
 
@@ -2473,8 +2506,15 @@ export function startHttpApi({
       tabKey: tabMeta?.key || null,
       vendorId: tabMeta?.vendorId || null
     });
-    const usage = queryUsageForResult({ result, conversationUrl, modeIntent, modelIntent, activeQuery });
+    // A one-shot site's mode intent is its own word, which ChatGPT
+    // normalization would drop; what its page showed is in answerSettings.
+    const oneShot = result?.meta?.oneShot === true;
+    const usage = {
+      ...queryUsageForResult({ result, conversationUrl, modeIntent, modelIntent, activeQuery }),
+      ...(oneShot ? { modeIntent: trimOrNull(modeIntent) } : {})
+    };
     const responsePath = await writeQueryResponseFile({ outDir, text: result?.text || '' });
+    const oneShotRecord = oneShot ? await writeOneShotAnswerFiles({ outDir, meta: result.meta }) : null;
     const metadataPath = path.join(outDir, 'metadata.json');
     await atomicWriteFile(
       metadataPath,
@@ -2495,6 +2535,7 @@ export function startHttpApi({
         modeVerificationReason: usage.modeVerificationReason,
         completionEvidence: { source: completionEvidence.source, observedAt: completionEvidence.observedAt },
         responsePath,
+        ...(oneShotRecord ? { ...oneShotRecord, attachments: Array.isArray(result.meta.attachments) ? result.meta.attachments : [] } : {}),
         capturedAt: new Date().toISOString()
       }, null, 2)}\n`,
       { mode: 0o600 }
@@ -2522,13 +2563,18 @@ export function startHttpApi({
           mime: 'application/json',
           source: 'agentify_query',
           meta: { role: 'metadata' }
-        }
+        },
+        ...(oneShotRecord ? [
+          { kind: 'file', filePath: oneShotRecord.responseTextPath, originalName: path.basename(oneShotRecord.responseTextPath), mime: 'text/plain', source: 'agentify_query', meta: { role: 'assistant_response_text' } },
+          { kind: 'file', filePath: oneShotRecord.sourcesPath, originalName: path.basename(oneShotRecord.sourcesPath), mime: 'application/json', source: 'agentify_query', meta: { role: 'sources' } }
+        ] : [])
       ]
     });
     const outputManifest = {
       dir: outDir,
       responsePath,
       metadataPath,
+      ...(oneShotRecord || {}),
       modeUsed: usage.modeUsed || null,
       modelUsed: usage.modelUsed || null,
       degradedFrom: usage.degradedFrom || null,
@@ -4587,6 +4633,21 @@ export function startHttpApi({
         const effectiveVendorId = normalizeVendorToken(advisoryTabMeta?.vendorId || vendor?.id || '');
         if (advisoryTabMeta && (advisoryTabMeta.recipient?.kind || 'chat') !== recipient.kind) throw new Error('recipient_conflict');
         const isChatGpt = effectiveVendorId === 'chatgpt';
+        // A one-shot site opens a fresh chat for every run (ADR 0017), so it never
+        // reuses a saved conversation or a ChatGPT project, and takes its own modeIntent.
+        const oneShot = !!oneShotAdapterFor(effectiveVendorId);
+        if (oneShot) {
+          const fields = [
+            suppliedChatUrl ? 'chatUrl' : null,
+            trimOrNull(body.projectUrl) ? 'projectUrl' : null,
+            hasLiveSourceId ? 'liveSourceId' : null
+          ].filter(Boolean);
+          if (fields.length) {
+            const error = new Error('oneshot_location_unsupported');
+            error.data = { vendorId: effectiveVendorId, fields };
+            throw error;
+          }
+        }
         const requestedModelIntent = normalizeQueryModelIntent({ ...body, imageGeneration }, { isChatGpt });
         const initialSavedMeta = getPersistedKeyMeta(tabKey);
         if (tabKey && Object.hasOwn(keyMetaByKey, tabKey) && (initialSavedMeta?.recipient?.kind || 'chat') !== recipient.kind) {
@@ -4613,13 +4674,13 @@ export function startHttpApi({
         const savedMeta = getPersistedKeyMeta(requestedKey);
         const projectUrl = chatProfile
           ? chatProfile.projectUrl
-          : trimOrNull(body.projectUrl) || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
+          : oneShot ? null : trimOrNull(body.projectUrl) || savedMeta?.projectUrl || settings.defaultProjectUrl || null;
         const savedConversationUrl = chatProfile
           ? chatProfile.conversationUrl
-          : (imageGeneration ? null : savedMeta?.conversationUrl || null);
-        const modeIntent = chatProfile?.modeIntent || null;
+          : (imageGeneration || oneShot ? null : savedMeta?.conversationUrl || null);
+        const modeIntent = chatProfile?.modeIntent || (oneShot ? trimOrNull(body.modeIntent)?.toLowerCase() || null : null);
         const modelIntent = chatProfile?.modelIntent || requestedModelIntent || null;
-        const persistKeyLocationForRun = (chatProfile ? chatProfile.persistKeyLocation : !imageGeneration);
+        const persistKeyLocationForRun = (chatProfile ? chatProfile.persistKeyLocation : !imageGeneration && !oneShot);
         const entryTarget = chatProfile?.entryTarget || null;
         const op = {
           id: crypto.randomUUID(),
@@ -4648,7 +4709,7 @@ export function startHttpApi({
           const tabMeta = getTabMeta(tabs, tabId);
           if ((tabMeta?.recipient?.kind || 'chat') !== recipient.kind) throw new Error('recipient_conflict');
           if (hasLiveSourceId) assertLiveContinuationTab(liveContinuationSource, tabMeta);
-          const tabPatch = chatGptTabMetaPatch({ projectUrl, modeIntent });
+          const tabPatch = oneShot ? {} : chatGptTabMetaPatch({ projectUrl, modeIntent });
           if (chatProfile?.locationSource === 'explicit-chat') tabPatch.projectUrl = projectUrl || null;
           if (Object.keys(tabPatch).length) tabs.updateTabMeta?.(tabId, tabPatch);
           const queryPersistPatch = requestedKey && persistKeyLocationForRun
@@ -4707,7 +4768,8 @@ export function startHttpApi({
               projectUrl,
               imageGeneration,
               modeIntent,
-              modelIntent
+              modelIntent,
+              oneShot
             })
           });
           runCreated = true;
@@ -4737,7 +4799,7 @@ export function startHttpApi({
             });
             packed.context.summary.clampedLimits = clampedLimits;
             const controller = tabs.getControllerById(tabId);
-            const effectiveProjectUrl = projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
+            const effectiveProjectUrl = oneShot ? null : projectUrl || getTabMeta(tabs, tabId)?.projectUrl || null;
             await patchRunRecord(op.id, {
               materializedReplay: materializedReplay({ packed, timeoutMs }),
               packedContextSummary: packed.context?.summary || null,

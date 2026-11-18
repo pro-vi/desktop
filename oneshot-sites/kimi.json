@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "vendorId": "kimi",
+  "contractVersion": "2026-11-18",
+  "capturedAt": "2026-11-18T10:30:00.000Z",
+  "capabilities": [
+    { "id": "readiness", "anchorIds": ["composer", "signed-out-marker"] },
+    { "id": "composer", "anchorIds": ["composer"] },
+    { "id": "attachment", "anchorIds": ["file-input", "attachment-item", "attachment-pending", "attachment-error"] },
+    { "id": "submit", "anchorIds": ["send-button", "send-disabled", "stop-button"] },
+    { "id": "response", "anchorIds": ["user-turn", "assistant-turn", "answer-body", "answer-exclude", "answer-error", "stop-button"] },
+    { "id": "answer", "anchorIds": ["answer-body", "answer-skip", "code-language", "citation", "source-item"] },
+    { "id": "mode", "anchorIds": ["mode-trigger", "mode-trigger-model", "mode-trigger-effort", "mode-option", "mode-option-label", "mode-more", "mode-more-option", "mode-effort-item", "mode-effort-option"] }
+  ],
+  "anchors": [
+    {
+      "id": "composer",
+      "branches": [
+        { "id": "composer-lexical", "kind": "canonical", "source": "live-page", "selector": "div.chat-input-editor[contenteditable=\"true\"]" },
+        { "id": "composer-lexical-attr", "kind": "legacy", "source": "live-page", "selector": "[data-lexical-editor=\"true\"][contenteditable=\"true\"]" }
+      ]
+    },
+    {
+      "id": "signed-out-marker",
+      "branches": [
+        { "id": "signed-out-history-login", "kind": "canonical", "source": "live-page", "selector": ".next-sidebar-history-list__login" }
+      ]
+    },
+    {
+      "id": "send-button",
+      "branches": [
+        { "id": "send-container", "kind": "canonical", "source": "live-page", "selector": "div.send-button-container" }
+      ]
+    },
+    {
+      "id": "send-disabled",
+      "branches": [
+        { "id": "send-container-disabled", "kind": "canonical", "source": "live-page", "selector": "div.send-button-container.disabled" }
+      ]
+    },
+    {
+      "id": "stop-button",
+      "branches": [
+        { "id": "stop-container-class", "kind": "canonical", "source": "guess", "selector": "div.send-button-container.stop" },
+        { "id": "stop-icon-in-send", "kind": "legacy", "source": "guess", "selector": "div.send-button-container [class*=\"stop\"]" },
+        { "id": "stop-aria", "kind": "legacy", "source": "guess", "selector": "[aria-label*=\"stop\" i]" }
+      ]
+    },
+    {
+      "id": "file-input",
+      "branches": [
+        { "id": "file-input-hidden", "kind": "canonical", "source": "live-page", "selector": "input.hidden-input[type=\"file\"]" },
+        { "id": "file-input-any", "kind": "legacy", "source": "live-page", "selector": "input[type=\"file\"]" }
+      ]
+    },
+    {
+      "id": "attachment-item",
+      "branches": [
+        { "id": "attachment-file-card", "kind": "canonical", "source": "guess", "selector": ".chat-editor-content [class*=\"file-card\"]" },
+        { "id": "attachment-file-item", "kind": "legacy", "source": "guess", "selector": ".chat-editor-content [class*=\"file-item\"]" },
+        { "id": "attachment-class", "kind": "legacy", "source": "guess", "selector": ".chat-editor-content [class*=\"attachment\"]" }
+      ]
+    },
+    {
+      "id": "attachment-pending",
+      "branches": [
+        { "id": "attachment-loading", "kind": "canonical", "source": "guess", "selector": "[class*=\"loading\"]" },
+        { "id": "attachment-uploading", "kind": "legacy", "source": "guess", "selector": "[class*=\"uploading\"]" },
+        { "id": "attachment-progress", "kind": "legacy", "source": "guess", "selector": "[class*=\"progress\"]" }
+      ]
+    },
+    {
+      "id": "attachment-error",
+      "branches": [
+        { "id": "attachment-failed", "kind": "canonical", "source": "guess", "selector": ".chat-editor-content [class*=\"fail\"]" },
+        { "id": "attachment-error-class", "kind": "legacy", "source": "guess", "selector": ".chat-editor-content [class*=\"error\"]" }
+      ]
+    },
+    {
+      "id": "user-turn",
+      "branches": [
+        { "id": "segment-user", "kind": "canonical", "source": "share-page", "selector": "div.segment.segment-user" }
+      ]
+    },
+    {
+      "id": "assistant-turn",
+      "branches": [
+        { "id": "segment-assistant", "kind": "canonical", "source": "share-page", "selector": "div.segment.segment-assistant" }
+      ]
+    },
+    {
+      "id": "answer-body",
+      "branches": [
+        { "id": "markdown", "kind": "canonical", "source": "share-page", "selector": "div.markdown" }
+      ]
+    },
+    {
+      "id": "answer-exclude",
+      "branches": [
+        { "id": "thinking-rollup", "kind": "canonical", "source": "share-page", "selector": ".toolcall-rollup-segment" }
+      ]
+    },
+    {
+      "id": "answer-skip",
+      "branches": [
+        { "id": "code-header", "kind": "canonical", "source": "share-page", "selector": "header.segment-code-header" }
+      ]
+    },
+    {
+      "id": "code-language",
+      "branches": [
+        { "id": "code-lang", "kind": "canonical", "source": "share-page", "selector": "span.segment-code-lang" }
+      ]
+    },
+    {
+      "id": "answer-error",
+      "branches": [
+        { "id": "segment-error", "kind": "canonical", "source": "guess", "selector": "[class*=\"segment-error\"]" }
+      ]
+    },
+    {
+      "id": "citation",
+      "branches": [
+        { "id": "rag-tag", "kind": "canonical", "source": "guess", "selector": ".rag-tag" },
+        { "id": "citation-class", "kind": "legacy", "source": "guess", "selector": "[class*=\"citation\"]" }
+      ]
+    },
+    {
+      "id": "source-item",
+      "branches": [
+        { "id": "search-result-link", "kind": "canonical", "source": "guess", "selector": "[class*=\"search-result\"] a[href]" },
+        { "id": "reference-link", "kind": "legacy", "source": "guess", "selector": "[class*=\"reference\"] a[href]" }
+      ]
+    },
+    {
+      "id": "mode-trigger",
+      "branches": [
+        { "id": "model-select-trigger", "kind": "canonical", "source": "live-page", "selector": "[data-testid=\"model-select-trigger\"]" }
+      ]
+    },
+    {
+      "id": "mode-trigger-model",
+      "branches": [
+        { "id": "trigger-name", "kind": "canonical", "source": "live-page", "selector": "span.name" }
+      ]
+    },
+    {
+      "id": "mode-trigger-effort",
+      "branches": [
+        { "id": "trigger-effort", "kind": "canonical", "source": "live-page", "selector": "span.current-effort" }
+      ]
+    },
+    {
+      "id": "mode-option",
+      "branches": [
+        { "id": "model-option", "kind": "canonical", "source": "live-page", "selector": "[data-testid=\"model-option\"]" }
+      ]
+    },
+    {
+      "id": "mode-option-label",
+      "branches": [
+        { "id": "model-option-name", "kind": "canonical", "source": "live-page", "selector": "span.name" }
+      ]
+    },
+    {
+      "id": "mode-more",
+      "branches": [
+        { "id": "model-more-trigger", "kind": "canonical", "source": "live-page", "selector": "[data-testid=\"model-more-trigger\"]" }
+      ]
+    },
+    {
+      "id": "mode-more-option",
+      "branches": [
+        { "id": "model-more-option", "kind": "canonical", "source": "live-page", "selector": "[data-testid=\"model-more-option\"]" }
+      ]
+    },
+    {
+      "id": "mode-effort-item",
+      "branches": [
+        { "id": "model-effort-item", "kind": "canonical", "source": "live-page", "selector": "[data-testid=\"model-effort-item\"]" }
+      ]
+    },
+    {
+      "id": "mode-effort-option",
+      "branches": [
+        { "id": "model-effort-option", "kind": "canonical", "source": "live-page", "selector": "[data-testid=\"model-effort-option\"]" }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,8 @@ import {
   resolveChromeProfileName
 } from './browser-backend.mjs';
 import { ChatGPTController } from './chatgpt-controller.mjs';
+import { OneShotController } from './oneshot-engine.mjs';
+import { oneShotAdapterFor } from './oneshot-sites/index.mjs';
 import {
   createProviderCompatibilityBridge,
   loadChatGptCompatibilityProfile,
@@ -270,6 +272,16 @@ async function main() {
     onNeedsAttention,
     onChanged: emitTabsChanged,
     createController: async ({ tabId, page, vendorId, vendorName, recipient }) => {
+      const onBlocked = async (st) => {
+        await tabs.needsAttention(tabId, st);
+      };
+      const onUnblocked = async () => {
+        await tabs.resolvedAttention(tabId);
+      };
+      const oneShotAdapter = oneShotAdapterFor(vendorId);
+      if (oneShotAdapter) {
+        return new OneShotController({ page, adapter: oneShotAdapter, vendorId, vendorName, onBlocked, onUnblocked });
+      }
       const compatibilityBridge = createProviderCompatibilityBridge({
         vendorId,
         vendorName,
@@ -290,12 +302,8 @@ async function main() {
         ...compatibilityBridge,
         compatibilityBackend: browserBackendKind === 'chrome-cdp' ? 'chrome-cdp' : 'electron',
         stateDir,
-        onBlocked: async (st) => {
-          await tabs.needsAttention(tabId, st);
-        },
-        onUnblocked: async () => {
-          await tabs.resolvedAttention(tabId);
-        }
+        onBlocked,
+        onUnblocked
       });
       controller.serverId = serverId;
       return controller;
