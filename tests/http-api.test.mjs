@@ -9785,16 +9785,21 @@ test('http-api: query rate limits (qpm + inflight)', async (t) => {
   inflightBlock = true;
   let resolveHang;
   const hang = new Promise((r) => (resolveHang = r));
+  let markEntered;
+  const entered = new Promise((r) => (markEntered = r));
   tabs.getControllerById = () => ({
     query: async () => {
+      markEntered();
       await hang;
       return { text: 'ok', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
     }
   });
 
   const p1 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q1', prompt: 'a', attachments: [] } });
-  // Let the first request enter a provider slot.
-  await new Promise((r) => setTimeout(r, 20));
+  // The controller runs only after its run holds the provider slot, so the
+  // second request starts once the first one's query has begun. A fixed wait
+  // here let the second request take the slot first on a slow CI runner.
+  await entered;
   const p2 = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'b', attachments: [] } });
 
   const p2Res = await p2;
