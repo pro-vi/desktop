@@ -871,10 +871,13 @@ export class OneShotController {
     let stableSince = null;
     let last = null;
     let pastDeadline = false;
+    // The last read that showed the provider working (a stop control).
+    let lastWorkAt = start;
     while (Date.now() - start < hardMs) {
       this.#throwIfStopRequested();
       await sleep(this.timings.pollMs);
       last = await this.#eval(readTurns);
+      if (last.stopVisible) lastWorkAt = Date.now();
       const answer = last.lastAssistant;
       // A fresh chat has no assistant turn before send, so a new turn is one
       // more than the baseline count (ADR 0009's rule, without message ids).
@@ -885,33 +888,34 @@ export class OneShotController {
       if (this.#isRefusal(last.notice) && !(isNew && text.trim())) {
         throw namedError('send_refused', { notice: last.notice, stage: 'after_send' });
       }
-      const elapsed = Date.now() - start;
-      if (elapsed >= timeoutMs) {
-        if (!pastDeadline) {
-          pastDeadline = true;
-          await this.#emitProgress({ phase: 'waiting_past_deadline', softDeadlineMs: timeoutMs, hardDeadlineMs: hardMs, idleSettleMs: this.timings.idleSettleMs });
-        }
-        // Past the soft deadline only a showing stop control holds the run to
-        // the ceiling; a finished turn with answer text gets a short settle.
-        const settling = isNew && answer.idle && !!text.trim() && !this.#isProgressOnly(text) &&
-          elapsed < timeoutMs + this.timings.idleSettleMs;
-        if (!last.stopVisible && !settling) break;
+      const pastSoftDeadline = Date.now() - start >= timeoutMs;
+      if (pastSoftDeadline && !pastDeadline) {
+        pastDeadline = true;
+        await this.#emitProgress({ phase: 'waiting_past_deadline', softDeadlineMs: timeoutMs, hardDeadlineMs: hardMs, idleSettleMs: this.timings.idleSettleMs });
       }
-      if (!isNew || last.stopVisible || !answer.idle || this.#isProgressOnly(text)) {
+      // A progress label or empty text is never a finished answer.
+      const finished = isNew && !last.stopVisible && answer.idle && !this.#isProgressOnly(text);
+      if (!finished) {
         lastText = null;
         stableSince = null;
-        continue;
-      }
-      if (text !== lastText) {
+      } else if (text !== lastText) {
         lastText = text;
         stableSince = Date.now();
-        continue;
+      } else if (Date.now() - stableSince >= this.timings.stableMs) {
+        if (answer.error) {
+          throw namedError('provider_response_error', { preview: clipText(text, 180) });
+        }
+        return;
       }
-      if (Date.now() - stableSince < this.timings.stableMs) continue;
-      if (answer.error) {
-        throw namedError('provider_response_error', { preview: clipText(text, 180) });
+      // Past the soft deadline only a showing stop control holds the run to
+      // the ceiling. A finished turn gets a settle window measured from the
+      // later of the deadline and the last read that showed work, so an agent
+      // that works past the deadline and then finishes still has time to
+      // settle (Kimi's K2.8 Preview worked for more than 30 minutes).
+      if (pastSoftDeadline && !last.stopVisible) {
+        const settleFrom = Math.max(start + timeoutMs, lastWorkAt);
+        if (!finished || Date.now() - settleFrom >= this.timings.idleSettleMs) break;
       }
-      return;
     }
     throw namedError('timeout_waiting_for_response', {
       softDeadlineMs: timeoutMs,

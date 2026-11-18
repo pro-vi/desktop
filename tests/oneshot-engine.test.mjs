@@ -814,15 +814,31 @@ test('oneshot-engine: a refusal notice after the send was acknowledged ends the 
   );
 });
 
+// The provider works (stop control up) for workMs after Send, measured in
+// time rather than reads, then shows a finished, stable answer.
+function workFor(page, state, workMs, answer) {
+  let sentAt = null;
+  const evaluate = page.evaluate;
+  page.evaluate = async (js) => {
+    if (js.includes('function readTurns(') && state.sendClicks > 0) {
+      sentAt ??= Date.now();
+      const working = Date.now() - sentAt < workMs;
+      state.stop = working;
+      state.turns = state.turns.filter((turn) => turn.role === 'user');
+      state.turns.push({ role: 'assistant', idle: !working, body: answerTree.plain(working ? 'Researching' : answer) });
+    }
+    return await evaluate(js);
+  };
+}
+
+// The settle window is wide enough that a slow machine still reads a stable
+// answer inside it; what the tests vary is how long the provider works.
+const SETTLE = { ...FAST, idleSettleMs: 200, hardResponseMs: 5_000 };
+
 test('oneshot-engine: past the soft deadline the run keeps waiting while the provider is visibly working', async () => {
-  const working = makeSite({
-    timeline: [
-      ...Array.from({ length: 40 }, () => ({ stop: true, body: answerTree.plain('Researching') })),
-      { stop: false, idle: true, body: answerTree.plain('Long answer') }
-    ]
-  });
-  // A 5 s ceiling keeps 40 reads well inside it on a loaded machine.
-  const result = await controllerFor(working.page, adapterFor(), { timings: { ...FAST, hardResponseMs: 5_000 } }).query({ prompt: 'probe', timeoutMs: 50 });
+  const working = makeSite();
+  workFor(working.page, working.state, 150, 'Long answer');
+  const result = await controllerFor(working.page, adapterFor(), { timings: SETTLE }).query({ prompt: 'probe', timeoutMs: 50 });
   assert.equal(result.text, 'Long answer');
 
   // Without a stop control there is no sign of work, so the soft deadline ends the wait.
@@ -833,6 +849,15 @@ test('oneshot-engine: past the soft deadline the run keeps waiting while the pro
     (error) => error.message === 'timeout_waiting_for_response' && error.data.softDeadlineMs === 50
   );
   assert.ok(Date.now() - started < 500);
+});
+
+test('oneshot-engine: a provider that works past the deadline and the settle window, then finishes, is saved as an answer', async () => {
+  // 600 ms of work against a 50 ms deadline and a 200 ms settle window: a
+  // window measured from the deadline closed at 250 ms, before the answer.
+  const { page, state } = makeSite();
+  workFor(page, state, 600, 'Finished after a long agent run');
+  const result = await controllerFor(page, adapterFor(), { timings: SETTLE }).query({ prompt: 'probe', timeoutMs: 50 });
+  assert.equal(result.text, 'Finished after a long agent run');
 });
 
 test('oneshot-engine: files an earlier draft left in the composer are removed by the adapter before the run goes on', async () => {
