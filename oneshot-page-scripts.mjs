@@ -209,13 +209,15 @@ export function captureAnswer(a, h) {
       return null;
     }
   };
-  const addSource = (url, title, kind) => {
-    if (!url) return null;
-    let source = byUrl.get(url);
+  // A source is a web page (url) or an attached file the answer cites (file).
+  const addSource = (url, title, kind, file = null) => {
+    const key = url || (file ? `file:${file}` : null);
+    if (!key) return null;
+    let source = byUrl.get(key);
     if (!source) {
-      source = { index: sources.length + 1, url, title: '', kinds: [] };
+      source = { index: sources.length + 1, url: url || null, file: url ? null : file, title: '', kinds: [] };
       sources.push(source);
-      byUrl.set(url, source);
+      byUrl.set(key, source);
     }
     const cleanTitle = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 300);
     // A citation marker's own text is usually just its number, which names nothing.
@@ -231,7 +233,9 @@ export function captureAnswer(a, h) {
     const stamped = node.getAttribute?.('data-oneshot-sources');
     if (stamped) {
       try {
-        return JSON.parse(stamped).map((item) => ({ url: httpUrl(item?.url), title: item?.title || '' })).filter((item) => item.url);
+        return JSON.parse(stamped)
+          .map((item) => ({ url: httpUrl(item?.url), file: item?.file ? String(item.file).trim() : null, title: item?.title || '' }))
+          .filter((item) => item.url || item.file);
       } catch {}
     }
     const url = httpUrl(node.getAttribute?.('href') || node.getAttribute?.('data-url')) ||
@@ -264,7 +268,10 @@ export function captureAnswer(a, h) {
     if (SKIP_TAGS.has(tag) || h.matchesAny(node, a.answerSkip) || h.matchesAny(node, a.answerExclude)) return '';
     if (h.matchesAny(node, a.citation)) {
       return citedSources(node)
-        .map((item) => ` [${addSource(item.url, item.title, 'citation')}](${item.url})`)
+        .map((item) => {
+          const index = addSource(item.url, item.title, 'citation', item.file);
+          return item.url ? ` [${index}](${item.url})` : ` [${index}]`;
+        })
         .join('');
     }
     const heading = /^h([1-6])$/.exec(tag);

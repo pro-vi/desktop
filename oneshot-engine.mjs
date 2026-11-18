@@ -26,7 +26,8 @@ const DEFAULT_TIMINGS = Object.freeze({
   // The answer text must hold still this long, with no stop control showing.
   stableMs: 3_000,
   sendAckMs: 8_000,
-  sendEnableMs: 3_000,
+  // Kimi keeps Send disabled while it processes attached files after typing.
+  sendEnableMs: 60_000,
   uploadMs: 120_000,
   navigationMs: 30_000,
   promptDeliveryMs: 2_000,
@@ -168,8 +169,11 @@ export function modeVerificationFor({ mode, modeApplied, answerSettings }) {
   if (answerSettings?.unreadReason) {
     return { modeVerification: 'unverified', modeVerificationReason: answerSettings.unreadReason };
   }
-  const before = modeApplied?.shown?.model || null;
-  const after = answerSettings?.model || null;
+  // Each adapter names the selection it made (Kimi's model, Gemini's picker
+  // option); a model line the page rewrites, such as Gemini's quota notice,
+  // is not a change of selection.
+  const before = modeApplied?.shown?.selection ?? modeApplied?.shown?.model ?? null;
+  const after = answerSettings?.selection ?? answerSettings?.model ?? null;
   if (mode && before && after && before !== after) {
     return {
       modeVerification: 'unverified',
@@ -185,7 +189,9 @@ export function modeVerificationFor({ mode, modeApplied, answerSettings }) {
 export function appendSourcesSection(markdown, sources) {
   const listed = (sources || []).filter((source) => source.kinds.includes('citation') || source.kinds.includes('panel'));
   if (!listed.length) return markdown;
-  const lines = listed.map((source) => `${source.index}. [${source.title || source.url}](${source.url})`);
+  const lines = listed.map((source) => (source.url
+    ? `${source.index}. [${source.title || source.url}](${source.url})`
+    : `${source.index}. ${source.title || source.file} (attached file)`));
   return `${markdown}\n\n## Sources\n\n${lines.join('\n')}`;
 }
 
@@ -844,6 +850,7 @@ export class OneShotController {
       return {
         model,
         mode,
+        ...(typeof shown?.selection === 'string' && shown.selection.trim() ? { selection: shown.selection.trim() } : {}),
         source: shown?.source || null,
         unreadReason: model || mode ? null : shown?.unreadReason || 'not_shown'
       };

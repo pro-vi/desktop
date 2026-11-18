@@ -214,10 +214,11 @@ test('oneshot-kimi: k3.1-pro selects the model and High effort, confirmed on the
   const result = await kimiController(page).query({ prompt: 'probe', modeIntent: 'k3.1-pro', timeoutMs: 2_000 });
   assert.equal(state.model, 'K3.1 Pro');
   assert.equal(state.effort, 'High');
-  assert.deepEqual(result.meta.modeApplied, { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High' }, label: 'K3.1 Pro | High' });
+  assert.deepEqual(result.meta.modeApplied, { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High', selection: 'K3.1 Pro' }, label: 'K3.1 Pro | High' });
   assert.deepEqual(result.meta.answerSettings, {
     model: 'K3.1 Pro',
     mode: 'Thinking effort: High',
+    selection: 'K3.1 Pro',
     source: 'composer-model-menu-after-answer',
     unreadReason: null
   });
@@ -229,7 +230,7 @@ test('oneshot-kimi: k3 is found under More models', async () => {
   const { state, page } = makeKimi({ effort: 'High' });
   const result = await kimiController(page).query({ prompt: 'probe', modeIntent: 'k3', timeoutMs: 2_000 });
   assert.equal(state.model, 'K3');
-  assert.deepEqual(result.meta.modeApplied.shown, { model: 'K3', effort: 'High' });
+  assert.deepEqual(result.meta.modeApplied.shown, { model: 'K3', effort: 'High', selection: 'K3' });
 });
 
 test('oneshot-kimi: a model the account cannot select fails closed and nothing is typed or sent', async () => {
@@ -306,7 +307,7 @@ test('oneshot-kimi: the Reference panel is opened and its links become the answe
   const { state, page } = makeKimi({ references });
   const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.equal(state.panelOpen, true);
-  assert.deepEqual(result.meta.sources, [{ index: 1, url: 'https://www.britannica.com/place/Paris', title: 'Paris | Britannica', kinds: ['panel'] }]);
+  assert.deepEqual(result.meta.sources, [{ index: 1, url: 'https://www.britannica.com/place/Paris', file: null, title: 'Paris | Britannica', kinds: ['panel'] }]);
   assert.match(result.text, /## Sources\n\n1\. \[Paris \| Britannica\]\(https:\/\/www\.britannica\.com\/place\/Paris\)/);
 });
 

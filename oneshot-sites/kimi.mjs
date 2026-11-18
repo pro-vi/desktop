@@ -247,7 +247,7 @@ async function applyKimiMode(ctx, mode) {
   };
   let trigger = await selectModel(ctx, readers, mode);
   if (mode.effort) trigger = await selectEffort(ctx, readers, mode);
-  return { confirmed: true, shown: { model: trigger.model, effort: trigger.effort }, label: kimiModeLabel(trigger) };
+  return { confirmed: true, shown: { model: trigger.model, effort: trigger.effort, selection: trigger.model }, label: kimiModeLabel(trigger) };
 }
 
 function kimiModeLabel(trigger) {
@@ -315,6 +315,7 @@ async function readKimiAnswerSettings(ctx) {
   return {
     model: trigger.model,
     mode: trigger.effort ? `Thinking effort: ${trigger.effort}` : null,
+    selection: trigger.model,
     source: 'composer-model-menu-after-answer'
   };
 }

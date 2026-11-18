@@ -20,6 +20,9 @@ const OPTIONS = [
 ];
 
 // Sources behind each citation chip, revealed in a hover card when clicked.
+// A chip citing attached files opens a card of file names with no links.
+const FILE_CARD = ['sow_profile_current_short.docx', 'doc_06_share_purchase_agreement.pdf'];
+
 const CHIP_SOURCES = [
   [{ href: 'https://www.nih.gov/a#:~:text=risk', text: 'NIH\nInfection risk' }],
   [
@@ -67,7 +70,9 @@ function renderGemini(state) {
   }
   if (state.openCard !== null) {
     rows.push(el('div', {
-      children: CHIP_SOURCES[state.openCard].map((link) => el('a', { matches: [sel('source-card-link')], attrs: { href: link.href }, text: link.text }))
+      children: state.fileCards
+        ? FILE_CARD.map((name) => el('div', { matches: [sel('source-card-file')], text: name }))
+        : CHIP_SOURCES[state.openCard].map((link) => el('a', { matches: [sel('source-card-link')], attrs: { href: link.href }, text: link.text }))
     }));
   }
   rows.push(el('div', {
@@ -174,8 +179,8 @@ test('oneshot-gemini: pro selects the Detailed research option and records the m
   const { state, page } = makeGemini();
   const result = await geminiController(page).query({ prompt: 'probe', modeIntent: 'pro', timeoutMs: 2_000 });
   assert.equal(state.model, '3.1 Pro');
-  assert.deepEqual(result.meta.modeApplied, { intent: 'pro', shown: { model: '3.1 Pro', option: 'Detailed research' }, label: 'Pro' });
-  assert.deepEqual(result.meta.answerSettings, { model: '3.1 Pro', mode: 'Detailed research', source: 'mode-picker-menu-after-answer', unreadReason: null });
+  assert.deepEqual(result.meta.modeApplied, { intent: 'pro', shown: { model: '3.1 Pro', option: 'Detailed research', selection: 'Detailed research' }, label: 'Pro' });
+  assert.deepEqual(result.meta.answerSettings, { model: '3.1 Pro', mode: 'Detailed research', selection: 'Detailed research', source: 'mode-picker-menu-after-answer', unreadReason: null });
 });
 
 test('oneshot-gemini: a disabled option fails closed before the composer is touched', async () => {
@@ -285,4 +290,16 @@ test('oneshot-gemini: a mode picker drawn after the composer is waited for, not 
   };
   const result = await geminiController(page).query({ prompt: 'probe', modeIntent: 'pro', timeoutMs: 2_000 });
   assert.equal(result.meta.modeApplied.shown.model, '3.1 Pro');
+});
+
+test('oneshot-gemini: a citation of attached files is kept as file sources without links', async () => {
+  const { state, page } = makeGemini();
+  state.fileCards = true;
+  const result = await geminiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.sources.map((item) => [item.index, item.url, item.file]), [
+    [1, null, 'sow_profile_current_short.docx'],
+    [2, null, 'doc_06_share_purchase_agreement.pdf']
+  ]);
+  assert.match(result.text, /Control blood sugar\. \[1\] \[2\] Treat gum disease\. \[1\] \[2\]/);
+  assert.match(result.text, /## Sources\n\n1\. sow_profile_current_short\.docx \(attached file\)\n2\. doc_06_share_purchase_agreement\.pdf \(attached file\)/);
 });

@@ -268,8 +268,8 @@ test('oneshot-engine: a query opens a fresh chat, applies the mode, uploads, typ
     '2. [https://news.example.com/a](https://news.example.com/a)'
   ].join('\n'));
   assert.deepEqual(result.meta.sources, [
-    { index: 1, url: 'https://example.org/report', title: 'the report', kinds: ['inline'] },
-    { index: 2, url: 'https://news.example.com/a', title: '', kinds: ['citation'] }
+    { index: 1, url: 'https://example.org/report', file: null, title: 'the report', kinds: ['inline'] },
+    { index: 2, url: 'https://news.example.com/a', file: null, title: '', kinds: ['citation'] }
   ]);
   assert.match(result.meta.plainText, /See the report for detail1\./);
 });
@@ -785,4 +785,12 @@ test('oneshot-engine: a composer that misstages once is cleared and retyped; twi
     (error) => error.message === 'prompt_staging_failed' && error.data.firstDifference.line === 2
   );
   assert.equal(always.state.sendClicks, 0);
+});
+
+test('oneshot-engine: a rewritten model line is not a change of selection', () => {
+  const mode = { intent: 'pro' };
+  // Gemini's Pro option kept its place but its model line became a quota notice.
+  const modeApplied = { intent: 'pro', shown: { model: '3.1 Pro', option: 'Detailed research', selection: 'Detailed research' } };
+  assert.deepEqual(modeVerificationFor({ mode, modeApplied, answerSettings: { model: 'Limit resets Nov 18, 7:03 AM', mode: 'Detailed research', selection: 'Detailed research' } }), {});
+  assert.equal(modeVerificationFor({ mode, modeApplied, answerSettings: { model: '4 Hydrogen', mode: 'Everyday help', selection: 'Everyday help' } }).degradedFrom.shownAfterAnswer, 'Everyday help');
 });

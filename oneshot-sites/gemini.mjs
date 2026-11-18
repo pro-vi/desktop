@@ -77,6 +77,13 @@ export function stampGeminiCitation(a, h) {
     url: link.getAttribute('href'),
     title: h.textOf(link).replace(/\s+/g, ' ').trim()
   }));
+  // A citation of an attached file shows the file's name and no link.
+  if (!links.length) {
+    for (const node of h.all(a.cardFile).filter(h.visible)) {
+      const name = h.textOf(node).replace(/\s+/g, ' ').trim();
+      if (name) links.push({ file: name, title: name });
+    }
+  }
   if (a.countOnly) return { links: links.length };
   const turns = h.all(a.assistantTurn);
   const chip = turns.length ? h.all(a.citation, turns[turns.length - 1])[a.index] : null;
@@ -118,6 +125,7 @@ function selectors(ctx) {
     citation: ctx.selectorsFor('citation'),
     citationButton: ctx.selectorsFor('citation-button'),
     cardLink: ctx.selectorsFor('source-card-link'),
+    cardFile: ctx.selectorsFor('source-card-file'),
     sourcesList: ctx.selectorsFor('sources-list'),
     thoughtsPanel: ctx.selectorsFor('thoughts-panel')
   };
@@ -173,7 +181,7 @@ async function selectOption(ctx, sel, mode) {
     });
   }
   const after = await read();
-  return { shown: { model: checked.sublabel, option: checked.label }, label: after.model };
+  return { shown: { model: checked.sublabel, option: checked.label, selection: checked.label }, label: after.model };
 }
 
 async function readCheckedOption(ctx, sel) {
@@ -250,7 +258,7 @@ async function readGeminiAnswerSettings(ctx) {
   // checked option in its menu names both the model and its purpose.
   const checked = await readCheckedOption(ctx, selectors(ctx));
   if (!checked) return { unreadReason: 'mode_picker_missing' };
-  return { model: checked.sublabel || null, mode: checked.label || null, source: 'mode-picker-menu-after-answer' };
+  return { model: checked.sublabel || null, mode: checked.label || null, selection: checked.label || null, source: 'mode-picker-menu-after-answer' };
 }
 
 const profile = parseOneShotProfile(

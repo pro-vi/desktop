@@ -9,7 +9,7 @@
     { "id": "attachment", "anchorIds": ["upload-menu-button", "file-input", "attachment-item", "attachment-pending", "attachment-error"] },
     { "id": "submit", "anchorIds": ["send-button", "send-disabled", "stop-button"] },
     { "id": "response", "anchorIds": ["user-turn", "assistant-turn", "answer-body", "answer-exclude", "answer-error", "stop-button", "idle-signal"] },
-    { "id": "answer", "anchorIds": ["answer-body", "answer-skip", "code-language", "citation", "citation-button", "source-card-link"] },
+    { "id": "answer", "anchorIds": ["answer-body", "answer-skip", "code-language", "citation", "citation-button", "source-card-link", "source-card-file"] },
     { "id": "mode", "anchorIds": ["mode-trigger", "mode-trigger-label", "mode-option", "mode-option-label", "mode-option-sublabel"] },
     { "id": "tool-use", "anchorIds": ["sources-list", "thoughts-panel"] }
   ],
@@ -187,6 +187,12 @@
       "id": "thoughts-panel",
       "branches": [
         { "id": "model-thoughts", "kind": "canonical", "source": "guess", "selector": "model-thoughts" }
+      ]
+    },
+    {
+      "id": "source-card-file",
+      "branches": [
+        { "id": "hover-card-file-title", "kind": "canonical", "source": "live-page", "selector": ".luminous-hover-card inline-source-card .title" }
       ]
     }
   ]
