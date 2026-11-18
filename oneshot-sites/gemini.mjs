@@ -129,10 +129,10 @@ function selectionError(reason, data = {}) {
   return error;
 }
 
-async function waitFor(ctx, read, accept) {
+async function waitFor(ctx, read, accept, timeoutMs = ctx.timings.menuMs) {
   const start = Date.now();
   let value = await read();
-  while (!accept(value) && Date.now() - start < ctx.timings.menuMs) {
+  while (!accept(value) && Date.now() - start < timeoutMs) {
     ctx.throwIfStopRequested();
     await ctx.sleep(Math.min(250, ctx.timings.pollMs));
     value = await read();
@@ -147,7 +147,7 @@ async function closeMenus(ctx) {
 
 async function selectOption(ctx, sel, mode) {
   const read = () => ctx.evaluate(readGeminiModePicker, sel);
-  let picker = await read();
+  let picker = await waitFor(ctx, read, (value) => value.found, ctx.timings.controlMs);
   if (!picker.found) throw selectionError('mode_picker_missing');
   if (!picker.expanded) await ctx.click(picker.rect);
   picker = await waitFor(ctx, read, (value) => value.options.length > 0);
@@ -178,7 +178,7 @@ async function selectOption(ctx, sel, mode) {
 
 async function readCheckedOption(ctx, sel) {
   const read = () => ctx.evaluate(readGeminiModePicker, sel);
-  let picker = await read();
+  let picker = await waitFor(ctx, read, (value) => value.found, ctx.timings.controlMs);
   if (!picker.found) return null;
   if (!picker.expanded) await ctx.click(picker.rect);
   picker = await waitFor(ctx, read, (value) => value.options.length > 0);

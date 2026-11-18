@@ -11,7 +11,7 @@ import { oneShotAdapterFor } from '../oneshot-sites/index.mjs';
 import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
 
 const sel = (anchorId) => geminiAdapter.profile.selectorsFor(anchorId)[0];
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50 };
+const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100 };
 
 const OPTIONS = [
   { label: 'Everyday help', sublabel: '4 Hydrogen' },
@@ -90,7 +90,7 @@ function renderGemini(state) {
   }
   if (state.stop) rows.push(el('button', { matches: [sel('stop-button')], rect: { x: 560, y: 600, w: 30, h: 30 } }));
 
-  rows.push(el('button', {
+  if (!state.pickerHidden) rows.push(el('button', {
     matches: [sel('mode-trigger')],
     attrs: { 'aria-expanded': String(state.menu === 'mode') },
     rect: { x: 700, y: 640, w: 120, h: 30 },
@@ -272,4 +272,17 @@ test('oneshot-gemini: tool use is the sources list when it has links, unread beh
 
   const plain = await geminiController(makeGemini().page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.deepEqual(plain.meta.toolUse, { state: 'none', reason: null, steps: [] });
+});
+
+test('oneshot-gemini: a mode picker drawn after the composer is waited for, not reported missing', async () => {
+  const { state, page } = makeGemini();
+  let reads = 0;
+  const evaluate = page.evaluate;
+  page.evaluate = async (js) => {
+    if (js.includes('function readGeminiModePicker(')) reads += 1;
+    state.pickerHidden = reads < 3;
+    return await evaluate(js);
+  };
+  const result = await geminiController(page).query({ prompt: 'probe', modeIntent: 'pro', timeoutMs: 2_000 });
+  assert.equal(result.meta.modeApplied.shown.model, '3.1 Pro');
 });

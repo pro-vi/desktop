@@ -9,7 +9,7 @@ import { oneShotAdapterFor } from '../oneshot-sites/index.mjs';
 import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
 
 const sel = (anchorId) => kimiAdapter.profile.selectorsFor(anchorId)[0];
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50 };
+const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100 };
 
 const MODELS = [
   { label: 'K3.1 Pro', key: 'k3d1-agent' },

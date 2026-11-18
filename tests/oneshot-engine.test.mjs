@@ -52,7 +52,7 @@ const TEST_PROFILE = parseOneShotProfile({
   ]
 }, { vendorId: 'testsite', requiredAnchorIds: ONESHOT_REQUIRED_ANCHORS });
 
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50 };
+const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100 };
 
 // The answer bodies a test can put on the page, as element trees.
 const answerTree = {
@@ -586,6 +586,12 @@ test('oneshot-engine: an assistant turn that appeared before Send is not taken a
     onFiles: (site, list) => {
       for (const file of list) site.chips.push({ name: file.name });
       site.turns.push({ role: 'assistant', body: answerTree.plain('Files received.'), idle: true });
+    },
+    // The send shows no stop control, so only turn identity can hold the run.
+    onSend: (site) => {
+      site.sendClicks += 1;
+      site.turns.push({ role: 'user', text: site.composerText });
+      site.composerText = '';
     }
   });
   const files = await tempFiles(['brief.pdf']);

@@ -165,10 +165,10 @@ function selectionError(reason, data = {}) {
   return error;
 }
 
-async function waitFor(ctx, read, accept) {
+async function waitFor(ctx, read, accept, timeoutMs = ctx.timings.menuMs) {
   const start = Date.now();
   let value = await read();
-  while (!accept(value) && Date.now() - start < ctx.timings.menuMs) {
+  while (!accept(value) && Date.now() - start < timeoutMs) {
     ctx.throwIfStopRequested();
     await ctx.sleep(Math.min(250, ctx.timings.pollMs));
     value = await read();
@@ -182,7 +182,7 @@ async function closeMenus(ctx) {
 }
 
 async function selectModel(ctx, { readTrigger, readMenu }, mode) {
-  let trigger = await readTrigger();
+  let trigger = await waitFor(ctx, readTrigger, (value) => value.found, ctx.timings.controlMs);
   if (!trigger.found) throw selectionError('model_menu_missing');
   if (trigger.model === mode.model) return trigger;
   await ctx.click(trigger.rect);

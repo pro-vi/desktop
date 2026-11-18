@@ -32,7 +32,10 @@ const DEFAULT_TIMINGS = Object.freeze({
   promptDeliveryMs: 2_000,
   uiCheckMs: 5_000,
   // How long an adapter waits for a menu it opened to show its options.
-  menuMs: 3_000
+  menuMs: 3_000,
+  // How long an adapter waits for a page control (a mode picker) to render
+  // after the composer is ready: a fresh chat draws it a moment later.
+  controlMs: 10_000
 });
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
