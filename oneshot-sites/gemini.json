@@ -1,0 +1,195 @@
+{
+  "schemaVersion": 1,
+  "vendorId": "gemini",
+  "contractVersion": "2026-11-18",
+  "capturedAt": "2026-11-18T12:00:00.000Z",
+  "capabilities": [
+    { "id": "readiness", "anchorIds": ["composer", "signed-out-marker", "terms-gate"] },
+    { "id": "composer", "anchorIds": ["composer"] },
+    { "id": "attachment", "anchorIds": ["upload-menu-button", "file-input", "attachment-item", "attachment-pending", "attachment-error"] },
+    { "id": "submit", "anchorIds": ["send-button", "send-disabled", "stop-button"] },
+    { "id": "response", "anchorIds": ["user-turn", "assistant-turn", "answer-body", "answer-exclude", "answer-error", "stop-button"] },
+    { "id": "answer", "anchorIds": ["answer-body", "answer-skip", "code-language", "citation", "citation-button", "source-card-link"] },
+    { "id": "mode", "anchorIds": ["mode-trigger", "mode-trigger-label", "mode-option", "mode-option-label", "mode-option-sublabel", "tool-item", "tool-more", "deep-research-chip"] }
+  ],
+  "anchors": [
+    {
+      "id": "composer",
+      "branches": [
+        { "id": "composer-quill", "kind": "canonical", "source": "live-page", "selector": "div.ql-editor[contenteditable=\"true\"][role=\"textbox\"]" }
+      ]
+    },
+    {
+      "id": "signed-out-marker",
+      "branches": [
+        { "id": "avatar-sign-in", "kind": "canonical", "source": "live-page", "selector": ".mavatar-sign-in-button" }
+      ]
+    },
+    {
+      "id": "terms-gate",
+      "branches": [
+        { "id": "tos-block", "kind": "canonical", "source": "live-page", "selector": "[data-test-id=\"tos-block\"]" }
+      ]
+    },
+    {
+      "id": "send-button",
+      "branches": [
+        { "id": "send-message", "kind": "canonical", "source": "live-page", "selector": "button[aria-label=\"Send message\"]" }
+      ]
+    },
+    {
+      "id": "send-disabled",
+      "branches": [
+        { "id": "send-message-disabled", "kind": "canonical", "source": "guess", "selector": "button[aria-label=\"Send message\"][aria-disabled=\"true\"]" }
+      ]
+    },
+    {
+      "id": "stop-button",
+      "branches": [
+        { "id": "stop-response", "kind": "canonical", "source": "guess", "selector": "button[aria-label=\"Stop response\"]" },
+        { "id": "stop-class", "kind": "legacy", "source": "guess", "selector": "button.send-button.stop" }
+      ]
+    },
+    {
+      "id": "upload-menu-button",
+      "branches": [
+        { "id": "upload-and-tools", "kind": "canonical", "source": "live-page", "selector": "button[aria-label=\"Upload & tools\"]" }
+      ]
+    },
+    {
+      "id": "file-input",
+      "branches": [
+        { "id": "documents-input", "kind": "canonical", "source": "live-page", "selector": "images-files-uploader input.hidden-file-input[type=\"file\"]" }
+      ]
+    },
+    {
+      "id": "attachment-item",
+      "branches": [
+        { "id": "file-preview", "kind": "canonical", "source": "guess", "selector": "uploader-file-preview" },
+        { "id": "file-preview-chip", "kind": "legacy", "source": "guess", "selector": "[class*=\"file-preview\"]" }
+      ]
+    },
+    {
+      "id": "attachment-pending",
+      "branches": [
+        { "id": "progress-spinner", "kind": "canonical", "source": "guess", "selector": "mat-progress-spinner" },
+        { "id": "progressbar", "kind": "legacy", "source": "guess", "selector": "[role=\"progressbar\"]" }
+      ]
+    },
+    {
+      "id": "attachment-error",
+      "branches": [
+        { "id": "preview-error", "kind": "canonical", "source": "guess", "selector": "uploader-file-preview [class*=\"error\"]" }
+      ]
+    },
+    {
+      "id": "user-turn",
+      "branches": [
+        { "id": "user-query", "kind": "canonical", "source": "share-page", "selector": "user-query" }
+      ]
+    },
+    {
+      "id": "assistant-turn",
+      "branches": [
+        { "id": "model-response", "kind": "canonical", "source": "guess", "selector": "model-response" },
+        { "id": "response-container", "kind": "legacy", "source": "share-page", "selector": "response-container" }
+      ]
+    },
+    {
+      "id": "answer-body",
+      "branches": [
+        { "id": "message-markdown", "kind": "canonical", "source": "share-page", "selector": "message-content .markdown" }
+      ]
+    },
+    {
+      "id": "answer-exclude",
+      "branches": [
+        { "id": "model-thoughts", "kind": "canonical", "source": "guess", "selector": "model-thoughts" }
+      ]
+    },
+    {
+      "id": "answer-skip",
+      "branches": [
+        { "id": "code-block-header", "kind": "canonical", "source": "guess", "selector": ".code-block-decoration" }
+      ]
+    },
+    {
+      "id": "code-language",
+      "branches": [
+        { "id": "code-block-language", "kind": "canonical", "source": "guess", "selector": ".code-block-decoration > span" }
+      ]
+    },
+    {
+      "id": "answer-error",
+      "branches": [
+        { "id": "response-error", "kind": "canonical", "source": "guess", "selector": "[class*=\"response-error\"]" }
+      ]
+    },
+    {
+      "id": "citation",
+      "branches": [
+        { "id": "source-inline-chip", "kind": "canonical", "source": "share-page", "selector": "source-inline-chip" }
+      ]
+    },
+    {
+      "id": "citation-button",
+      "branches": [
+        { "id": "source-chip-button", "kind": "canonical", "source": "share-page", "selector": "button[aria-haspopup=\"dialog\"]" }
+      ]
+    },
+    {
+      "id": "source-card-link",
+      "branches": [
+        { "id": "hover-card-link", "kind": "canonical", "source": "share-page", "selector": ".luminous-hover-card inline-source-card a[href]" }
+      ]
+    },
+    {
+      "id": "mode-trigger",
+      "branches": [
+        { "id": "mode-menu-button", "kind": "canonical", "source": "live-page", "selector": "[data-test-id=\"bard-mode-menu-button\"]" }
+      ]
+    },
+    {
+      "id": "mode-trigger-label",
+      "branches": [
+        { "id": "pill-label", "kind": "canonical", "source": "live-page", "selector": "[data-test-id=\"logo-pill-label-container\"]" }
+      ]
+    },
+    {
+      "id": "mode-option",
+      "branches": [
+        { "id": "mode-option-item", "kind": "canonical", "source": "live-page", "selector": "gem-menu-item[role=\"menuitemradio\"]" }
+      ]
+    },
+    {
+      "id": "mode-option-label",
+      "branches": [
+        { "id": "option-label", "kind": "canonical", "source": "live-page", "selector": ".label" }
+      ]
+    },
+    {
+      "id": "mode-option-sublabel",
+      "branches": [
+        { "id": "option-sublabel", "kind": "canonical", "source": "live-page", "selector": ".sublabel" }
+      ]
+    },
+    {
+      "id": "tool-item",
+      "branches": [
+        { "id": "tool-checkbox", "kind": "canonical", "source": "live-page", "selector": "button[role=\"menuitemcheckbox\"]" }
+      ]
+    },
+    {
+      "id": "tool-more",
+      "branches": [
+        { "id": "more-tools", "kind": "canonical", "source": "live-page", "selector": "[data-test-id=\"more-tools-button\"]" }
+      ]
+    },
+    {
+      "id": "deep-research-chip",
+      "branches": [
+        { "id": "deselect-deep-research", "kind": "canonical", "source": "live-page", "selector": "button[aria-label=\"Deselect Deep research\"]" }
+      ]
+    }
+  ]
+}
