@@ -52,7 +52,7 @@ const TEST_PROFILE = parseOneShotProfile({
   ]
 }, { vendorId: 'testsite', requiredAnchorIds: ONESHOT_REQUIRED_ANCHORS });
 
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100 };
+const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 };
 
 // The answer bodies a test can put on the page, as element trees.
 const answerTree = {
@@ -803,4 +803,24 @@ test('oneshot-engine: a refusal notice after the send was acknowledged ends the 
     (error) => error.message === 'send_refused' && error.data.stage === 'after_send' &&
       error.data.conversationUrl === 'https://site.example/new'
   );
+});
+
+test('oneshot-engine: past the soft deadline the run keeps waiting while the provider is visibly working', async () => {
+  const working = makeSite({
+    timeline: [
+      ...Array.from({ length: 40 }, () => ({ stop: true, body: answerTree.plain('Researching') })),
+      { stop: false, idle: true, body: answerTree.plain('Long answer') }
+    ]
+  });
+  const result = await controllerFor(working.page).query({ prompt: 'probe', timeoutMs: 50 });
+  assert.equal(result.text, 'Long answer');
+
+  // Without a stop control there is no sign of work, so the soft deadline ends the wait.
+  const idle = makeSite({ timeline: [{ stop: false, idle: false, body: answerTree.plain('Part one.') }] });
+  const started = Date.now();
+  await assert.rejects(
+    controllerFor(idle.page).query({ prompt: 'probe', timeoutMs: 50 }),
+    (error) => error.message === 'timeout_waiting_for_response' && error.data.softDeadlineMs === 50
+  );
+  assert.ok(Date.now() - started < 500);
 });

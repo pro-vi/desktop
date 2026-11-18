@@ -36,7 +36,12 @@ const DEFAULT_TIMINGS = Object.freeze({
   menuMs: 3_000,
   // How long an adapter waits for a page control (a mode picker) to render
   // after the composer is ready: a fresh chat draws it a moment later.
-  controlMs: 10_000
+  controlMs: 10_000,
+  // The caller's timeoutMs is a soft deadline: past it the run keeps waiting
+  // only while the stop control shows the provider is still working, up to
+  // this ceiling. Kimi's K2.8 Preview worked on one Weiss answer for over
+  // 30 minutes on 2026-11-18.
+  hardResponseMs: 2 * 60 * 60_000
 });
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -774,13 +779,17 @@ export class OneShotController {
   async #waitForAnswer({ baseline, timeoutMs }) {
     await this.#emitProgress({ phase: 'waiting_for_response' });
     const start = Date.now();
+    const hardMs = Math.max(timeoutMs, this.timings.hardResponseMs);
     let lastText = null;
     let stableSince = null;
     let last = null;
-    while (Date.now() - start < timeoutMs) {
+    while (Date.now() - start < hardMs) {
       this.#throwIfStopRequested();
       await sleep(this.timings.pollMs);
       last = await this.#eval(readTurns);
+      // Past the soft deadline, wait on only while the page shows work (a stop
+      // control) or a finished turn still settling (its idle signal).
+      if (Date.now() - start >= timeoutMs && !last.stopVisible && !last.lastAssistant?.idle) break;
       const answer = last.lastAssistant;
       // A fresh chat has no assistant turn before send, so a new turn is one
       // more than the baseline count (ADR 0009's rule, without message ids).
@@ -809,6 +818,8 @@ export class OneShotController {
     }
     throw namedError('timeout_waiting_for_response', {
       conversationUrl: await this.getUrl().catch(() => null),
+      softDeadlineMs: timeoutMs,
+      waitedMs: Date.now() - start,
       assistantTurns: last?.assistantTurns ?? null,
       stopVisible: last?.stopVisible ?? null,
       idleVisible: last?.lastAssistant?.idle ?? null,

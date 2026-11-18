@@ -11,7 +11,7 @@ import { oneShotAdapterFor } from '../oneshot-sites/index.mjs';
 import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
 
 const sel = (anchorId) => geminiAdapter.profile.selectorsFor(anchorId)[0];
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100 };
+const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 };
 
 const OPTIONS = [
   { label: 'Everyday help', sublabel: '4 Hydrogen' },
