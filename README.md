@@ -454,6 +454,15 @@ npm run start -- --chrome-debug-port 9333
 npm run start -- --chrome-binary "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 ```
 
+### A second instance for benchmark runs
+
+```bash
+npm run bench        # Electron app on state dir ~/.agentify-bench, port 47811
+npm run mcp:bench    # MCP server bound to that state dir
+```
+
+The bench instance has its own state dir, so its own token, sign-ins, settings, run records and provider slots. Electron's single-instance lock lives in the state dir's `electron-user-data`, so the bench runs beside the default instance (checked 2026-11-18 on Electron 39.6.0). If port 47811 is taken it takes the next free one; `~/.agentify-bench/state.json` holds the port in use and `~/.agentify-bench/token.txt` the token. An MCP server started with `npm run mcp:bench` starts the bench app itself when it is not running, on a random port. The Chrome backend flags above work here too, and keep their profile in `~/.agentify-bench/chrome-user-data/`.
+
 ### Personal Dot messages
 
 The three Dot tools are available in the core MCP profile. Live talk/read/wait

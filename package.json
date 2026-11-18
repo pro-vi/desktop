@@ -6,7 +6,9 @@
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
+    "bench": "electron . --state-dir \"$HOME/.agentify-bench\" --port 47811",
     "mcp": "node mcp-server.mjs",
+    "mcp:bench": "AGENTIFY_DESKTOP_STATE_DIR=\"$HOME/.agentify-bench\" node mcp-server.mjs",
     "mcp:core": "node mcp-server.mjs --tool-profile core",
     "orchestrator": "node orchestrator.mjs",
     "wait-run": "node wait-run.mjs",
