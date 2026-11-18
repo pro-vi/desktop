@@ -137,39 +137,31 @@ function selectionError(reason, data = {}) {
   return error;
 }
 
-async function waitFor(ctx, read, accept, timeoutMs = ctx.timings.menuMs) {
-  const start = Date.now();
-  let value = await read();
-  while (!accept(value) && Date.now() - start < timeoutMs) {
-    ctx.throwIfStopRequested();
-    await ctx.sleep(Math.min(250, ctx.timings.pollMs));
-    value = await read();
-  }
-  return value;
-}
-
-async function closeMenus(ctx) {
-  await ctx.pressKey('Escape');
-  await ctx.sleep(Math.min(150, ctx.timings.menuMs));
+// The picker renders a moment after the composer on a fresh chat, so it is
+// waited for; null when it never appears.
+async function openPicker(ctx, sel) {
+  const read = () => ctx.evaluate(readGeminiModePicker, sel);
+  const picker = await ctx.waitFor(read, (value) => value.found, ctx.timings.controlMs);
+  if (!picker.found) return null;
+  if (!picker.expanded) await ctx.click(picker.rect);
+  return await ctx.waitFor(read, (value) => value.options.length > 0);
 }
 
 async function selectOption(ctx, sel, mode) {
   const read = () => ctx.evaluate(readGeminiModePicker, sel);
-  let picker = await waitFor(ctx, read, (value) => value.found, ctx.timings.controlMs);
-  if (!picker.found) throw selectionError('mode_picker_missing');
-  if (!picker.expanded) await ctx.click(picker.rect);
-  picker = await waitFor(ctx, read, (value) => value.options.length > 0);
+  let picker = await openPicker(ctx, sel);
+  if (!picker) throw selectionError('mode_picker_missing');
   const choice = picker.options.find((item) => item.label === mode.option);
   if (!choice || choice.disabled) {
-    await closeMenus(ctx);
+    await ctx.closeMenus();
     throw selectionError(choice ? 'option_disabled' : 'option_not_found', {
       options: picker.options.map((item) => `${item.label} (${item.sublabel})`),
       shown: { model: picker.model }
     });
   }
   if (!choice.checked) await ctx.click(choice.rect);
-  picker = await waitFor(ctx, read, (value) => !value.expanded);
-  if (picker.expanded) await closeMenus(ctx);
+  picker = await ctx.waitFor(read, (value) => !value.expanded);
+  if (picker.expanded) await ctx.closeMenus();
   // The picker's own label can shorten the model ("3.1 Pro" showed as "Pro"
   // on 2026-11-18), so the selection is confirmed by the option's checked
   // state in the reopened menu.
@@ -185,12 +177,9 @@ async function selectOption(ctx, sel, mode) {
 }
 
 async function readCheckedOption(ctx, sel) {
-  const read = () => ctx.evaluate(readGeminiModePicker, sel);
-  let picker = await waitFor(ctx, read, (value) => value.found, ctx.timings.controlMs);
-  if (!picker.found) return null;
-  if (!picker.expanded) await ctx.click(picker.rect);
-  picker = await waitFor(ctx, read, (value) => value.options.length > 0);
-  await closeMenus(ctx);
+  const picker = await openPicker(ctx, sel);
+  if (!picker) return null;
+  await ctx.closeMenus();
   return picker.options.find((item) => item.checked) || null;
 }
 
@@ -212,8 +201,8 @@ async function revealGeminiFileInput(ctx) {
   if (state.fileInputs > 0) return null;
   if (!state.upload) return null;
   await ctx.click(state.upload);
-  state = await waitFor(ctx, read, (value) => value.fileInputs > 0);
-  return { close: async () => await closeMenus(ctx) };
+  state = await ctx.waitFor(read, (value) => value.fileInputs > 0);
+  return { close: async () => await ctx.closeMenus() };
 }
 
 async function prepareGeminiCapture(ctx) {
@@ -235,10 +224,10 @@ async function prepareGeminiCapture(ctx) {
     // A card still open from the previous chip would be read as this one's.
     if ((await cardLinks()).links > 0) return { citations: first.count, opened: index, stamped, skipped, stopped: 'card_still_open' };
     await ctx.click(chip.rect);
-    const result = await waitFor(ctx, () => ctx.evaluate(stampGeminiCitation, { ...sel, index }), (value) => value.stamped > 0);
+    const result = await ctx.waitFor(() => ctx.evaluate(stampGeminiCitation, { ...sel, index }), (value) => value.stamped > 0);
     if (result.stamped > 0) stamped += 1;
-    await closeMenus(ctx);
-    await waitFor(ctx, cardLinks, (value) => value.links === 0);
+    await ctx.closeMenus();
+    await ctx.waitFor(cardLinks, (value) => value.links === 0);
   }
   return { citations: first.count, opened: count, stamped, skipped };
 }

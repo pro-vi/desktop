@@ -14,7 +14,7 @@ import {
   toolUseCounts
 } from '../oneshot-engine.mjs';
 import { parseOneShotProfile, ONESHOT_REQUIRED_ANCHORS } from '../oneshot-profile.mjs';
-import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
+import { createFakePage, el, FAST_TIMINGS as FAST } from './fixtures/oneshot-fake-dom.mjs';
 
 const anchor = (id, selector, source = 'live-page') => ({
   id,
@@ -52,7 +52,6 @@ const TEST_PROFILE = parseOneShotProfile({
   ]
 }, { vendorId: 'testsite', requiredAnchorIds: ONESHOT_REQUIRED_ANCHORS });
 
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 };
 
 // The answer bodies a test can put on the page, as element trees.
 const answerTree = {
@@ -192,7 +191,7 @@ function adapterFor({ modeConfirmed = true, onApplyMode = null, labelBeforeSend 
     profile: TEST_PROFILE,
     modeIntents: { strong: { label: 'Strong' } },
     progressLabels: ['thinking'],
-    freshChatUrl: (currentUrl, mode) => `https://site.example/new${mode ? `?mode=${mode.intent}` : ''}`,
+    freshChatUrl: () => 'https://site.example/new',
     applyMode: async (ctx, mode) => {
       onApplyMode?.(mode);
       return { confirmed: modeConfirmed, shown: { model: 'Model X', mode: 'Strong' }, label: 'Model X' };
@@ -237,7 +236,7 @@ test('oneshot-engine: a query opens a fresh chat, applies the mode, uploads, typ
     onProgress: (patch) => patch.phase && phases.push(patch.phase)
   });
 
-  assert.deepEqual(page.navigations, ['https://site.example/new?mode=strong']);
+  assert.deepEqual(page.navigations, ['https://site.example/new']);
   assert.deepEqual(appliedBeforeTyping, ['']);
   assert.deepEqual(state.injected, ['brief.pdf', 'cv.docx']);
   assert.equal(state.sendClicks, 1);
@@ -249,7 +248,7 @@ test('oneshot-engine: a query opens a fresh chat, applies the mode, uploads, typ
   assert.equal(result.meta.requestedModeIntent, 'strong');
   assert.deepEqual(result.meta.modeApplied, { intent: 'strong', shown: { model: 'Model X', mode: 'Strong' }, label: 'Model X' });
   assert.deepEqual(result.meta.answerSettings, { model: 'Model X', mode: 'Strong', source: 'test-label', unreadReason: null });
-  assert.equal(result.meta.freshChatUrl, 'https://site.example/new?mode=strong');
+  assert.equal(result.meta.freshChatUrl, 'https://site.example/new');
   assert.deepEqual(result.meta.attachments.map((item) => [item.name, item.matchedBy]), [['brief.pdf', 'name'], ['cv.docx', 'name']]);
   assert.equal(result.meta.promptDelivery.complete, true);
   assert.equal(result.text, [
@@ -567,14 +566,12 @@ test('oneshot-engine: a stop branch that matches only a hidden node falls throug
       : { id: item.id, branches: item.branches.map((branch) => ({ ...branch })) }))
   }, { vendorId: 'testsite', requiredAnchorIds: ONESHOT_REQUIRED_ANCHORS });
   const { page } = makeSite({ timeline: [{ stop: true, idle: true, body: answerTree.plain('Looks done') }] });
-  const render = page.render;
   const adapter = { ...adapterFor(), profile };
   const originalEvaluate = page.evaluate;
   page.evaluate = async (js) => {
     page.state.hiddenStop = true;
     return await originalEvaluate(js);
   };
-  void render;
   await assert.rejects(
     controllerFor(page, adapter).query({ prompt: 'probe', timeoutMs: 150 }),
     (error) => error.message === 'timeout_waiting_for_response' && error.data.stopVisible === true
@@ -728,8 +725,8 @@ test('oneshot-engine: tool use keeps three states apart and never writes an empt
   assert.deepEqual(normalizeToolUse({ state: 'unread', reason: 'expander_missing' }), { state: 'unread', reason: 'expander_missing', steps: null });
   assert.deepEqual(normalizeToolUse(undefined), { state: 'unread', reason: 'tool_use_unread', steps: null });
   assert.deepEqual(normalizeToolUse({ state: 'shown', steps: [] }), { state: 'unread', reason: 'tool_use_shown_without_steps', steps: null });
-  const shown = normalizeToolUse({ state: 'shown', steps: [{ tool: 'web_search', title: ' Found 2 web pages ', count: 2, pages: [{ url: 'https://a.example/', title: 'A' }, { url: '' }] }] });
-  assert.deepEqual(shown, { state: 'shown', reason: null, steps: [{ tool: 'web_search', title: 'Found 2 web pages', query: null, count: 2, pages: [{ url: 'https://a.example/', title: 'A', site: null }] }] });
+  const shown = normalizeToolUse({ state: 'shown', steps: [{ tool: 'web_search', kind: 'search', title: ' Found 2 web pages ', count: 2, pages: [{ url: 'https://a.example/', title: 'A' }, { url: '' }] }] });
+  assert.deepEqual(shown, { state: 'shown', reason: null, steps: [{ tool: 'web_search', kind: 'search', title: 'Found 2 web pages', count: 2, pages: [{ url: 'https://a.example/', title: 'A', site: null }] }] });
   assert.deepEqual(toolUseCounts(shown), { state: 'shown', reason: null, stepCount: 1, searchCount: 1, pageCount: 1 });
   assert.deepEqual(toolUseCounts(normalizeToolUse({ state: 'unread', reason: 'x' })), { state: 'unread', reason: 'x', stepCount: null, searchCount: null, pageCount: null });
 });
@@ -823,4 +820,45 @@ test('oneshot-engine: past the soft deadline the run keeps waiting while the pro
     (error) => error.message === 'timeout_waiting_for_response' && error.data.softDeadlineMs === 50
   );
   assert.ok(Date.now() - started < 500);
+});
+
+test('oneshot-engine: files an earlier draft left in the composer are removed by the adapter before the run goes on', async () => {
+  // Kimi kept a refused send's files in the composer, and the next chat showed them (2026-11-18).
+  const { state, page } = makeSite({ chips: [{ name: 'old-brief.pdf', busy: false, error: false }], timeline: stableAnswer(answerTree.plain('Done')) });
+  const cleared = [];
+  const adapter = { ...adapterFor(), clearDraftAttachments: async () => { cleared.push(state.chips.map((chip) => chip.name)); state.chips = []; } };
+  const [file] = await tempFiles(['brief.pdf']);
+  const result = await controllerFor(page, adapter).query({ prompt: 'probe', attachments: [file] });
+  assert.deepEqual(cleared, [['old-brief.pdf']]);
+  assert.deepEqual(result.meta.attachments.map((item) => item.name), ['brief.pdf']);
+});
+
+test('oneshot-engine: a fresh chat still holding an earlier draft\'s files stops the run before anything is uploaded or typed', async () => {
+  const { state, page } = makeSite({ chips: [{ name: 'old-brief.pdf', busy: false, error: false }] });
+  const [file] = await tempFiles(['brief.pdf']);
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', attachments: [file] }),
+    (error) => error.message === 'fresh_chat_unavailable' && error.data.reason === 'draft_attachments' && error.data.draftAttachments[0] === 'old-brief.pdf'
+  );
+  assert.equal(state.injected.length, 0);
+  assert.equal(state.composerText, '');
+  assert.equal(state.sendClicks, 0);
+});
+
+test('oneshot-engine: a chip no requested file claims keeps the upload from counting as done', async () => {
+  const match = matchAttachments([{ name: 'brief.pdf' }], { items: [{ text: 'brief.pdf' }, { text: 'old-notes.pdf' }] });
+  assert.equal(match.done, false);
+  assert.deepEqual(match.unexpected, ['old-notes.pdf']);
+  const { state, page } = makeSite({
+    onFiles: (fake, files) => {
+      for (const file of files) fake.chips.push({ name: file.name, busy: false, error: false });
+      fake.chips.push({ name: 'surprise.pdf', busy: false, error: false });
+    }
+  });
+  const [file] = await tempFiles(['brief.pdf']);
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', attachments: [file] }),
+    (error) => error.message === 'attachment_not_shown' && error.data.unexpected.includes('surprise.pdf')
+  );
+  assert.equal(state.sendClicks, 0);
 });

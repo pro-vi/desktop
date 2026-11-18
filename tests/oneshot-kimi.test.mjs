@@ -6,10 +6,9 @@ import { OneShotController } from '../oneshot-engine.mjs';
 import { ONESHOT_BRANCH_SOURCES, ONESHOT_REQUIRED_ANCHORS } from '../oneshot-profile.mjs';
 import { kimiAdapter, kimiFreshChatUrl, KIMI_MODE_INTENTS } from '../oneshot-sites/kimi.mjs';
 import { oneShotAdapterFor } from '../oneshot-sites/index.mjs';
-import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
+import { createFakePage, el, FAST_TIMINGS as FAST } from './fixtures/oneshot-fake-dom.mjs';
 
 const sel = (anchorId) => kimiAdapter.profile.selectorsFor(anchorId)[0];
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 };
 
 const MODELS = [
   { label: 'K3.1 Pro', key: 'k3d1-agent' },
@@ -20,7 +19,7 @@ const MODELS = [
 // A Kimi composer as read from the signed-in www.kimi.ai page on 2026-11-18,
 // with turns shaped like Kimi's public share pages. Every element answers to
 // the canonical selector of its profile anchor.
-function renderKimi(state) {
+function renderKimi(state, page) {
   const rows = [];
   for (const turn of state.turns) {
     if (turn.role === 'user') {
@@ -71,7 +70,22 @@ function renderKimi(state) {
     hidden: true,
     props: { multiple: true, set files(list) { for (const file of list) state.chips.push(file.name); } }
   }));
-  for (const chip of state.chips) rows.push(el('div', { matches: [sel('attachment-item')], text: chip }));
+  state.chips.forEach((chip, i) => {
+    const box = { x: 100 + i * 210, y: 400, w: 200, h: 70 };
+    const inBox = (point) => !!point && point[0] >= box.x && point[0] <= box.x + box.w && point[1] >= box.y && point[1] <= box.y + box.h;
+    rows.push(el('div', {
+      matches: [sel('attachment-item')],
+      rect: box,
+      text: chip,
+      children: [el('div', {
+        matches: [sel('attachment-remove')],
+        rect: { x: box.x + 180, y: box.y + 5, w: 14, h: 14 },
+        // Kimi's delete control works only once the pointer has rested on the
+        // chip, before the click's own move.
+        onClick: () => { if (inBox(page.moves[page.moves.length - 2])) state.chips.splice(i, 1); }
+      })]
+    }));
+  });
 
   rows.push(el('div', {
     matches: [sel('mode-trigger')],
@@ -155,7 +169,7 @@ function renderToolFlow(state, turn) {
   });
 }
 
-function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer = null, toolFlow = null, references = null, url = 'https://www.kimi.ai/chat/old' } = {}) {
+function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer = null, toolFlow = null, references = null, chips = [], url = 'https://www.kimi.ai/chat/old' } = {}) {
   const state = {
     model,
     effort,
@@ -163,7 +177,7 @@ function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer 
     composerText: '',
     selectAll: false,
     turns: [],
-    chips: [],
+    chips: [...chips],
     stop: false,
     sent: 0,
     reads: 0,
@@ -285,7 +299,7 @@ test('oneshot-kimi: the tool-call flow is expanded and read into tool use, skipp
     steps: [{
       tool: 'web_search',
       title: 'Found 2 web pages',
-      query: null,
+      kind: 'search',
       count: 2,
       pages: [
         { url: 'https://www.britannica.com/place/Paris', title: 'Paris | Definition', site: 'www.britannica.com' },
@@ -327,4 +341,26 @@ test('oneshot-kimi: the answer is read from the Markdown outside the thinking ro
   assert.doesNotMatch(result.meta.plainText, /Thinking process/);
   assert.equal(result.meta.requestedModeIntent, null);
   assert.equal(result.meta.modeApplied, null);
+});
+
+test('oneshot-kimi: an earlier draft\'s files are removed from a fresh chat by resting on each chip, then clicking its delete control', async () => {
+  const { state, page } = makeKimi({ chips: ['doc_01_passport PDF 152.7 KB', 'probe-notes DOCX 933 Bytes'] });
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(state.chips, []);
+  assert.deepEqual(result.meta.attachments, []);
+  assert.equal(state.turns[0].text, 'probe');
+});
+
+test('oneshot-kimi: a tool step that lists no pages, such as a Python run, is read without waiting for pages', async () => {
+  const toolFlow = [
+    ...Array.from({ length: 8 }, (_, i) => ({ tool: 'ipython', title: `Ran Python code ${i}`, pages: [] })),
+    { tool: 'web_search', title: 'Found 1 web pages', pages: [{ url: 'https://a.example/', title: 'A', site: 'a.example' }] }
+  ];
+  const { page } = makeKimi({ toolFlow });
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(result.meta.toolUse.state, 'shown');
+  assert.deepEqual(result.meta.toolUse.steps.map((step) => step.kind), [...Array(8).fill(null), 'search']);
+  // Waiting for pages on each Python step would read the flow many times per step.
+  const flowReads = page.evaluations.filter((js) => js.includes('function readKimiToolFlow(')).length;
+  assert.ok(flowReads < 40, `read the tool flow ${flowReads} times`);
 });

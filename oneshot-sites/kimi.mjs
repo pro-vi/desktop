@@ -165,44 +165,28 @@ function selectionError(reason, data = {}) {
   return error;
 }
 
-async function waitFor(ctx, read, accept, timeoutMs = ctx.timings.menuMs) {
-  const start = Date.now();
-  let value = await read();
-  while (!accept(value) && Date.now() - start < timeoutMs) {
-    ctx.throwIfStopRequested();
-    await ctx.sleep(Math.min(250, ctx.timings.pollMs));
-    value = await read();
-  }
-  return value;
-}
-
-async function closeMenus(ctx) {
-  await ctx.pressKey('Escape');
-  await ctx.sleep(Math.min(150, ctx.timings.menuMs));
-}
-
 async function selectModel(ctx, { readTrigger, readMenu }, mode) {
-  let trigger = await waitFor(ctx, readTrigger, (value) => value.found, ctx.timings.controlMs);
+  let trigger = await ctx.waitFor(readTrigger, (value) => value.found, ctx.timings.controlMs);
   if (!trigger.found) throw selectionError('model_menu_missing');
   if (trigger.model === mode.model) return trigger;
   await ctx.click(trigger.rect);
-  let menu = await waitFor(ctx, readMenu, (value) => value.options.length > 0);
+  let menu = await ctx.waitFor(readMenu, (value) => value.options.length > 0);
   let choice = menu.options.find((item) => (mode.menuKey && item.key === mode.menuKey) || item.label === mode.model);
   if (!choice && mode.inMoreModels && menu.more) {
     await ctx.click(menu.more);
-    menu = await waitFor(ctx, readMenu, (value) => value.moreOptions.length > 0);
+    menu = await ctx.waitFor(readMenu, (value) => value.moreOptions.length > 0);
     choice = menu.moreOptions.find((item) => item.label === mode.model);
   }
   if (!choice) {
-    await closeMenus(ctx);
+    await ctx.closeMenus();
     throw selectionError('option_not_found', {
       options: [...menu.options, ...menu.moreOptions].map((item) => item.label),
       shown: { model: trigger.model, effort: trigger.effort }
     });
   }
   await ctx.click(choice.rect);
-  trigger = await waitFor(ctx, readTrigger, (value) => value.model === mode.model);
-  await closeMenus(ctx);
+  trigger = await ctx.waitFor(readTrigger, (value) => value.model === mode.model);
+  await ctx.closeMenus();
   if (trigger.model !== mode.model) {
     // A model the account cannot use leaves the old one selected (or opens an
     // upgrade offer); either way the requested model is not set.
@@ -215,24 +199,24 @@ async function selectEffort(ctx, { readTrigger, readMenu }, mode) {
   let trigger = await readTrigger();
   if (trigger.effort === mode.effort) return trigger;
   await ctx.click(trigger.rect);
-  let menu = await waitFor(ctx, readMenu, (value) => !!value.effort);
+  let menu = await ctx.waitFor(readMenu, (value) => !!value.effort);
   if (!menu.effort) {
-    await closeMenus(ctx);
+    await ctx.closeMenus();
     throw selectionError('effort_menu_missing', { shown: { model: trigger.model, effort: trigger.effort } });
   }
   await ctx.click(menu.effort);
-  menu = await waitFor(ctx, readMenu, (value) => value.effortOptions.length > 0);
+  menu = await ctx.waitFor(readMenu, (value) => value.effortOptions.length > 0);
   const choice = menu.effortOptions.find((item) => item.label === mode.effort);
   if (!choice) {
-    await closeMenus(ctx);
+    await ctx.closeMenus();
     throw selectionError('effort_option_not_found', {
       options: menu.effortOptions.map((item) => item.label),
       shown: { model: trigger.model, effort: trigger.effort }
     });
   }
   await ctx.click(choice.rect);
-  trigger = await waitFor(ctx, readTrigger, (value) => value.effort === mode.effort);
-  await closeMenus(ctx);
+  trigger = await ctx.waitFor(readTrigger, (value) => value.effort === mode.effort);
+  await ctx.closeMenus();
   if (trigger.effort !== mode.effort) {
     throw selectionError('effort_not_selected', { shown: { model: trigger.model, effort: trigger.effort } });
   }
@@ -268,9 +252,12 @@ async function prepareKimiCapture(ctx) {
   await ctx.sleep(Math.min(200, ctx.timings.menuMs));
   const again = await ctx.evaluate(placeKimiReferenceToggle, sel);
   await ctx.click(again.rect);
-  const opened = await waitFor(ctx, () => ctx.evaluate(placeKimiReferenceToggle, sel), (value) => value.panelOpen);
+  const opened = await ctx.waitFor(() => ctx.evaluate(placeKimiReferenceToggle, sel), (value) => value.panelOpen);
   return { references: opened.panelOpen ? 'open' : 'did_not_open' };
 }
+
+// Kimi names a step's tool in its class (toolcall-web_search).
+const isSearchTool = (tool) => /search/.test(String(tool || ''));
 
 async function readKimiToolUse(ctx) {
   const sel = toolSelectors(ctx);
@@ -282,7 +269,7 @@ async function readKimiToolUse(ctx) {
     const toggle = await ctx.evaluate(placeKimiToolControl, { ...sel, target: 'toggle' });
     if (!toggle.found) return { state: 'unread', reason: 'tool_flow_toggle_missing' };
     await ctx.click(toggle.rect);
-    flow = await waitFor(ctx, read, (value) => value.toggleExpanded);
+    flow = await ctx.waitFor(read, (value) => value.toggleExpanded);
     if (!flow.toggleExpanded) return { state: 'unread', reason: 'tool_flow_did_not_expand' };
   }
   if (!flow.steps.length) return { state: 'none' };
@@ -293,7 +280,9 @@ async function readKimiToolUse(ctx) {
     const place = await ctx.evaluate(placeKimiToolControl, { ...sel, target: index });
     if (!place.found) continue;
     await ctx.click(place.rect);
-    flow = await waitFor(ctx, read, (value) => value.steps[index]?.expanded && value.steps[index].pages.length > 0);
+    // A search step lists its pages once expanded; another tool's step (a
+    // terminal command, Python) can list none, so expanded is enough there.
+    flow = await ctx.waitFor(read, (value) => value.steps[index]?.expanded && (value.steps[index].pages.length > 0 || !isSearchTool(step.tool)));
   }
   flow = await read();
   const unexpanded = flow.steps.filter((step) => step.expandable && !step.expanded).length;
@@ -302,9 +291,39 @@ async function readKimiToolUse(ctx) {
     state: 'shown',
     steps: flow.steps.map((step) => {
       const count = /(\d+)/.exec(step.title);
-      return { tool: step.tool, title: step.title, query: null, count: count ? Number(count[1]) : null, pages: step.pages };
+      return { tool: step.tool, kind: isSearchTool(step.tool) ? 'search' : null, title: step.title, count: count ? Number(count[1]) : null, pages: step.pages };
     })
   };
+}
+
+// A send Kimi refuses stays in the composer as a draft, files included, and
+// the next chat shows those files again (seen 2026-11-18). A chip's delete
+// control works only once the pointer has rested on the chip.
+export function placeKimiDraftChip(a, h) {
+  const nodes = h.all(a.item).filter(h.visible);
+  const chips = nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
+  if (!chips.length) return { count: 0 };
+  chips[0].scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  const remove = h.all(a.remove, chips[0])[0];
+  return { count: chips.length, rect: h.rectOf(chips[0]), remove: remove ? h.rectOf(remove) : null };
+}
+
+async function clearKimiDraftAttachments(ctx) {
+  const sel = { item: ctx.selectorsFor('attachment-item'), remove: ctx.selectorsFor('attachment-remove') };
+  const read = () => ctx.evaluate(placeKimiDraftChip, sel);
+  let chip = await read();
+  while (chip.count > 0) {
+    ctx.throwIfStopRequested();
+    await ctx.hover(chip.rect);
+    await ctx.sleep(Math.min(300, ctx.timings.menuMs));
+    const placed = await read();
+    if (!placed.remove) return;
+    await ctx.click(placed.remove);
+    const after = await ctx.waitFor(read, (value) => value.count < placed.count);
+    // A chip that stays is left for the engine to report.
+    if (after.count >= placed.count) return;
+    chip = after;
+  }
 }
 
 async function readKimiAnswerSettings(ctx) {
@@ -334,6 +353,7 @@ export const kimiAdapter = Object.freeze({
   // were observed live yet, so this starts empty and grows from captures.
   progressLabels: Object.freeze([]),
   freshChatUrl: kimiFreshChatUrl,
+  clearDraftAttachments: clearKimiDraftAttachments,
   applyMode: applyKimiMode,
   readModeLabel: readKimiModeLabel,
   prepareCapture: prepareKimiCapture,

@@ -8,10 +8,9 @@ import { OneShotController } from '../oneshot-engine.mjs';
 import { ONESHOT_REQUIRED_ANCHORS } from '../oneshot-profile.mjs';
 import { geminiAdapter, geminiFreshChatUrl, GEMINI_MODE_INTENTS } from '../oneshot-sites/gemini.mjs';
 import { oneShotAdapterFor } from '../oneshot-sites/index.mjs';
-import { createFakePage, el } from './fixtures/oneshot-fake-dom.mjs';
+import { createFakePage, el, FAST_TIMINGS as FAST } from './fixtures/oneshot-fake-dom.mjs';
 
 const sel = (anchorId) => geminiAdapter.profile.selectorsFor(anchorId)[0];
-const FAST = { pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 };
 
 const OPTIONS = [
   { label: 'Everyday help', sublabel: '4 Hydrogen' },
@@ -265,7 +264,7 @@ test('oneshot-gemini: tool use is the sources list when it has links, unread beh
   const listed = makeGemini();
   listed.state.listedSources = [{ url: 'https://www.nih.gov/a', title: 'NIH' }, { url: 'https://example.org/b', title: 'Example' }];
   const shown = await geminiController(listed.page).query({ prompt: 'probe', timeoutMs: 2_000 });
-  assert.deepEqual(shown.meta.toolUse, { state: 'shown', reason: null, steps: [{ tool: 'sources_list', title: 'Sources', query: null, count: 2, pages: [
+  assert.deepEqual(shown.meta.toolUse, { state: 'shown', reason: null, steps: [{ tool: 'sources_list', kind: null, title: 'Sources', count: 2, pages: [
     { url: 'https://www.nih.gov/a', title: 'NIH', site: null },
     { url: 'https://example.org/b', title: 'Example', site: null }
   ] }] });

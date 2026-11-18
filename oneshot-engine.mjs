@@ -23,7 +23,8 @@ import {
 
 const DEFAULT_TIMINGS = Object.freeze({
   pollMs: 500,
-  // The answer text must hold still this long, with no stop control showing.
+  // The answer text must hold still this long, with no stop control showing
+  // and the turn's idle signal present.
   stableMs: 3_000,
   sendAckMs: 8_000,
   // Kimi keeps Send disabled while it processes attached files after typing.
@@ -38,9 +39,9 @@ const DEFAULT_TIMINGS = Object.freeze({
   // after the composer is ready: a fresh chat draws it a moment later.
   controlMs: 10_000,
   // The caller's timeoutMs is a soft deadline: past it the run keeps waiting
-  // only while the stop control shows the provider is still working, up to
-  // this ceiling. Kimi's K2.8 Preview worked on one Weiss answer for over
-  // 30 minutes on 2026-11-18.
+  // only while the page shows a stop control or the turn's idle signal, up to
+  // this ceiling. Kimi's K2.8 Preview worked on one eight-file review for
+  // over 30 minutes on 2026-11-18.
   hardResponseMs: 2 * 60 * 60_000
 });
 
@@ -62,8 +63,8 @@ const MIME_BY_EXTENSION = Object.freeze({
 });
 
 // The engine's own error codes, with the HTTP status and run outcome each one
-// gets. Every code whose detail says "No prompt was sent" ends the run before
-// Send; the others happen after it and record the chat's URL.
+// gets. A code raised after Send, or after the page took part of the prompt,
+// records the chat's URL.
 export const ONESHOT_ERRORS = Object.freeze({
   mode_intent_unsupported: {
     status: 400,
@@ -84,9 +85,9 @@ export const ONESHOT_ERRORS = Object.freeze({
     label: 'Mode unavailable',
     detail: (d) => `The page did not confirm mode "${d?.modeIntent || ''}" (${d?.reason || 'unconfirmed'}). No prompt was sent.`
   },
-  fresh_chat_unavailable: { status: 409, label: 'Fresh chat unavailable', detail: () => 'The provider did not open an empty chat. No prompt was sent.' },
+  fresh_chat_unavailable: { status: 409, label: 'Fresh chat unavailable', detail: (d) => (d?.reason === 'draft_attachments' ? 'The new chat still held files from an earlier draft, and they could not be removed. No prompt was sent.' : 'The provider did not open an empty chat. No prompt was sent.') },
   attachment_input_missing: { status: 409, attachment: true, label: 'Attachment not sent', detail: () => 'No file input was found on the page. No prompt was sent.' },
-  attachment_not_shown: { status: 409, attachment: true, label: 'Attachment not shown', detail: (d) => `The page did not show every attached file as uploaded${d?.stage === 'before_send' ? ' when the prompt was ready to send' : ''}. No prompt was sent.` },
+  attachment_not_shown: { status: 409, attachment: true, label: 'Attachment not shown', detail: (d) => `The page did not show exactly the attached files as uploaded${d?.stage === 'before_send' ? ' when the prompt was ready to send' : ''}. No prompt was sent.` },
   prompt_sent_early: { status: 409, label: 'Prompt sent while typing', detail: () => 'The page sent part of the prompt before typing finished; the chat holds an incomplete prompt.' },
   send_refused: { status: 409, label: 'Send refused', detail: (d) => `The provider refused the send${d?.notice ? `: "${d.notice}"` : ''}. No answer was produced.` },
   click_target_missing: { status: 409, label: 'Page control not found', detail: () => 'A control the run needed had no size on the page. No prompt was sent.' },
@@ -201,7 +202,8 @@ export function appendSourcesSection(markdown, sources) {
 }
 
 // Tool use is what the page showed of the model's searches and the pages it
-// read, never its reasoning text. Three states stay apart: "shown" with the
+// read, never its reasoning text. A step's kind is "search" when the adapter
+// knows the step was a web search. Three states stay apart: "shown" with the
 // steps in page order, "none" when the page showed no tool use, and "unread"
 // with a reason when the adapter could not read it; "unread" never carries an
 // empty list that would read as "none".
@@ -212,7 +214,7 @@ export function normalizeToolUse(read) {
   const steps = (Array.isArray(read.steps) ? read.steps : []).map((step) => ({
     tool: text(step?.tool) || 'unknown',
     title: text(step?.title),
-    query: text(step?.query),
+    kind: text(step?.kind),
     count: Number.isFinite(step?.count) ? step.count : null,
     pages: (Array.isArray(step?.pages) ? step.pages : [])
       .filter((page) => text(page?.url))
@@ -222,22 +224,26 @@ export function normalizeToolUse(read) {
   return { state: 'shown', reason: null, steps };
 }
 
-export function toolUseCounts(toolUse) {
-  const steps = Array.isArray(toolUse?.steps) ? toolUse.steps : [];
+// Counts over normalized tool use; unread tool use has no counts.
+export function toolUseCounts({ state, reason, steps }) {
+  if (!steps) return { state, reason, stepCount: null, searchCount: null, pageCount: null };
   return {
-    state: toolUse?.state || 'unread',
-    reason: toolUse?.reason || null,
-    stepCount: toolUse?.state === 'unread' ? null : steps.length,
-    searchCount: toolUse?.state === 'unread' ? null : steps.filter((step) => /search/i.test(step.tool) || step.query).length,
-    pageCount: toolUse?.state === 'unread' ? null : steps.reduce((sum, step) => sum + step.pages.length, 0)
+    state,
+    reason,
+    stepCount: steps.length,
+    searchCount: steps.filter((step) => step.kind === 'search').length,
+    pageCount: steps.reduce((sum, step) => sum + step.pages.length, 0)
   };
 }
 
-// A file counts as uploaded when a chip names it and is not pending. Full
-// names are matched first; then a chip showing the file's stem and its
-// extension as a word (Kimi and Gemini drop the extension from the name and
-// show it apart); then the stem alone, only when no other expected file shares
-// it; then a name shortened in the middle. A chip is used for one file at most.
+// The composer must show exactly the request's files, each one uploaded. A
+// chip names a file by its full name; else by the file's stem with its
+// extension shown as a word (Kimi and Gemini drop the extension from the name
+// and show it apart); else by the stem alone, when no other expected file
+// shares it; else by a name shortened in the middle. A chip is used for one
+// file at most, and a chip no file claims is unexpected.
+const TYPE_WORD = new RegExp(`(^|[^a-z0-9])(${Object.keys(MIME_BY_EXTENSION).map((ext) => ext.slice(1)).join('|')})([^a-z0-9]|$)`, 'g');
+
 export function matchAttachments(expected, after) {
   const items = (Array.isArray(after?.items) ? after.items : []).map((item) => ({ ...item, text: String(item.text || '').toLowerCase() }));
   const used = new Set();
@@ -248,6 +254,7 @@ export function matchAttachments(expected, after) {
   };
   const report = expected.map((file) => ({ ...file, matchedBy: null, pending: false }));
   const claim = (entry, accept, how) => {
+    if (entry.matchedBy) return;
     const index = items.findIndex((item, i) => !used.has(i) && accept(item.text));
     if (index === -1) return;
     used.add(index);
@@ -256,14 +263,12 @@ export function matchAttachments(expected, after) {
   };
   for (const entry of report) claim(entry, (text) => text.includes(entry.name.toLowerCase()), 'name');
   for (const entry of report) {
-    if (entry.matchedBy) continue;
     const { stem, ext } = parts(entry.name);
     if (stem.length < 4 || !/^[a-z0-9]+$/.test(ext)) continue;
     const extWord = new RegExp(`(^|[^a-z0-9])${ext}([^a-z0-9]|$)`);
     claim(entry, (text) => text.includes(stem) && extWord.test(text), 'stem-and-extension');
   }
   for (const entry of report) {
-    if (entry.matchedBy) continue;
     const { stem } = parts(entry.name);
     if (stem.length < 4 || report.some((other) => other !== entry && parts(other.name).stem === stem)) continue;
     claim(entry, (text) => text.includes(stem), 'stem');
@@ -271,7 +276,6 @@ export function matchAttachments(expected, after) {
   // Gemini shortens a long name in the middle ("doc_02_ban..._statement").
   // Such a chip names a file only when its two ends fit that file's stem and
   // no other expected file's, and it shows no other file type.
-  const TYPE_WORD = /(^|[^a-z0-9])(pdf|docx?|xlsx?|pptx?|txt|md|csv|json|png|jpe?g|webp)([^a-z0-9]|$)/g;
   const shortenedFits = (text, entry) => {
     const { stem, ext } = parts(entry.name);
     const types = [...text.matchAll(TYPE_WORD)].map((found) => found[2]);
@@ -280,13 +284,12 @@ export function matchAttachments(expected, after) {
       head.length + tail.length >= 6 && stem.startsWith(head) && stem.endsWith(tail) &&
       !report.some((other) => other !== entry && parts(other.name).stem.startsWith(head) && parts(other.name).stem.endsWith(tail)));
   };
-  for (const entry of report) {
-    if (entry.matchedBy) continue;
-    claim(entry, (text) => shortenedFits(text, entry), 'shortened-name');
-  }
+  for (const entry of report) claim(entry, (text) => shortenedFits(text, entry), 'shortened-name');
+  const unexpected = items.filter((item, i) => !used.has(i)).map((item) => item.text);
   return {
-    done: report.every((entry) => entry.matchedBy && !entry.pending),
+    done: report.every((entry) => entry.matchedBy && !entry.pending) && !unexpected.length,
     report,
+    unexpected,
     anyPending: items.some((item) => item.pending)
   };
 }
@@ -471,7 +474,7 @@ export class OneShotController {
     this.currentRun = run;
     let sent = false;
     try {
-      const freshChat = await this.#openFreshChat({ mode, timeoutMs });
+      const freshChat = await this.#openFreshChat({ timeoutMs });
       const modeApplied = mode ? await this.#applyMode(mode) : null;
       const attachmentReport = await this.#attachFiles(attachments);
       const baseline = await this.#eval(readTurns);
@@ -544,10 +547,10 @@ export class OneShotController {
     return { intent: key, ...definition };
   }
 
-  async #openFreshChat({ mode, timeoutMs }) {
+  async #openFreshChat({ timeoutMs }) {
     await this.#emitProgress({ phase: 'opening_fresh_chat' });
     const currentUrl = await this.getUrl().catch(() => '');
-    const url = this.adapter.freshChatUrl(currentUrl, mode);
+    const url = this.adapter.freshChatUrl(currentUrl);
     await this.navigate(url);
     const ready = await this.ensureReady({ timeoutMs });
     if (ready.turns.user || ready.turns.assistant) {
@@ -556,6 +559,22 @@ export class OneShotController {
         servedUrl: ready.url,
         userTurns: ready.turns.user,
         assistantTurns: ready.turns.assistant
+      });
+    }
+    // A refused send can leave its files in the composer as a draft that the
+    // next chat shows again (Kimi did on 2026-11-18), so a fresh chat must
+    // start with no attachments: the adapter may remove them, else the run stops.
+    let draft = await this.#eval(readAttachments);
+    if (draft.items.length && typeof this.adapter.clearDraftAttachments === 'function') {
+      await this.adapter.clearDraftAttachments(this.#adapterContext());
+      draft = await this.#eval(readAttachments);
+    }
+    if (draft.items.length) {
+      throw namedError('fresh_chat_unavailable', {
+        requestedUrl: url,
+        servedUrl: ready.url,
+        reason: 'draft_attachments',
+        draftAttachments: draft.items.map((item) => item.text)
       });
     }
     return { url: ready.url };
@@ -664,7 +683,8 @@ export class OneShotController {
     }
     throw namedError('attachment_not_shown', {
       expected: expected.map((item) => item.name),
-      shown: (after?.items || []).map((item) => item.text)
+      shown: (after?.items || []).map((item) => item.text),
+      unexpected: match?.unexpected || []
     });
   }
 
@@ -676,19 +696,16 @@ export class OneShotController {
     await this.#clickRect(composer.rect);
     const focus = await this.#eval(focusComposer);
     if (!focus?.found) throw namedError('prompt_focus_failed', { reason: 'composer_not_found' });
-    // A fresh chat's composer should be empty; clearing also removes any draft.
-    await this.page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
-    await this.page.sendKey('Backspace');
     // One retype is allowed: on 2026-11-18 the Electron typing path once
     // left Kimi's composer with the prompt's last character doubled, which
     // typing the same lines by hand did not reproduce. The comparison stays
     // the gate; a second mismatch fails the run before Send.
     let mismatch = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      if (attempt > 1) {
-        await this.page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
-        await this.page.sendKey('Backspace');
-      }
+      // Clearing removes a draft's text before the first attempt and the
+      // mistyped prompt before the second.
+      await this.page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
+      await this.page.sendKey('Backspace');
       const lines = prompt.split('\n');
       for (let i = 0; i < lines.length; i += 1) {
         this.#throwIfStopRequested();
@@ -698,7 +715,9 @@ export class OneShotController {
       // Shift+Return must add a line, never send; a user turn that appeared
       // while typing means part of the prompt went out.
       const afterTyping = await this.#eval(readTurns);
-      if (afterTyping.userTurns > baseline.userTurns) throw namedError('prompt_sent_early', { userTurns: afterTyping.userTurns });
+      if (afterTyping.userTurns > baseline.userTurns) {
+        throw namedError('prompt_sent_early', { userTurns: afterTyping.userTurns, conversationUrl: await this.getUrl().catch(() => null) });
+      }
       const staged = await this.#eval(readComposer);
       if (!staged?.found) throw namedError('missing_staged_prompt', { reason: 'composer_not_found' });
       mismatch = compareStagedPrompt(prompt, staged.text, { usesValue: staged.usesValue });
@@ -721,16 +740,14 @@ export class OneShotController {
         });
       }
     }
-    if (attachmentReport.length) {
-      const expected = attachmentReport.map(({ name, bytes, sha256 }) => ({ name, bytes, sha256 }));
-      const match = matchAttachments(expected, await this.#eval(readAttachments));
-      if (!match.done) {
-        throw namedError('attachment_not_shown', {
-          stage: 'before_send',
-          expected: expected.map((item) => item.name),
-          missing: match.report.filter((item) => !item.matchedBy || item.pending).map((item) => item.name)
-        });
-      }
+    const match = matchAttachments(attachmentReport, await this.#eval(readAttachments));
+    if (!match.done) {
+      throw namedError('attachment_not_shown', {
+        stage: 'before_send',
+        expected: attachmentReport.map((item) => item.name),
+        missing: match.report.filter((item) => !item.matchedBy || item.pending).map((item) => item.name),
+        unexpected: match.unexpected
+      });
     }
   }
 
@@ -817,7 +834,6 @@ export class OneShotController {
       return;
     }
     throw namedError('timeout_waiting_for_response', {
-      conversationUrl: await this.getUrl().catch(() => null),
       softDeadlineMs: timeoutMs,
       waitedMs: Date.now() - start,
       assistantTurns: last?.assistantTurns ?? null,
@@ -881,6 +897,22 @@ export class OneShotController {
       selectorsFor: (anchorId) => this.adapter.profile.selectorsFor(anchorId),
       click: async (rect) => await this.#clickRect(rect),
       pressKey: async (key, options) => await this.page.sendKey(key, options),
+      hover: async (rect) => await this.page.moveMouse(Math.floor(rect.x + rect.w / 2), Math.floor(rect.y + rect.h / 2)),
+      // Reads until accept() holds or timeoutMs passes; returns the last reading.
+      waitFor: async (read, accept, timeoutMs = this.timings.menuMs) => {
+        const start = Date.now();
+        let value = await read();
+        while (!accept(value) && Date.now() - start < timeoutMs) {
+          this.#throwIfStopRequested();
+          await sleep(Math.min(250, this.timings.pollMs));
+          value = await read();
+        }
+        return value;
+      },
+      closeMenus: async () => {
+        await this.page.sendKey('Escape');
+        await sleep(Math.min(150, this.timings.menuMs));
+      },
       sleep,
       timings: this.timings,
       throwIfStopRequested: () => this.#throwIfStopRequested(),

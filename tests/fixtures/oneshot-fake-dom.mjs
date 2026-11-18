@@ -10,6 +10,9 @@ function textNode(value) {
   return { nodeType: 3, textContent: String(value), parentElement: null };
 }
 
+// Engine timings scaled down for stub pages.
+export const FAST_TIMINGS = Object.freeze({ pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 });
+
 export function el(tag, {
   attrs = {},
   text = null,
@@ -148,6 +151,7 @@ export function createFakePage({ state, render, url = 'https://site.example/', o
     evaluations: [],
     keys: [],
     clicks: [],
+    moves: [],
     navigations: [],
     lastDocument: null,
     async evaluate(js) {
@@ -181,7 +185,9 @@ export function createFakePage({ state, render, url = 'https://site.example/', o
     async insertText(text) {
       page.state.composerText += page.state.dropText ? page.state.dropText(text) : text;
     },
-    async moveMouse() {},
+    async moveMouse(x, y) {
+      page.moves.push([x, y]);
+    },
     async mouseDown() {},
     async mouseUp(x, y) {
       page.clicks.push([x, y]);

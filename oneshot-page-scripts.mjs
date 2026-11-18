@@ -128,14 +128,12 @@ export function readTurns(a, h) {
       idle: !!h.first(a.idle, last)
     };
   }
-  const composer = h.first(a.composer);
   const notice = h.first(a.notice);
   return {
     userTurns: h.all(a.userTurn).length,
     assistantTurns: assistants.length,
     lastAssistant,
     stopVisible: !!h.first(a.stop),
-    composerEmpty: composer ? !String(composer.matches('textarea, input') ? composer.value : h.textOf(composer)).trim() : null,
     notice: notice ? h.textOf(notice).replace(/\s+/g, ' ').trim().slice(0, 300) : null
   };
 }

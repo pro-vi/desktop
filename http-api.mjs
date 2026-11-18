@@ -895,7 +895,7 @@ async function writeOneShotAnswerFiles({ outDir, meta }) {
     sourceCount: sources.length,
     attachments: Array.isArray(meta?.attachments) ? meta.attachments : [],
     toolUsePath,
-    toolUse: toolUseCounts(toolUse)
+    toolUseCounts: toolUseCounts(toolUse)
   };
 }
 

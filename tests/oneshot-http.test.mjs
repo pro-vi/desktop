@@ -91,7 +91,7 @@ test('oneshot-http: a Kimi query writes the Markdown answer, plain text, sources
       modeApplied: { intent: 'k3.1-pro', shown: { model: 'K3.1 Pro', effort: 'High' } },
       answerSettings: { model: 'K3.1 Pro', mode: 'Thinking effort: High', source: 'composer-model-menu-after-answer', unreadReason: null },
       attachments: [{ name: 'brief.pdf', bytes: 10, sha256: 'a'.repeat(64), matchedBy: 'name' }],
-      toolUse: { state: 'shown', steps: [{ tool: 'web_search', title: 'Found 2 web pages', count: 2, pages: [
+      toolUse: { state: 'shown', steps: [{ tool: 'web_search', kind: 'search', title: 'Found 2 web pages', count: 2, pages: [
         { url: 'https://example.org/a', title: 'A', site: 'example.org' },
         { url: 'https://news.example.com/b', title: 'B', site: 'news.example.com' }
       ] }] },
@@ -126,11 +126,11 @@ test('oneshot-http: a Kimi query writes the Markdown answer, plain text, sources
   assert.deepEqual(manifest.answerSettings, { model: 'K3.1 Pro', mode: 'Thinking effort: High', source: 'composer-model-menu-after-answer', unreadReason: null });
   assert.deepEqual(manifest.files.map((file) => file.role).sort(), ['assistant_response', 'assistant_response_text', 'metadata', 'sources', 'tool_use']);
   assert.deepEqual(manifest.attachments, [{ name: 'brief.pdf', bytes: 10, sha256: 'a'.repeat(64), matchedBy: 'name' }]);
-  assert.deepEqual(manifest.toolUse, { state: 'shown', reason: null, stepCount: 1, searchCount: 1, pageCount: 2 });
+  assert.deepEqual(manifest.toolUseCounts, { state: 'shown', reason: null, stepCount: 1, searchCount: 1, pageCount: 2 });
   assert.deepEqual(JSON.parse(await fs.readFile(manifest.toolUsePath, 'utf8')), {
     state: 'shown',
     reason: null,
-    steps: [{ tool: 'web_search', title: 'Found 2 web pages', query: null, count: 2, pages: [
+    steps: [{ tool: 'web_search', kind: 'search', title: 'Found 2 web pages', count: 2, pages: [
       { url: 'https://example.org/a', title: 'A', site: 'example.org' },
       { url: 'https://news.example.com/b', title: 'B', site: 'news.example.com' }
     ] }]
@@ -230,7 +230,7 @@ test('oneshot-http: an unread tool use is saved as unread with its reason, never
   const response = await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi' } });
   assert.equal(response.status, 200, JSON.stringify(response.data));
   const run = (await req({ port, method: 'POST', pth: '/runs/get', body: { runId: response.data.runId } })).data.run;
-  assert.deepEqual(run.outputManifest.toolUse, { state: 'unread', reason: 'tool_flow_did_not_expand', stepCount: null, searchCount: null, pageCount: null });
+  assert.deepEqual(run.outputManifest.toolUseCounts, { state: 'unread', reason: 'tool_flow_did_not_expand', stepCount: null, searchCount: null, pageCount: null });
   assert.deepEqual(JSON.parse(await fs.readFile(run.outputManifest.toolUsePath, 'utf8')), { state: 'unread', reason: 'tool_flow_did_not_expand', steps: null });
 });
 
