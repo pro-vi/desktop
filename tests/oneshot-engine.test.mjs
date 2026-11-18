@@ -754,3 +754,35 @@ test('oneshot-engine: a chip whose child nodes match the chip selector counts as
   assert.equal(shown.items.length, 1);
   assert.equal(shown.items[0].text, 'a.pdfPDF 12 KB');
 });
+
+test('oneshot-engine: names Gemini shortens in the middle match the one file whose stem fits both ends', () => {
+  const names = ['sow_profile_current_short.docx', 'doc_01_passport.pdf', 'doc_02_bank_statement.pdf', 'doc_06_share_purchase_agreement.pdf', 'doc_18_completion_statement.UK.share.pdf', 'doc_04_real_estate_contract_for_sale.pdf', 'doc_09_audited_accounts.pdf', 'doc_15_valuation.pdf'];
+  // Chip texts as the live Gemini page showed them on 2026-11-18.
+  const shown = ['sow_profil...rent_short', 'PDF doc_01_passport', 'PDF doc_02_ban..._statement', 'PDF doc_06_sha..._agreement', 'PDF doc_18_com...t.UK.share', 'PDF doc_04_rea...t_for_sale', 'PDF doc_09_aud...d_accounts', 'PDF doc_15_valuation'];
+  const match = matchAttachments(names.map((name) => ({ name })), { items: shown.map((text) => ({ text })) });
+  assert.equal(match.done, true);
+  assert.deepEqual(match.report.map((item) => item.matchedBy), ['shortened-name', 'stem-and-extension', 'shortened-name', 'shortened-name', 'shortened-name', 'shortened-name', 'shortened-name', 'stem-and-extension']);
+  // Two stems that fit the same ends: the chip names neither for certain.
+  const ambiguous = matchAttachments([{ name: 'doc_02_bank_statement.pdf' }, { name: 'doc_02_bank_old_statement.pdf' }], { items: [{ text: 'PDF doc_02_ban..._statement' }] });
+  assert.deepEqual(ambiguous.report.map((item) => item.matchedBy), [null, null]);
+  // A shortened chip that shows another file type does not stand for a docx.
+  const wrongType = matchAttachments([{ name: 'doc_02_bank_statement.docx' }], { items: [{ text: 'PDF doc_02_ban..._statement' }] });
+  assert.equal(wrongType.report[0].matchedBy, null);
+});
+
+test('oneshot-engine: a composer that misstages once is cleared and retyped; twice fails before Send', async () => {
+  const once = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  let typed = 0;
+  once.state.dropText = (text) => (text === 'last line.' && ++typed === 1 ? 'last line..' : text);
+  const result = await controllerFor(once.page).query({ prompt: 'first line\nlast line.', timeoutMs: 2_000 });
+  assert.equal(result.meta.sendDebug.typingAttempts, 2);
+  assert.equal(once.state.turns[0].text, 'first line\nlast line.');
+
+  const always = makeSite();
+  always.state.dropText = (text) => (text === 'last line.' ? 'last line..' : text);
+  await assert.rejects(
+    controllerFor(always.page).query({ prompt: 'first line\nlast line.', timeoutMs: 400 }),
+    (error) => error.message === 'prompt_staging_failed' && error.data.firstDifference.line === 2
+  );
+  assert.equal(always.state.sendClicks, 0);
+});

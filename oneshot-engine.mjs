@@ -226,7 +226,7 @@ export function toolUseCounts(toolUse) {
 // names are matched first; then a chip showing the file's stem and its
 // extension as a word (Kimi and Gemini drop the extension from the name and
 // show it apart); then the stem alone, only when no other expected file shares
-// it. A chip is used for one file at most.
+// it; then a name shortened in the middle. A chip is used for one file at most.
 export function matchAttachments(expected, after) {
   const items = (Array.isArray(after?.items) ? after.items : []).map((item) => ({ ...item, text: String(item.text || '').toLowerCase() }));
   const used = new Set();
@@ -256,6 +256,22 @@ export function matchAttachments(expected, after) {
     const { stem } = parts(entry.name);
     if (stem.length < 4 || report.some((other) => other !== entry && parts(other.name).stem === stem)) continue;
     claim(entry, (text) => text.includes(stem), 'stem');
+  }
+  // Gemini shortens a long name in the middle ("doc_02_ban..._statement").
+  // Such a chip names a file only when its two ends fit that file's stem and
+  // no other expected file's, and it shows no other file type.
+  const TYPE_WORD = /(^|[^a-z0-9])(pdf|docx?|xlsx?|pptx?|txt|md|csv|json|png|jpe?g|webp)([^a-z0-9]|$)/g;
+  const shortenedFits = (text, entry) => {
+    const { stem, ext } = parts(entry.name);
+    const types = [...text.matchAll(TYPE_WORD)].map((found) => found[2]);
+    if (types.some((type) => type !== ext)) return false;
+    return [...text.matchAll(/([^\s]+?)(?:\.\.\.|…)([^\s]+)/g)].some(([, head, tail]) =>
+      head.length + tail.length >= 6 && stem.startsWith(head) && stem.endsWith(tail) &&
+      !report.some((other) => other !== entry && parts(other.name).stem.startsWith(head) && parts(other.name).stem.endsWith(tail)));
+  };
+  for (const entry of report) {
+    if (entry.matchedBy) continue;
+    claim(entry, (text) => shortenedFits(text, entry), 'shortened-name');
   }
   return {
     done: report.every((entry) => entry.matchedBy && !entry.pending),
@@ -448,7 +464,7 @@ export class OneShotController {
       const modeApplied = mode ? await this.#applyMode(mode) : null;
       const attachmentReport = await this.#attachFiles(attachments);
       const baseline = await this.#eval(readTurns);
-      await this.#typePrompt(prompt, baseline);
+      const typing = await this.#typePrompt(prompt, baseline);
       await this.#recheckBeforeSend({ modeApplied, attachmentReport });
       const sendDebug = await this.#clickSend(baseline);
       sent = true;
@@ -483,7 +499,7 @@ export class OneShotController {
           ...verification,
           attachments: attachmentReport,
           promptDelivery,
-          sendDebug,
+          sendDebug: { ...sendDebug, typingAttempts: typing.attempts },
           ...(captureNotes ? { captureNotes } : {}),
           profileContractVersion: this.adapter.profile.contractVersion
         }
@@ -652,20 +668,32 @@ export class OneShotController {
     // A fresh chat's composer should be empty; clearing also removes any draft.
     await this.page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
     await this.page.sendKey('Backspace');
-    const lines = prompt.split('\n');
-    for (let i = 0; i < lines.length; i += 1) {
-      this.#throwIfStopRequested();
-      if (lines[i]) await this.page.insertText(lines[i]);
-      if (i < lines.length - 1) await this.page.sendKey('Return', { modifiers: ['shift'] });
+    // One retype is allowed: on 2026-11-18 the Electron typing path once
+    // left Kimi's composer with the prompt's last character doubled, which
+    // typing the same lines by hand did not reproduce. The comparison stays
+    // the gate; a second mismatch fails the run before Send.
+    let mismatch = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (attempt > 1) {
+        await this.page.sendKey('A', { modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
+        await this.page.sendKey('Backspace');
+      }
+      const lines = prompt.split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        this.#throwIfStopRequested();
+        if (lines[i]) await this.page.insertText(lines[i]);
+        if (i < lines.length - 1) await this.page.sendKey('Return', { modifiers: ['shift'] });
+      }
+      // Shift+Return must add a line, never send; a user turn that appeared
+      // while typing means part of the prompt went out.
+      const afterTyping = await this.#eval(readTurns);
+      if (afterTyping.userTurns > baseline.userTurns) throw namedError('prompt_sent_early', { userTurns: afterTyping.userTurns });
+      const staged = await this.#eval(readComposer);
+      if (!staged?.found) throw namedError('missing_staged_prompt', { reason: 'composer_not_found' });
+      mismatch = compareStagedPrompt(prompt, staged.text, { usesValue: staged.usesValue });
+      if (!mismatch) return { attempts: attempt };
     }
-    // Shift+Return must add a line, never send; a user turn that appeared
-    // while typing means part of the prompt went out.
-    const afterTyping = await this.#eval(readTurns);
-    if (afterTyping.userTurns > baseline.userTurns) throw namedError('prompt_sent_early', { userTurns: afterTyping.userTurns });
-    const staged = await this.#eval(readComposer);
-    if (!staged?.found) throw namedError('missing_staged_prompt', { reason: 'composer_not_found' });
-    const mismatch = compareStagedPrompt(prompt, staged.text, { usesValue: staged.usesValue });
-    if (mismatch) throw namedError('prompt_staging_failed', mismatch);
+    throw namedError('prompt_staging_failed', mismatch);
   }
 
   // Typing can reset a picker or clear attachment chips, so both are read
