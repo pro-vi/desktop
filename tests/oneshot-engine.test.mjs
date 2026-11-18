@@ -768,16 +768,26 @@ test('oneshot-engine: names Gemini shortens in the middle match the one file who
   assert.equal(wrongType.report[0].matchedBy, null);
 });
 
+test('oneshot-engine: extra text after the complete prompt is deleted from the end before Send', async () => {
+  // Kimi's composer held the prompt with its last character doubled, on both attempts of one run.
+  const doubled = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  doubled.state.dropText = (text) => (text === 'last line.' ? 'last line..' : text);
+  const result = await controllerFor(doubled.page).query({ prompt: 'first line\nlast line.', timeoutMs: 2_000 });
+  assert.equal(result.meta.sendDebug.typingAttempts, 1);
+  assert.equal(result.meta.sendDebug.trimmedTrailingChars, 1);
+  assert.equal(doubled.state.turns[0].text, 'first line\nlast line.');
+});
+
 test('oneshot-engine: a composer that misstages once is cleared and retyped; twice fails before Send', async () => {
   const once = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
   let typed = 0;
-  once.state.dropText = (text) => (text === 'last line.' && ++typed === 1 ? 'last line..' : text);
+  once.state.dropText = (text) => (text === 'last line.' && ++typed === 1 ? 'lost line.' : text);
   const result = await controllerFor(once.page).query({ prompt: 'first line\nlast line.', timeoutMs: 2_000 });
   assert.equal(result.meta.sendDebug.typingAttempts, 2);
   assert.equal(once.state.turns[0].text, 'first line\nlast line.');
 
   const always = makeSite();
-  always.state.dropText = (text) => (text === 'last line.' ? 'last line..' : text);
+  always.state.dropText = (text) => (text === 'last line.' ? 'lost line.' : text);
   await assert.rejects(
     controllerFor(always.page).query({ prompt: 'first line\nlast line.', timeoutMs: 400 }),
     (error) => error.message === 'prompt_staging_failed' && error.data.firstDifference.line === 2

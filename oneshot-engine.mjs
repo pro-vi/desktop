@@ -144,7 +144,9 @@ export function compareStagedPrompt(expected, staged, { usesValue = false } = {}
     expectedChars: String(expected || '').length,
     stagedChars: String(staged || '').length,
     // Quote only the caller's prompt: the composer may hold a draft from elsewhere.
-    firstDifference: { at, line, expected: want.slice(at, at + 60) }
+    firstDifference: { at, line, expected: want.slice(at, at + 60) },
+    // Characters the composer holds after the complete prompt, else 0.
+    trailingExtra: got.startsWith(want) ? got.length - want.length : 0
   };
 }
 
@@ -513,7 +515,7 @@ export class OneShotController {
           ...verification,
           attachments: attachmentReport,
           promptDelivery,
-          sendDebug: { ...sendDebug, typingAttempts: typing.attempts },
+          sendDebug: { ...sendDebug, typingAttempts: typing.attempts, ...(typing.trimmedTrailingChars ? { trimmedTrailingChars: typing.trimmedTrailingChars } : {}) },
           ...(captureNotes ? { captureNotes } : {}),
           profileContractVersion: this.adapter.profile.contractVersion
         }
@@ -696,10 +698,11 @@ export class OneShotController {
     await this.#clickRect(composer.rect);
     const focus = await this.#eval(focusComposer);
     if (!focus?.found) throw namedError('prompt_focus_failed', { reason: 'composer_not_found' });
-    // One retype is allowed: on 2026-11-18 the Electron typing path once
-    // left Kimi's composer with the prompt's last character doubled, which
-    // typing the same lines by hand did not reproduce. The comparison stays
-    // the gate; a second mismatch fails the run before Send.
+    // Kimi's composer twice held the complete prompt followed by one more copy
+    // of its last character (2026-11-18), in one run on both attempts; text
+    // inserted through DevTools never did. Extra text after a complete prompt
+    // is deleted from the end; any other mismatch gets one retype. The
+    // comparison stays the gate: a mismatch left after both fails before Send.
     let mismatch = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       // Clearing removes a draft's text before the first attempt and the
@@ -722,6 +725,13 @@ export class OneShotController {
       if (!staged?.found) throw namedError('missing_staged_prompt', { reason: 'composer_not_found' });
       mismatch = compareStagedPrompt(prompt, staged.text, { usesValue: staged.usesValue });
       if (!mismatch) return { attempts: attempt };
+      if (mismatch.trailingExtra > 0) {
+        const trimmed = mismatch.trailingExtra;
+        for (let i = 0; i < trimmed; i += 1) await this.page.sendKey('Backspace');
+        const retrimmed = await this.#eval(readComposer);
+        mismatch = compareStagedPrompt(prompt, retrimmed?.text, { usesValue: retrimmed?.usesValue });
+        if (!mismatch) return { attempts: attempt, trimmedTrailingChars: trimmed };
+      }
     }
     throw namedError('prompt_staging_failed', mismatch);
   }

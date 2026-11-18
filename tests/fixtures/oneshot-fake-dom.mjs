@@ -174,6 +174,8 @@ export function createFakePage({ state, render, url = 'https://site.example/', o
       if (key === 'Backspace' && page.state.selectAll) {
         page.state.composerText = '';
         page.state.selectAll = false;
+      } else if (key === 'Backspace') {
+        page.state.composerText = page.state.composerText.slice(0, -1);
       } else if (key === 'A' && modifiers.length) {
         page.state.selectAll = true;
       } else if (key === 'Return' && modifiers.includes('shift')) {
