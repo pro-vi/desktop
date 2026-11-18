@@ -185,11 +185,13 @@ function rethrowPromptStaging(error) {
 function conversationReadText(data = {}) {
   const lines = [
     data.transcriptPath ? `transcriptPath=${data.transcriptPath}` : null,
+    data.servedUrl ? `servedUrl=${data.servedUrl}` : null,
     Number.isFinite(Number(data.totalChars)) ? `totalChars=${Number(data.totalChars)}` : null,
     Number.isFinite(Number(data.totalBytes)) ? `totalBytes=${Number(data.totalBytes)}` : null,
     data.sha256 ? `sha256=${data.sha256}` : null,
     `complete=${!!data.complete}`,
     data.captureReason ? `captureReason=${data.captureReason}` : null,
+    data.structuredCaptureReason ? `structuredCaptureReason=${data.structuredCaptureReason}` : null,
     data.previewTruncated ? 'previewTruncated=true' : null
   ].filter(Boolean);
   const diag = data.captureDiagnostics;
@@ -1138,7 +1140,7 @@ registerTool(
   'agentify_read_conversation',
   {
     description:
-      'Read a complete ChatGPT conversation into Agentify private storage and return its local transcriptPath, integrity metadata, and a bounded inline preview. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. complete describes browser capture completeness; previewTruncated describes only the inline preview. artifactInventory has its own complete/partial status because file-card coverage is independent from transcript text coverage. reason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
+      'Read a complete ChatGPT conversation into Agentify private storage and return its local transcriptPath, integrity metadata, and a bounded inline preview. Pass chatUrl to read a specific conversation; Agentify navigates there read-only and never sends a prompt, so reading cannot add a turn. Without chatUrl the active tab is read. servedUrl is the page the tab served after the capture. When chatUrl names a conversation (not a shared link), the read fails with read_location_mismatch and saves nothing unless the tab is confirmed to have ended on that conversation. complete describes browser capture completeness; structuredCaptureReason is the specific capture failure, which captureReason may fold into conversation_capture_invalid; where the two disagree, structuredCaptureReason is what the capture found; previewTruncated describes only the inline preview. artifactInventory has its own complete/partial status because file-card coverage is independent from transcript text coverage. captureReason=leading_turn_missing means the scroll reached the top and the provider never served the opening turn, so retrying returns the same capture -- recover that conversation with agentify_import_selected_chatgpt_export instead.',
     inputSchema: {
       model: z.string().optional().describe('Target vendor hint for tab selection. Use ChatGPT for complete conversation capture.'),
       tabId: z.string().optional().describe('Tab/session id to use.'),

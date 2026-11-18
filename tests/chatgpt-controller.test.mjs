@@ -7632,6 +7632,7 @@ test('chatgpt-controller: readConversationText returns the complete virtualized 
     reason: null,
     messageCount: 3,
     scrollPasses: 4,
+    structuredCaptureReason: null,
     artifactInventory: { status: 'complete', items: [] }
   });
   assert.equal(evaluations.length, 2);
@@ -8044,6 +8045,7 @@ test('chatgpt-controller: legacy transcript projection reads DOM windows while l
         reason: null,
         messageCount: 2,
         scrollPasses: 0,
+        structuredCaptureReason: null,
         artifactInventory: {
           status: 'partial',
           reason: 'artifact_identity_unavailable',
@@ -10744,6 +10746,7 @@ test('chatgpt-controller: readConversationText top-anchors before scanning a vir
   assert.equal(result.truncated, false);
   assert.equal(result.reason, null);
   assert.equal(result.messageCount, 3);
+  assert.equal(result.structuredCaptureReason, null);
   assert.ok(result.scrollPasses > 2);
 });
 
@@ -10923,6 +10926,31 @@ test('chatgpt-controller: readConversationText preserves the partial capture rea
   assert.equal(result.captureReason, 'leading_turn_missing');
   assert.equal(result.reason, 'leading_turn_missing');
   assert.equal(result.messageCount, 1);
+});
+
+test('chatgpt-controller: readConversationText names the capture reason that the legacy reason folds', async () => {
+  const page = slidingConversationPage([
+    { role: 'user', text: 'Layout fallback must not become transcript evidence' }
+  ], {
+    windowSize: 1,
+    initialStart: 0,
+    childNodesForMessage: () => [{
+      nodeType: 1,
+      tagName: 'IMG',
+      childNodes: [],
+      hidden: false,
+      getAttribute(name) {
+        return name === 'alt' ? 'Changing image metadata is not transcript text' : null;
+      }
+    }]
+  });
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const result = await controller.readConversationText({ maxChars: 500 });
+
+  assert.equal(result.complete, false);
+  assert.equal(result.captureReason, 'conversation_capture_invalid');
+  assert.equal(result.structuredCaptureReason, 'conversation_message_text_unavailable');
 });
 
 test('chatgpt-controller: legacy projection preserves the pre-V0 top-capture timeout reason', async () => {

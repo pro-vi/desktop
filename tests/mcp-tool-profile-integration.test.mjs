@@ -334,10 +334,12 @@ test('mcp conversation read returns artifact metadata without duplicating the co
         totalChars: fullText.length,
         totalBytes: Buffer.byteLength(fullText),
         sha256: 'a'.repeat(64),
+        servedUrl: 'https://chatgpt.com/c/read-conversation-1',
         complete: true,
         truncated: true,
         previewTruncated: true,
         captureReason: null,
+        structuredCaptureReason: null,
         reason: 'max_chars',
         messageCount: 2,
         scrollPasses: 3,
@@ -372,6 +374,8 @@ test('mcp conversation read returns artifact metadata without duplicating the co
   assert.equal(requestBody?.maxChars, 20_000);
   assert.match(result.content[0].text, /^transcriptPath=\/tmp\/agentify\/conversation-transcript\.md/m);
   assert.match(result.content[0].text, /totalChars=50045/);
+  assert.match(result.content[0].text, /^servedUrl=https:\/\/chatgpt\.com\/c\/read-conversation-1$/m);
+  assert.equal(result.structuredContent.servedUrl, 'https://chatgpt.com/c/read-conversation-1');
   assert.match(result.content[0].text, /preview:/);
   assert.equal(result.structuredContent.transcriptPath, '/tmp/agentify/conversation-transcript.md');
   assert.equal('text' in result.structuredContent, false);

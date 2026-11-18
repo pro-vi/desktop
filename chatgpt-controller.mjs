@@ -3493,6 +3493,8 @@ export class ChatGPTController {
     }
     return {
       ...projection,
+      // captureReason folds several of these into conversation_capture_invalid.
+      structuredCaptureReason: captureWindow?.status === 'partial' ? captureWindow.reason : null,
       ...(captureDiagnostics ? { captureDiagnostics } : {}),
       artifactInventory
     };

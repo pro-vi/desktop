@@ -5644,6 +5644,10 @@ test('http-api: read-conversation exposes complete transcript capture through th
           }]
         }
       };
+    },
+    getUrl: async () => {
+      assert.equal(inExclusive, true);
+      return 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6';
     }
   };
   const tabs = {
@@ -5690,6 +5694,14 @@ test('http-api: read-conversation exposes complete transcript capture through th
   assert.equal('transcriptText' in data, false);
   assert.equal(data.artifactInventory.status, 'complete');
   assert.deepEqual(data.artifactInventory.items.map((item) => item.name), ['report.md']);
+  // The transcript file holds only turns, so the registry records which
+  // conversation it came from.
+  assert.equal(data.servedUrl, 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6');
+  const registry = (await fs.readFile(path.join(stateDir, 'artifacts', 'index.jsonl'), 'utf8'))
+    .trim().split('\n').map((line) => JSON.parse(line));
+  const record = registry.find((row) => row.id === data.transcriptArtifactId);
+  assert.equal(record.meta.servedUrl, data.servedUrl);
+  assert.equal(record.meta.sha256, data.sha256);
 });
 
 test('http-api: failed transcript registration removes the unpublished file', async (t) => {
@@ -5761,7 +5773,10 @@ test('http-api: read-conversation enters a supplied chatUrl without sending anyt
     readConversationText: async () => {
       calls.push(['readConversationText']);
       return { text: 'User\nOne', complete: true, truncated: false, reason: null, messageCount: 1, scrollPasses: 2 };
-    }
+    },
+    // ChatGPT may serve a standalone conversation under its project path; the
+    // conversation id, not the URL text, decides whether it is the one asked for.
+    getUrl: async () => 'https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6'
   };
   const tabs = {
     listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
@@ -5792,10 +5807,84 @@ test('http-api: read-conversation enters a supplied chatUrl without sending anyt
 
   assert.equal(res.status, 200);
   assert.equal(data.complete, true);
+  assert.equal(data.servedUrl, 'https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6');
   assert.deepEqual(calls, [
     ['prepareChatEntry', 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6'],
     ['readConversationText']
   ]);
+});
+
+test('http-api: read-conversation refuses text from a conversation other than the chatUrl', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-read-conversation-mismatch-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const requested = 'https://chatgpt.com/c/6a53466c-5dc0-83e8-a29b-f34ea32724d6';
+  let served = 'https://chatgpt.com/c/other-conversation-1';
+  const otherText = 'User\nText of the conversation the caller did not ask for';
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    prepareChatEntry: async () => ({ ok: true }),
+    readConversationText: async () => ({
+      text: otherText,
+      transcriptText: otherText,
+      totalChars: otherText.length,
+      complete: true,
+      truncated: false,
+      previewTruncated: false,
+      captureReason: null,
+      reason: null,
+      messageCount: 1,
+      scrollPasses: 1,
+      artifactInventory: { status: 'complete', items: [] }
+    }),
+    getUrl: async () => served
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+
+  const { res, data } = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { chatUrl: requested, maxChars: 500 }
+  });
+
+  assert.equal(res.status, 409);
+  assert.equal(data.error, 'read_location_mismatch');
+  assert.deepEqual(data.data, { expected: requested, servedUrl: served });
+  assert.equal(JSON.stringify(data).includes('did not ask for'), false);
+
+  // A /c/ path whose segment is not a conversation id cannot be confirmed even
+  // when the served URL is just as unreadable.
+  served = 'https://chatgpt.com/';
+  const unconfirmed = await req({
+    port: server.address().port,
+    token: 'secret',
+    method: 'POST',
+    pth: '/read-conversation',
+    body: { chatUrl: 'https://chatgpt.com/c/a.b', maxChars: 500 }
+  });
+  assert.equal(unconfirmed.res.status, 409);
+  assert.equal(unconfirmed.data.error, 'read_location_mismatch');
+  const artifactsDir = path.join(stateDir, 'artifacts');
+  const saved = await fs.readdir(artifactsDir, { recursive: true }).catch(() => []);
+  assert.deepEqual(saved.filter((name) => String(name).includes('conversation-transcript-')), []);
 });
 
 test('http-api: conversation artifact download registers successes and preserves per-item failures', async (t) => {

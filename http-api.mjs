@@ -214,7 +214,7 @@ function mapErrorToHttp(error) {
   if (msg === 'research_mode_activation_failed') return { code: 409, body: { error: 'research_mode_activation_failed', data: error?.data || null } };
   if (msg === 'mode_intent_activation_failed') return { code: 409, body: { error: 'mode_intent_activation_failed', data: error?.data || null } };
   if (msg === 'chat_surface_activation_failed') return { code: 409, body: { error: 'chat_surface_activation_failed', data: error?.data || null } };
-  if (msg === 'project_unavailable' || msg === 'run_location_mismatch') return { code: 409, body: { error: msg, data: error?.data || null } };
+  if (msg === 'project_unavailable' || msg === 'run_location_mismatch' || msg === 'read_location_mismatch') return { code: 409, body: { error: msg, data: error?.data || null } };
   if (Object.hasOwn(DOT_HTTP_ERROR_STATUS, msg)) {
     const data = {};
     if (typeof error?.data?.runId === 'string') {
@@ -555,6 +555,16 @@ function conversationIdFromUrl(value) {
   } catch {
     return null;
   }
+}
+
+// Throws `code` unless the served URL names the same conversation or project as
+// the target. A target or served URL without a readable id fails the check.
+function assertServedLocation({ idOf, target, servedUrl, code }) {
+  const targetId = idOf(target);
+  if (targetId !== null && idOf(servedUrl) === targetId) return;
+  const error = new Error(code);
+  error.data = { expected: target, servedUrl: servedUrl || null };
+  throw error;
 }
 
 function stagingMismatchDetail(firstDifference) {
@@ -2312,21 +2322,19 @@ export function startHttpApi({
     // Readiness only proves that some composer is visible. The tab can leave the
     // target while it waits (a redirect, or a person using the shown window), and a
     // prompt sent from there lands in another conversation.
-    const assertServedLocation = async (idOf, target) => {
-      const servedUrl = await readUrl();
-      const targetId = idOf(target);
-      if (targetId !== null && idOf(servedUrl) === targetId) return;
-      const error = new Error('run_location_mismatch');
-      error.data = { expected: target, servedUrl: servedUrl || null };
-      throw error;
-    };
+    const assertServedRunLocation = async (idOf, target) => assertServedLocation({
+      idOf,
+      target,
+      servedUrl: await readUrl(),
+      code: 'run_location_mismatch'
+    });
     if (targetConversation) {
       if (currentUrl !== targetConversation) {
         patchActiveQuery(tabId, { phase: 'resuming_conversation' });
         await controller.navigate(targetConversation);
         if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
       }
-      await assertServedLocation(conversationIdFromUrl, targetConversation);
+      await assertServedRunLocation(conversationIdFromUrl, targetConversation);
       return;
     }
     if (targetProject) {
@@ -2336,7 +2344,7 @@ export function startHttpApi({
         await controller.navigate(targetProject);
         if (typeof controller.ensureReady === 'function') await controller.ensureReady({ timeoutMs });
       }
-      await assertServedLocation(chatGptProjectIdFromUrl, targetProject);
+      await assertServedRunLocation(chatGptProjectIdFromUrl, targetProject);
     }
   };
 
@@ -5392,16 +5400,36 @@ export function startHttpApi({
           if (typeof controller?.readConversationText !== 'function') {
             return sendJson(res, 501, { error: 'conversation_read_unsupported' });
           }
+          let servedUrl = null;
           const capture = await runExclusive(controller, async () => {
             if (entryTarget) await controller.prepareChatEntry({ chatUrl: entryTarget.chatUrl });
-            return await controller.readConversationText({ maxChars, includeTranscriptText: true });
+            const captured = await controller.readConversationText({ maxChars, includeTranscriptText: true });
+            // Read under the same lease as the capture, so it names the page the
+            // text came from rather than cached tab metadata.
+            servedUrl = typeof controller.getUrl === 'function'
+              ? await controller.getUrl().catch(() => null)
+              : null;
+            return captured;
           });
+          // Navigation and readiness do not prove the tab ended on the requested
+          // conversation, and an unreadable URL proves nothing, so the capture is
+          // dropped unless the URL the tab served after it names that
+          // conversation. This compares URLs, not page content.
+          if (entryTarget?.kind === 'canonical-conversation') {
+            assertServedLocation({
+              idOf: conversationIdFromUrl,
+              target: entryTarget.chatUrl,
+              servedUrl,
+              code: 'read_location_mismatch'
+            });
+          }
           const { transcriptText: rawTranscriptText, ...projection } = capture || {};
           const transcriptText = String(rawTranscriptText || '');
           if (!transcriptText) {
             return sendJson(res, 200, {
               ok: true,
               tabId,
+              servedUrl,
               ...projection,
               preview: String(projection?.text || '')
             });
@@ -5432,11 +5460,12 @@ export function startHttpApi({
               originalName: path.basename(transcriptPath),
               mime: 'text/markdown',
               source: 'agentify_read_conversation',
-              meta: { role: 'conversation_transcript', sha256 }
+              meta: { role: 'conversation_transcript', sha256, servedUrl }
             });
             return sendJson(res, 200, {
               ok: true,
               tabId,
+              servedUrl,
               ...projection,
               preview: String(projection?.text || ''),
               transcriptPath: artifact.path,
