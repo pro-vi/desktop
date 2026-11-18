@@ -53,6 +53,15 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
   restart the app, and retrieve identical diagnostics through MCP. This checks
   failure evidence only. [Probe](probes/2026-10-22-attachment-failure-evidence.md).
 
+- **LIVE-ONESHOT** — one fresh-chat `agentify_query` per site on the one-shot engine
+  (ADR 0017), sent and awaited through public MCP (`agentify_query`, then
+  `agentify_wait_run`), with the strongest mode the page will serve, eight attached
+  synthetic case files and a multi-line prompt. Pass: `success` with an `assistant-node`
+  receipt; every attachment matched; prompt delivery complete; Markdown answer,
+  `sources.json` and `tool_use.json` saved; the page's model and mode recorded. A mode
+  the site does not offer is refused before any page work.
+  [Probe](probes/2026-11-18-oneshot-gemini-kimi-live.md).
+
 ## Method matrix
 
 | Method | Journey | Repetitions | Observable pass condition | 2026-09-26 | Evidence |
@@ -108,6 +117,16 @@ removed. Live journeys send to ChatGPT and need the maintainer's consent per pro
 | `agentify_download_images` | LIVE-MEDIA | 1 | The latest assistant image is downloaded to a local path and is a decodable non-empty image file. | ✅ | 1254×1254 PNG from the image reply |
 | `agentify_shutdown` | LOCAL-ADMIN | 1 | The desktop exits cleanly; a later authenticated MCP method starts a different server id. | ✅ | `e2e-mcp-local-state` receipt; 2026-10-12: immediate public status relaunched twice while the old process was still exiting. New server identities verified. [Restart evidence](probes/2026-10-11-response-mode-metadata.md#native-editing-and-immediate-restart--2026-10-12). |
 | `agentify_rotate_token` | LOCAL-ADMIN | 1 | Rotation succeeds; the old token receives 401 and a fresh MCP connection succeeds with the new token. | ✅ | `e2e-mcp-local-state` receipt |
+
+## One-shot sites
+
+`agentify_query` on the one-shot engine has one row per site. It is still a single
+method in the matrix above, whose row covers ChatGPT.
+
+| Site | Journey | Observable pass condition | 2026-11-18 | Evidence |
+|---|---|---|---|---|
+| Gemini | LIVE-ONESHOT | As LIVE-ONESHOT, `modeIntent: pro`. | ✅ | run `de740698`, through public MCP: success, 8 of 8 attachments matched, delivery complete, receipt-backed answer (6,694 chars), tool use `none` (the account ran no web search). Its label read "mode downgraded" because the Pro option's model line became a quota notice; fixed in `e3e8902`. Its file citations predate `e3e8902`, so its `sources.json` is empty. Refusal `ba420409`. [Probe](probes/2026-11-18-oneshot-gemini-kimi-live.md) |
+| Kimi | LIVE-ONESHOT | As LIVE-ONESHOT, with the strongest model the account is served. | ❌ | No Weiss answer: the free test account was refused every model under load (`8d4052de`, `2d2b4546` and `a7b2047e`, the last at `0ca879d`, are `send_refused` with Kimi's notice), and the one model that took the case ran past the then-hard 30-minute deadline (`47f16869`, fixed in `7ef19c6`). Re-run on an account Kimi serves. Engine path verified on the 2-file probe `25836d92` (HTTP, Instant): success, both files matched, receipt-backed answer, one web search in `tool_use.json`, Reference-panel source. Refusal `4b47ce0e`. [Probe](probes/2026-11-18-oneshot-gemini-kimi-live.md) |
 
 ## Evidence rule
 
