@@ -143,8 +143,11 @@ export function readLastUserText(a, h) {
   return users.length ? h.textOf(users[users.length - 1]) : null;
 }
 
+// A profile with an attachment-area anchor reads chips only inside that area,
+// so a file list elsewhere on the page is never taken for the composer's.
 export function readAttachments(a, h) {
-  const nodes = h.all(a.attachmentItem).filter(h.visible);
+  const roots = a.attachmentArea && a.attachmentArea.length ? h.all(a.attachmentArea) : [document];
+  const nodes = roots.flatMap((root) => h.all(a.attachmentItem, root)).filter(h.visible);
   // A chip's own child nodes can match the same selector; keep only chips.
   const outermost = nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
   const items = outermost.map((node) => ({
@@ -152,11 +155,21 @@ export function readAttachments(a, h) {
     pending: h.matchesAny(node, a.attachmentPending) || h.all(a.attachmentPending, node).some(h.visible),
     error: h.matchesAny(node, a.attachmentError) || h.all(a.attachmentError, node).some(h.visible)
   }));
-  const errorTexts = h.all(a.attachmentError)
+  const errorTexts = roots.flatMap((root) => h.all(a.attachmentError, root))
     .filter(h.visible)
     .map((node) => h.textOf(node).replace(/\s+/g, ' ').trim().slice(0, 200))
     .filter(Boolean);
   return { items, errorTexts };
+}
+
+// The file cards the site shows in the last user turn.
+export function readLastUserAttachments(a, h) {
+  const users = h.all(a.userTurn);
+  const turn = users[users.length - 1];
+  if (!turn) return { items: [] };
+  const nodes = h.all(a.turnAttachmentItem, turn);
+  const outermost = nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
+  return { items: outermost.map((node) => ({ text: h.textOf(node).replace(/\s+/g, ' ').trim().slice(0, 200) })) };
 }
 
 // Files arrive as base64 and become page-side File objects, which framework

@@ -165,6 +165,9 @@ function normalizeRun(input = {}) {
     promptDelivery: normalizeObject(input.promptDelivery),
     promptStaging: normalizeObject(input.promptStaging),
     attachmentDebug: normalizeObject(input.attachmentDebug),
+    // Where a one-shot run failed: before_send, at_send (clicked, not yet
+    // acknowledged) or after_send.
+    failureStage: normalizeString(input.failureStage),
     revision: Math.max(0, Number(input.revision) || 0)
   };
 }

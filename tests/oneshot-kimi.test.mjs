@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import os from 'node:os';
+import path from 'node:path';
 
 import { OneShotController } from '../oneshot-engine.mjs';
 import { ONESHOT_BRANCH_SOURCES, ONESHOT_REQUIRED_ANCHORS } from '../oneshot-profile.mjs';
@@ -23,14 +25,26 @@ function renderKimi(state, page) {
   const rows = [];
   for (const turn of state.turns) {
     if (turn.role === 'user') {
-      rows.push(el('div', { matches: [sel('user-turn')], children: [el('div', { text: turn.text })] }));
+      rows.push(el('div', {
+        matches: [sel('user-turn')],
+        children: [
+          ...(turn.files || []).map((file) => el('div', { matches: [sel('turn-attachment-item')], text: file })),
+          el('div', { text: turn.text })
+        ]
+      }));
       continue;
     }
     const flow = turn.toolFlow ? [renderToolFlow(state, turn)] : [];
+    // A tool flow outside the rollup whose thinking text uses the answer's
+    // Markdown class; the answer exclusion must still keep it out.
+    const looseFlow = state.flowOutsideRollup
+      ? [el('div', { matches: [sel('tool-flow')], children: [el('div', { matches: [sel('answer-body')], text: 'Thinking text in the flow' })] })]
+      : [];
     rows.push(el('div', {
       matches: [sel('assistant-turn')],
       children: [
-        el('div', { matches: [sel('answer-exclude')], children: [el('div', { matches: [sel('answer-body')], text: 'Thinking process' }), ...flow] }),
+        ...(state.rollup ? [el('div', { matches: [sel('answer-exclude')], children: [el('div', { matches: [sel('answer-body')], text: 'Thinking process' }), ...flow] })] : []),
+        ...looseFlow,
         el('div', { children: [el('div', { matches: [sel('answer-body')], children: turn.body })] }),
         ...(state.stop ? [] : [el('div', {
           matches: [sel('idle-signal')],
@@ -50,6 +64,7 @@ function renderKimi(state, page) {
       }));
     }
   }
+  if (state.notice) rows.push(el('div', { matches: [sel('blocking-notice')], text: state.notice }));
   rows.push(el('div', { matches: [sel('composer')], text: state.composerText, rect: { x: 100, y: 600, w: 400, h: 40 } }));
   const hasText = !!state.composerText.trim();
   rows.push(el('div', {
@@ -57,7 +72,7 @@ function renderKimi(state, page) {
     rect: { x: 520, y: 600, w: 30, h: 30 },
     onClick: () => {
       if (!hasText) return;
-      state.turns.push({ role: 'user', text: state.composerText });
+      state.turns.push({ role: 'user', text: state.composerText, files: state.chips.splice(0) });
       state.composerText = '';
       state.stop = true;
       state.sent += 1;
@@ -70,10 +85,22 @@ function renderKimi(state, page) {
     hidden: true,
     props: { multiple: true, set files(list) { for (const file of list) state.chips.push(file.name); } }
   }));
+  // A file list elsewhere on the page, with the same card and delete classes.
+  if (state.foreignCards.length) {
+    rows.push(el('div', {
+      children: state.foreignCards.map((card, i) => el('div', {
+        matches: [sel('attachment-item')],
+        rect: { x: 700, y: 100 + i * 80, w: 200, h: 70 },
+        text: card,
+        children: [el('div', { matches: [sel('attachment-remove')], rect: { x: 880, y: 105 + i * 80, w: 14, h: 14 }, onClick: () => { state.foreignDeleted += 1; } })]
+      }))
+    }));
+  }
+  const area = [];
   state.chips.forEach((chip, i) => {
     const box = { x: 100 + i * 210, y: 400, w: 200, h: 70 };
     const inBox = (point) => !!point && point[0] >= box.x && point[0] <= box.x + box.w && point[1] >= box.y && point[1] <= box.y + box.h;
-    rows.push(el('div', {
+    area.push(el('div', {
       matches: [sel('attachment-item')],
       rect: box,
       text: chip,
@@ -86,6 +113,7 @@ function renderKimi(state, page) {
       })]
     }));
   });
+  if (area.length) rows.push(el('div', { matches: [sel('attachment-area')], children: area }));
 
   rows.push(el('div', {
     matches: [sel('mode-trigger')],
@@ -94,7 +122,9 @@ function renderKimi(state, page) {
     onClick: () => { state.menu = state.menu ? null : 'main'; },
     children: [
       el('span', { matches: [sel('mode-trigger-model')], text: state.model }),
-      el('span', { matches: [sel('mode-trigger-effort')], text: state.effort })
+      // A browser's innerText of an element that is not rendered is its full
+      // text, so a hidden label still reads "High" unless visibility is checked.
+      el('span', { matches: [sel('mode-trigger-effort')], text: state.effort, hidden: !!state.effortHidden, props: state.effortHidden ? { innerText: state.effort } : {} })
     ]
   }));
   if (state.menu) {
@@ -169,7 +199,7 @@ function renderToolFlow(state, turn) {
   });
 }
 
-function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer = null, toolFlow = null, references = null, chips = [], url = 'https://www.kimi.ai/chat/old' } = {}) {
+function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer = null, toolFlow = null, references = null, chips = [], foreignCards = [], rollup = true, url = 'https://www.kimi.ai/chat/old' } = {}) {
   const state = {
     model,
     effort,
@@ -178,6 +208,9 @@ function makeKimi({ model = 'Instant', effort = 'Standard', locked = [], answer 
     selectAll: false,
     turns: [],
     chips: [...chips],
+    foreignCards: [...foreignCards],
+    foreignDeleted: 0,
+    rollup,
     stop: false,
     sent: 0,
     reads: 0,
@@ -311,7 +344,7 @@ test('oneshot-kimi: the tool-call flow is expanded and read into tool use, skipp
 });
 
 test('oneshot-kimi: an answer with no tool-call flow records tool use as none', async () => {
-  const { page } = makeKimi();
+  const { page } = makeKimi({ rollup: false });
   const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.deepEqual(result.meta.toolUse, { state: 'none', reason: null, steps: [] });
 });
@@ -363,4 +396,99 @@ test('oneshot-kimi: a tool step that lists no pages, such as a Python run, is re
   // Waiting for pages on each Python step would read the flow many times per step.
   const flowReads = page.evaluations.filter((js) => js.includes('function readKimiToolFlow(')).length;
   assert.ok(flowReads < 40, `read the tool flow ${flowReads} times`);
+});
+
+test('oneshot-kimi: a tool rollup with no tool flow, or a flow with no steps, is unread rather than none', async () => {
+  const rollupOnly = makeKimi();
+  const unrecognized = await kimiController(rollupOnly.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(unrecognized.meta.toolUse, { state: 'unread', reason: 'tool_structure_unrecognized', steps: null });
+
+  const emptyFlow = makeKimi({ toolFlow: [] });
+  const missing = await kimiController(emptyFlow.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(missing.meta.toolUse, { state: 'unread', reason: 'tool_steps_missing', steps: null });
+});
+
+test('oneshot-kimi: a step that never expands, or a search that lists none of the pages it found, is unread', async () => {
+  const stuck = makeKimi({ toolFlow: [{ tool: 'web_search', title: 'Found 2 web pages', pages: [{ url: 'https://a.example/', title: 'A', site: 'a.example' }] }] });
+  const evaluate = stuck.page.evaluate;
+  stuck.page.evaluate = async (js) => {
+    stuck.state.expandedSteps = {};
+    return await evaluate(js);
+  };
+  const unexpanded = await kimiController(stuck.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(unexpanded.meta.toolUse, { state: 'unread', reason: 'tool_steps_not_expanded:1', steps: null });
+
+  const emptySearch = makeKimi({ toolFlow: [{ tool: 'web_search', title: 'Found 7 web pages', pages: [] }] });
+  const unreadPages = await kimiController(emptySearch.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(unreadPages.meta.toolUse, { state: 'unread', reason: 'search_pages_unread:1', steps: null });
+});
+
+test('oneshot-kimi: a page count is taken only from a search step\'s "web pages" title', async () => {
+  const toolFlow = [
+    { tool: 'browse', title: 'Opened the 2025 annual report', pages: [] },
+    { tool: 'web_search', title: 'Found 3 web pages', pages: [{ url: 'https://a.example/', title: 'A', site: 'a.example' }] }
+  ];
+  const { page } = makeKimi({ toolFlow });
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.toolUse.steps.map((step) => [step.tool, step.count]), [['browse', null], ['web_search', 3]]);
+});
+
+test('oneshot-kimi: only the composer\'s attachment area is read or cleared; a file list elsewhere is left alone', async () => {
+  const { state, page } = makeKimi({ chips: ['old-draft PDF 1 KB'], foreignCards: ['stored-file PDF 2 KB'] });
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(state.foreignDeleted, 0);
+  assert.deepEqual(state.foreignCards, ['stored-file PDF 2 KB']);
+  assert.deepEqual(result.meta.draftAttachmentsRemoved, ['old-draft PDF 1 KB']);
+});
+
+test('oneshot-kimi: the sent files are read back from the user turn beside prompt delivery', async () => {
+  const files = [];
+  for (const name of ['probe-brief.pdf', 'probe-notes.docx']) {
+    const filePath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'oneshot-kimi-files-')), name);
+    await fs.writeFile(filePath, `synthetic ${name}`);
+    files.push(filePath);
+  }
+  const { page } = makeKimi();
+  const result = await kimiController(page).query({ prompt: 'probe', attachments: files, timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.attachmentDelivery, { checked: true, complete: true, missing: [], unexpected: [] });
+});
+
+test('oneshot-kimi: only Kimi\'s refusal texts end a run; another notice is recorded', async () => {
+  const refused = makeKimi();
+  const onRead = refused.page.evaluate;
+  refused.page.evaluate = async (js) => {
+    // Kimi took the prompt, then showed its capacity notice and no answer.
+    if (refused.state.sent) {
+      refused.state.notice = 'Tips Too many people are chatting with Kimi; a subscription will grant you priority access.';
+      refused.state.turns = refused.state.turns.filter((turn) => turn.role === 'user');
+    }
+    return await onRead(js);
+  };
+  await assert.rejects(
+    kimiController(refused.page).query({ prompt: 'probe', timeoutMs: 2_000 }),
+    (error) => error.message === 'send_refused'
+  );
+
+  const offer = makeKimi();
+  const onOfferRead = offer.page.evaluate;
+  offer.page.evaluate = async (js) => {
+    if (offer.state.sent) offer.state.notice = 'Try Kimi Plus for longer answers';
+    return await onOfferRead(js);
+  };
+  const result = await kimiController(offer.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.pageNotices, ['Try Kimi Plus for longer answers']);
+});
+
+test('oneshot-kimi: thinking text in a tool flow outside the rollup stays out of the answer', async () => {
+  const { state, page } = makeKimi({ rollup: false });
+  state.flowOutsideRollup = true;
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(result.text, 'Answer');
+});
+
+test('oneshot-kimi: a hidden effort label is not recorded as the effort', async () => {
+  const { state, page } = makeKimi({ rollup: false });
+  state.effortHidden = true;
+  const result = await kimiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(result.meta.answerSettings.mode, null);
 });

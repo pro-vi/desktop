@@ -71,7 +71,10 @@ export function locateGeminiCitation(a, h) {
 }
 
 // Copies the open source card's links onto the chip, where the engine's
-// Markdown converter reads them (data-oneshot-sources).
+// Markdown converter reads them (data-oneshot-sources). It stamps only when
+// the card reads the same as the caller's previous reading (a.expect), so a
+// card that still shows the previous chip's links for a moment is not taken
+// for this chip's.
 export function stampGeminiCitation(a, h) {
   const links = h.all(a.cardLink).filter(h.visible).map((link) => ({
     url: link.getAttribute('href'),
@@ -85,11 +88,12 @@ export function stampGeminiCitation(a, h) {
     }
   }
   if (a.countOnly) return { links: links.length };
+  const signature = JSON.stringify(links);
   const turns = h.all(a.assistantTurn);
   const chip = turns.length ? h.all(a.citation, turns[turns.length - 1])[a.index] : null;
-  if (!chip || !links.length) return { links: links.length, stamped: 0 };
-  chip.setAttribute('data-oneshot-sources', JSON.stringify(links));
-  return { links: links.length, stamped: links.length };
+  if (!chip || !links.length || signature !== a.expect) return { links: links.length, stamped: 0, signature };
+  chip.setAttribute('data-oneshot-sources', signature);
+  return { links: links.length, stamped: links.length, signature };
 }
 
 // What the answer shows of Gemini's tool use. On 2026-11-18 a Pro answer had
@@ -101,13 +105,30 @@ export function readGeminiToolSurfaces(a, h) {
   const turn = turns[turns.length - 1];
   if (!turn) return { found: false };
   const list = h.all(a.sourcesList, turn)[0] || null;
+  // Web pages the answer's citation chips name, as stamped by the capture.
+  const cited = [];
+  for (const chip of h.all(a.citation, turn)) {
+    let stamped = [];
+    try {
+      stamped = JSON.parse(chip.getAttribute('data-oneshot-sources') || '[]');
+    } catch {}
+    for (const source of Array.isArray(stamped) ? stamped : []) {
+      // A text fragment (#:~:text=) only highlights a passage; the page is the same.
+      const url = String(source?.url || '').replace(/#:~:.*$/, '');
+      if (/^https?:\/\//i.test(url) && !cited.some((page) => page.url === url)) {
+        cited.push({ url, title: source.title || null });
+      }
+    }
+  }
   return {
     found: true,
+    sourcesList: !!list,
     thoughts: h.all(a.thoughtsPanel, turn).length > 0,
     links: list ? Array.from(list.querySelectorAll('a[href]')).map((link) => ({
       url: link.getAttribute('href'),
       title: h.textOf(link).replace(/\s+/g, ' ').trim()
-    })) : []
+    })) : [],
+    cited
   };
 }
 
@@ -222,23 +243,37 @@ async function prepareGeminiCapture(ctx) {
       continue;
     }
     // A card still open from the previous chip would be read as this one's.
-    if ((await cardLinks()).links > 0) return { citations: first.count, opened: index, stamped, skipped, stopped: 'card_still_open' };
+    if ((await cardLinks()).links > 0) {
+      return { citations: first.count, opened: index, stamped, skipped, stopped: 'card_still_open', sourcesComplete: false };
+    }
     await ctx.click(chip.rect);
-    const result = await ctx.waitFor(() => ctx.evaluate(stampGeminiCitation, { ...sel, index }), (value) => value.stamped > 0);
+    let expect = null;
+    const result = await ctx.waitFor(async () => {
+      const value = await ctx.evaluate(stampGeminiCitation, { ...sel, index, expect });
+      expect = value.signature ?? null;
+      return value;
+    }, (value) => value.stamped > 0);
     if (result.stamped > 0) stamped += 1;
     await ctx.closeMenus();
     await ctx.waitFor(cardLinks, (value) => value.links === 0);
   }
-  return { citations: first.count, opened: count, stamped, skipped };
+  // Every chip that was clicked must have given its sources, and no chip may
+  // lie past the cap.
+  return { citations: first.count, opened: count, stamped, skipped, sourcesComplete: stamped === count - skipped && first.count <= MAX_CITATION_CHIPS };
 }
 
+// Tool use is "none" only when no chip cites a web page, the sources list
+// is present and empty, and no thinking panel shows; web pages the chips cite
+// are pages the page shows the answer used.
 async function readGeminiToolUse(ctx) {
   const shown = await ctx.evaluate(readGeminiToolSurfaces, selectors(ctx));
   if (!shown.found) return { state: 'unread', reason: 'assistant_turn_missing' };
-  if (shown.links.length) {
-    return { state: 'shown', steps: [{ tool: 'sources_list', title: 'Sources', count: shown.links.length, pages: shown.links }] };
-  }
+  const steps = [];
+  if (shown.links.length) steps.push({ tool: 'sources_list', title: 'Sources', count: shown.links.length, pages: shown.links });
+  if (shown.cited.length) steps.push({ tool: 'cited_pages', title: 'Cited pages', count: shown.cited.length, pages: shown.cited });
+  if (steps.length) return { state: 'shown', steps };
   if (shown.thoughts) return { state: 'unread', reason: 'thinking_panel_not_read' };
+  if (!shown.sourcesList) return { state: 'unread', reason: 'sources_list_missing' };
   return { state: 'none' };
 }
 

@@ -6,7 +6,7 @@
   "capabilities": [
     { "id": "readiness", "anchorIds": ["composer", "signed-out-marker"] },
     { "id": "composer", "anchorIds": ["composer"] },
-    { "id": "attachment", "anchorIds": ["file-input", "attachment-item", "attachment-pending", "attachment-error", "attachment-remove"] },
+    { "id": "attachment", "anchorIds": ["file-input", "attachment-area", "attachment-item", "attachment-pending", "attachment-error", "attachment-remove", "turn-attachment-item"] },
     { "id": "submit", "anchorIds": ["send-button", "send-disabled", "stop-button", "blocking-notice"] },
     { "id": "response", "anchorIds": ["user-turn", "assistant-turn", "answer-body", "answer-exclude", "answer-error", "stop-button", "idle-signal"] },
     { "id": "answer", "anchorIds": ["answer-body", "answer-skip", "code-language", "citation", "source-panel", "source-item", "reference-toggle"] },
@@ -53,6 +53,12 @@
       ]
     },
     {
+      "id": "attachment-area",
+      "branches": [
+        { "id": "chat-editor-attachment-area", "kind": "canonical", "source": "live-page", "selector": "div.chat-editor-attachment-area" }
+      ]
+    },
+    {
       "id": "attachment-item",
       "branches": [
         { "id": "file-card", "kind": "canonical", "source": "live-page", "selector": "div.file-card-container" }
@@ -63,6 +69,12 @@
       "branches": [
         { "id": "file-card-parsing", "kind": "canonical", "source": "live-page", "selector": "div.file-card-container.parsing" },
         { "id": "file-card-loading-icon", "kind": "legacy", "source": "live-page", "selector": ".loading-icon" }
+      ]
+    },
+    {
+      "id": "turn-attachment-item",
+      "branches": [
+        { "id": "turn-file-card", "kind": "canonical", "source": "guess", "selector": "div.file-card-container" }
       ]
     },
     {
@@ -100,7 +112,8 @@
       "id": "answer-exclude",
       "branches": [
         { "id": "tool-rollup-part", "kind": "canonical", "source": "live-page", "selector": ".toolcall-rollup__part" },
-        { "id": "thinking-rollup", "kind": "legacy", "source": "share-page", "selector": ".toolcall-rollup-segment" }
+        { "id": "thinking-rollup", "kind": "legacy", "source": "share-page", "selector": ".toolcall-rollup-segment" },
+        { "id": "tool-flow", "kind": "legacy", "source": "live-page", "selector": ".toolcall-flow" }
       ]
     },
     {

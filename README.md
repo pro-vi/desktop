@@ -16,9 +16,9 @@ Agentify Desktop is a local-first control center for AI work: connect your real,
 - `aistudio.google.com`
 - `gemini.google.com`
 - `grok.com`
-- `www.kimi.ai` (international accounts) and `www.kimi.com` (mainland China accounts): one Kimi app on two sites with separate sign-in. Queries run on the one-shot engine (see [One-shot sites](#one-shot-sites-gemini-and-kimi)); verified live on `www.kimi.ai` on 2026-11-18.
 
 **Planned**
+- `www.kimi.ai` (international accounts) and `www.kimi.com` (mainland China accounts): one Kimi app on two sites with separate sign-in. Queries run on the one-shot engine (see [One-shot sites](#one-shot-sites-gemini-and-kimi)). One Kimi probe answered on 2026-11-18 at `4797c63`, the engine's first commit; no Kimi run on the current engine has answered yet.
 - Additional vendor profiles via `vendors.json` + selector overrides.
 
 ## CAPTCHA policy (human-in-the-loop)
@@ -465,14 +465,14 @@ The bench instance has its own state dir, so its own token, sign-ins, settings, 
 
 ### One-shot sites (Gemini and Kimi)
 
-Gemini and Kimi queries run on a separate engine (ADR 0017): every `agentify_query` opens a fresh chat (removing files a refused send left in the composer), applies the requested mode, uploads the attachments, types the prompt, compares the composer's text with it, checks again that the page shows the mode and exactly the requested files, sends, and waits until the answer has stopped changing, no stop control shows, and the answer's own action bar has appeared. On a rich-text composer the text check folds whitespace, so a lost, added or reordered word fails it but a merged line break does not. The run's timeout is a soft deadline: past it the run keeps waiting while the page shows the provider working, up to two hours. Pass the vendor with `model` (MCP) or `vendorId` (HTTP).
+Gemini and Kimi queries run on a separate engine (ADR 0017): every `agentify_query` opens a fresh chat (removing files a refused send left in the composer), applies the requested mode, uploads the attachments, types the prompt, compares the composer's text with it, waits for Send to enable, checks once more that the composer holds the prompt and the page shows the mode and exactly the requested files, sends, and waits until the answer has stopped changing, no stop control shows, and the answer's own action bar has appeared. On a rich-text composer the text check folds whitespace, so a lost, added or reordered word fails it but a merged line break does not. The run's timeout is a soft deadline: past it the run keeps waiting while the page shows a stop control, up to two hours, or for 30 seconds while a finished answer settles. Only a notice the site adapter names as a refusal (Kimi's capacity and too-many-chats notices) ends a run as `send_refused`; any other notice is recorded in `pageNotices`. Pass the vendor with `model` (MCP) or `vendorId` (HTTP).
 
 | Site | `modeIntent` values |
 |---|---|
 | Gemini | `fast`, `thinking`, `pro` |
 | Kimi | `instant`, `k2.8-preview`, `k3`, `k3.1-pro` |
 
-An intent the page cannot confirm fails the run before anything is typed (`mode_intent_unavailable`); omitting it, or passing `none`, leaves the page's selection alone. Deep research is not offered on either site yet: its final report has no completion check. `modelIntent`, `imageGeneration`, `chatUrl`, `projectUrl` and `liveSourceId` are refused, and `POST /send` is refused for these tabs (`oneshot_send_unsupported`). Beside `assistant_response.md` (Markdown with inline links and a Sources list), each run writes `assistant_response.txt` (plain text), `sources.json`, and `tool_use.json`: the web searches and pages the page showed for the answer, `none` when it showed none, or `unread` with the reason. `metadata.json` and the run's `outputManifest` record the model and mode the page showed after the answer (`answerSettings`), the attachments as matched, and the tool-use counts (`toolUseCounts`). ChatGPT runs do not capture tool use yet.
+An intent the page cannot confirm fails the run before anything is typed (`mode_intent_unavailable`); omitting it, or passing `none`, leaves the page's selection alone. Deep research is not offered on either site yet: its final report has no completion check. `modelIntent`, `imageGeneration`, `chatUrl`, `projectUrl` and `liveSourceId` are refused, and `POST /send` is refused for these tabs (`oneshot_send_unsupported`). Beside `assistant_response.md` (Markdown with inline links and a Sources list), each run writes `assistant_response.txt` (plain text), `sources.json`, and `tool_use.json`: the web searches and pages the page showed for the answer, `none` when it showed none, or `unread` with the reason. `metadata.json` and the run's `outputManifest` record the model and mode the page showed after the answer (`answerSettings`), the attachments as matched, the tool-use counts (`toolUseCounts`), and what the engine did beyond typing and sending: typing attempts, characters deleted after the prompt, files removed from a refused draft, and the source-capture notes. A capture that could not read every citation is labeled "sources incomplete". On Gemini, web pages the answer's citation chips name are recorded as `cited_pages` tool use. ChatGPT runs do not capture tool use yet.
 
 ### Personal Dot messages
 

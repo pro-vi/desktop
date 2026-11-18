@@ -10,6 +10,7 @@ import {
   pageScript,
   readAttachments,
   readComposer,
+  readLastUserAttachments,
   readLastUserText,
   readPageState,
   readPageText,
@@ -39,10 +40,12 @@ const DEFAULT_TIMINGS = Object.freeze({
   // after the composer is ready: a fresh chat draws it a moment later.
   controlMs: 10_000,
   // The caller's timeoutMs is a soft deadline: past it the run keeps waiting
-  // only while the page shows a stop control or the turn's idle signal, up to
-  // this ceiling. Kimi's K2.8 Preview worked on one eight-file review for
+  // while the page shows a stop control, up to this ceiling. Kimi's K2.8 Preview worked on one eight-file review for
   // over 30 minutes on 2026-11-18.
-  hardResponseMs: 2 * 60 * 60_000
+  hardResponseMs: 2 * 60 * 60_000,
+  // Past the soft deadline, a finished turn (idle signal, answer text) gets
+  // this long to settle; only a showing stop control holds the run longer.
+  idleSettleMs: 30_000
 });
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -89,7 +92,16 @@ export const ONESHOT_ERRORS = Object.freeze({
   attachment_input_missing: { status: 409, attachment: true, label: 'Attachment not sent', detail: () => 'No file input was found on the page. No prompt was sent.' },
   attachment_not_shown: { status: 409, attachment: true, label: 'Attachment not shown', detail: (d) => `The page did not show exactly the attached files as uploaded${d?.stage === 'before_send' ? ' when the prompt was ready to send' : ''}. No prompt was sent.` },
   prompt_sent_early: { status: 409, label: 'Prompt sent while typing', detail: () => 'The page sent part of the prompt before typing finished; the chat holds an incomplete prompt.' },
-  send_refused: { status: 409, label: 'Send refused', detail: (d) => `The provider refused the send${d?.notice ? `: "${d.notice}"` : ''}. No answer was produced.` },
+  send_refused: {
+    status: 409,
+    label: 'Send refused',
+    detail: (d) => `${d?.stage === 'after_send' ? 'The provider took the prompt, then refused it' : 'The provider refused the send'}${d?.notice ? `: "${d.notice}"` : ''}. No answer was produced.`
+  },
+  send_unconfirmed: {
+    status: 409,
+    label: 'Send not confirmed',
+    detail: () => 'Send was clicked, but the page showed no new user turn or stop control in time. The prompt may have reached the provider.'
+  },
   click_target_missing: { status: 409, label: 'Page control not found', detail: () => 'A control the run needed had no size on the page. No prompt was sent.' },
   answer_capture_failed: { status: 409, label: 'Answer not captured', detail: () => 'The answer finished but could not be read from the page.' },
   provider_response_error: { status: 409, label: 'Provider error', detail: () => 'The provider showed an error in place of an answer.' }
@@ -242,9 +254,16 @@ export function toolUseCounts({ state, reason, steps }) {
 // chip names a file by its full name; else by the file's stem with its
 // extension shown as a word (Kimi and Gemini drop the extension from the name
 // and show it apart); else by the stem alone, when no other expected file
-// shares it; else by a name shortened in the middle. A chip is used for one
-// file at most, and a chip no file claims is unexpected.
-const TYPE_WORD = new RegExp(`(^|[^a-z0-9])(${Object.keys(MIME_BY_EXTENSION).map((ext) => ext.slice(1)).join('|')})([^a-z0-9]|$)`, 'g');
+// shares it; else by a name shortened in the middle. A name or stem counts
+// only as a whole token, and longer names claim chips first, so report.pdf
+// never takes the chip of q3-report.pdf. A chip is used for one file at most,
+// and a chip no file claims is unexpected.
+const TYPE_WORDS = new Set(Object.keys(MIME_BY_EXTENSION).map((ext) => ext.slice(1)));
+const NAME_CHAR = 'a-z0-9_.\\-';
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export function matchAttachments(expected, after) {
   const items = (Array.isArray(after?.items) ? after.items : []).map((item) => ({ ...item, text: String(item.text || '').toLowerCase() }));
@@ -254,7 +273,9 @@ export function matchAttachments(expected, after) {
     const dot = lower.lastIndexOf('.');
     return dot > 0 ? { stem: lower.slice(0, dot), ext: lower.slice(dot + 1) } : { stem: lower, ext: '' };
   };
+  const whole = (needle) => new RegExp(`(^|[^${NAME_CHAR}])${escapeRegExp(needle)}($|[^${NAME_CHAR}])`);
   const report = expected.map((file) => ({ ...file, matchedBy: null, pending: false }));
+  const longestFirst = [...report].sort((a, b) => b.name.length - a.name.length);
   const claim = (entry, accept, how) => {
     if (entry.matchedBy) return;
     const index = items.findIndex((item, i) => !used.has(i) && accept(item.text));
@@ -263,30 +284,39 @@ export function matchAttachments(expected, after) {
     entry.matchedBy = how;
     entry.pending = !!items[index].pending;
   };
-  for (const entry of report) claim(entry, (text) => text.includes(entry.name.toLowerCase()), 'name');
-  for (const entry of report) {
+  for (const entry of longestFirst) {
+    const name = whole(entry.name.toLowerCase());
+    claim(entry, (text) => name.test(text), 'name');
+  }
+  for (const entry of longestFirst) {
     const { stem, ext } = parts(entry.name);
     if (stem.length < 4 || !/^[a-z0-9]+$/.test(ext)) continue;
-    const extWord = new RegExp(`(^|[^a-z0-9])${ext}([^a-z0-9]|$)`);
-    claim(entry, (text) => text.includes(stem) && extWord.test(text), 'stem-and-extension');
+    const stemWord = whole(stem);
+    claim(entry, (text) => stemWord.test(text) && text.split(/\s+/).includes(ext), 'stem-and-extension');
   }
-  for (const entry of report) {
+  for (const entry of longestFirst) {
     const { stem } = parts(entry.name);
     if (stem.length < 4 || report.some((other) => other !== entry && parts(other.name).stem === stem)) continue;
-    claim(entry, (text) => text.includes(stem), 'stem');
+    const stemWord = whole(stem);
+    claim(entry, (text) => stemWord.test(text), 'stem');
   }
   // Gemini shortens a long name in the middle ("doc_02_ban..._statement").
   // Such a chip names a file only when its two ends fit that file's stem and
-  // no other expected file's, and it shows no other file type.
+  // no other expected file's, and no other word in the chip names another
+  // file type.
   const shortenedFits = (text, entry) => {
     const { stem, ext } = parts(entry.name);
-    const types = [...text.matchAll(TYPE_WORD)].map((found) => found[2]);
-    if (types.some((type) => type !== ext)) return false;
-    return [...text.matchAll(/([^\s]+?)(?:\.\.\.|…)([^\s]+)/g)].some(([, head, tail]) =>
-      head.length + tail.length >= 6 && stem.startsWith(head) && stem.endsWith(tail) &&
-      !report.some((other) => other !== entry && parts(other.name).stem.startsWith(head) && parts(other.name).stem.endsWith(tail)));
+    const tokens = text.split(/\s+/).filter(Boolean);
+    return tokens.some((token, i) => {
+      const cut = /^(.+?)(?:\.\.\.|…)(.+)$/.exec(token);
+      if (!cut) return false;
+      const [, head, tail] = cut;
+      if (head.length + tail.length < 6 || !stem.startsWith(head) || !stem.endsWith(tail)) return false;
+      if (tokens.some((other, j) => j !== i && TYPE_WORDS.has(other) && other !== ext)) return false;
+      return !report.some((other) => other !== entry && parts(other.name).stem.startsWith(head) && parts(other.name).stem.endsWith(tail));
+    });
   };
-  for (const entry of report) claim(entry, (text) => shortenedFits(text, entry), 'shortened-name');
+  for (const entry of longestFirst) claim(entry, (text) => shortenedFits(text, entry), 'shortened-name');
   const unexpected = items.filter((item, i) => !used.has(i)).map((item) => item.text);
   return {
     done: report.every((entry) => entry.matchedBy && !entry.pending) && !unexpected.length,
@@ -328,6 +358,8 @@ export class OneShotController {
       stop: sel('stop-button'),
       fileInput: sel('file-input'),
       attachmentItem: sel('attachment-item'),
+      attachmentArea: sel('attachment-area'),
+      turnAttachmentItem: sel('turn-attachment-item'),
       attachmentPending: sel('attachment-pending'),
       attachmentError: sel('attachment-error'),
       userTurn: sel('user-turn'),
@@ -472,7 +504,7 @@ export class OneShotController {
     }
     // An intent the adapter does not know fails here, before any page work.
     const mode = this.#resolveModeIntent(modeIntent);
-    const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress };
+    const run = { kind: 'query', requested: false, requestedAt: null, reason: null, onProgress, sendClicked: false, pageNotices: [] };
     this.currentRun = run;
     let sent = false;
     try {
@@ -481,8 +513,7 @@ export class OneShotController {
       const attachmentReport = await this.#attachFiles(attachments);
       const baseline = await this.#eval(readTurns);
       const typing = await this.#typePrompt(prompt, baseline);
-      await this.#recheckBeforeSend({ modeApplied, attachmentReport });
-      const sendDebug = await this.#clickSend(baseline);
+      const sendDebug = await this.#clickSend(baseline, { prompt, modeApplied, attachmentReport });
       sent = true;
       await this.#waitForAnswer({ baseline, timeoutMs });
       // Opening citation cards only adds sources; a failure there must not
@@ -494,6 +525,7 @@ export class OneShotController {
       }
       const toolUse = await this.#readToolUse();
       const promptDelivery = await this.#readPromptDelivery(prompt);
+      const attachmentDelivery = await this.#readAttachmentDelivery(attachmentReport);
       const answerSettings = await this.#readAnswerSettings();
       const conversationUrl = await this.getUrl().catch(() => null);
       const verification = modeVerificationFor({ mode, modeApplied, answerSettings });
@@ -515,16 +547,23 @@ export class OneShotController {
           ...verification,
           attachments: attachmentReport,
           promptDelivery,
+          attachmentDelivery,
+          ...(freshChat.draftAttachmentsRemoved.length ? { draftAttachmentsRemoved: freshChat.draftAttachmentsRemoved } : {}),
+          ...(run.pageNotices.length ? { pageNotices: run.pageNotices } : {}),
           sendDebug: { ...sendDebug, typingAttempts: typing.attempts, ...(typing.trimmedTrailingChars ? { trimmedTrailingChars: typing.trimmedTrailingChars } : {}) },
           ...(captureNotes ? { captureNotes } : {}),
           profileContractVersion: this.adapter.profile.contractVersion
         }
       };
     } catch (error) {
-      // After Send the provider holds a reply; the record must say where.
-      if (sent && error && typeof error === 'object') {
+      // Once Send is clicked the provider may hold the prompt; the record must
+      // say where, and which notices the page showed.
+      if ((sent || run.sendClicked) && error && typeof error === 'object') {
         const conversationUrl = await this.getUrl().catch(() => null);
         error.data = { ...(error.data || {}), conversationUrl: error.data?.conversationUrl || conversationUrl };
+      }
+      if (run.pageNotices.length && error && typeof error === 'object') {
+        error.data = { ...(error.data || {}), pageNotices: run.pageNotices };
       }
       throw error;
     } finally {
@@ -567,6 +606,7 @@ export class OneShotController {
     // next chat shows again (Kimi did on 2026-11-18), so a fresh chat must
     // start with no attachments: the adapter may remove them, else the run stops.
     let draft = await this.#eval(readAttachments);
+    const before = draft.items.map((item) => item.text);
     if (draft.items.length && typeof this.adapter.clearDraftAttachments === 'function') {
       await this.adapter.clearDraftAttachments(this.#adapterContext());
       draft = await this.#eval(readAttachments);
@@ -579,7 +619,7 @@ export class OneShotController {
         draftAttachments: draft.items.map((item) => item.text)
       });
     }
-    return { url: ready.url };
+    return { url: ready.url, draftAttachmentsRemoved: before };
   }
 
   // Selecting a mode must be confirmed on the page before the composer is
@@ -736,9 +776,13 @@ export class OneShotController {
     throw namedError('prompt_staging_failed', mismatch);
   }
 
-  // Typing can reset a picker or clear attachment chips, so both are read
-  // again right before Send.
-  async #recheckBeforeSend({ modeApplied, attachmentReport }) {
+  // Run after the wait for Send to enable, right before the click: a site can
+  // keep Send disabled for a minute while it reads the files (Kimi did), and
+  // the composer, the picker or a chip can change in that time.
+  async #recheckBeforeSend({ prompt, modeApplied, attachmentReport }) {
+    const staged = await this.#eval(readComposer);
+    const mismatch = compareStagedPrompt(prompt, staged?.text, { usesValue: staged?.usesValue });
+    if (mismatch) throw namedError('prompt_staging_failed', { ...mismatch, stage: 'before_send' });
     if (modeApplied?.label != null && typeof this.adapter.readModeLabel === 'function') {
       const label = await this.adapter.readModeLabel(this.#adapterContext()).catch(() => null);
       if (label !== modeApplied.label) {
@@ -750,7 +794,17 @@ export class OneShotController {
         });
       }
     }
-    const match = matchAttachments(attachmentReport, await this.#eval(readAttachments));
+    const shown = await this.#eval(readAttachments);
+    const failed = (shown?.items || []).filter((item) => item.error).map((item) => item.text);
+    if (failed.length || shown?.errorTexts?.length) {
+      throw namedError('attachment_upload_failed', {
+        reason: 'provider_error',
+        stage: 'before_send',
+        detail: clipText(failed[0] || shown.errorTexts[0], 200),
+        files: attachmentReport.map((item) => item.name)
+      });
+    }
+    const match = matchAttachments(attachmentReport, shown);
     if (!match.done) {
       throw namedError('attachment_not_shown', {
         stage: 'before_send',
@@ -767,11 +821,11 @@ export class OneShotController {
       return await this.adapter.prepareCapture(this.#adapterContext());
     } catch (error) {
       if (error?.message === 'query_aborted') throw error;
-      return { failed: true, reason: error?.message || 'prepare_capture_failed' };
+      return { failed: true, sourcesComplete: false, reason: error?.message || 'prepare_capture_failed' };
     }
   }
 
-  async #clickSend(baseline) {
+  async #clickSend(baseline, recheck) {
     this.#throwIfStopRequested();
     await this.#emitProgress({ phase: 'sending' });
     const start = Date.now();
@@ -783,8 +837,14 @@ export class OneShotController {
     if (!send?.found || !send.enabled) {
       throw namedError('send_not_triggered', { sendDebug: { found: !!send?.found, enabled: !!send?.enabled, clicked: false } });
     }
+    await this.#recheckBeforeSend(recheck);
+    send = await this.#eval(readSendButton);
+    if (!send?.found || !send.enabled) {
+      throw namedError('send_not_triggered', { sendDebug: { found: !!send?.found, enabled: !!send?.enabled, clicked: false } });
+    }
     this.#throwIfStopRequested();
     await this.#clickRect(send.rect);
+    if (this.currentRun) this.currentRun.sendClicked = true;
     const ackStart = Date.now();
     while (Date.now() - ackStart < this.timings.sendAckMs) {
       await sleep(this.timings.pollMs);
@@ -793,9 +853,9 @@ export class OneShotController {
       const turns = await this.#eval(readTurns);
       if (turns.userTurns > baseline.userTurns) return { acknowledgedBy: 'user_turn' };
       if (turns.stopVisible) return { acknowledgedBy: 'stop_control' };
-      if (turns.notice) throw namedError('send_refused', { notice: turns.notice });
+      if (this.#isRefusal(turns.notice)) throw namedError('send_refused', { notice: turns.notice, stage: 'at_send' });
     }
-    throw namedError('send_not_triggered', { sendDebug: { found: true, enabled: true, clicked: true } });
+    throw namedError('send_unconfirmed', { sendDebug: { found: true, enabled: true, clicked: true }, waitedMs: this.timings.sendAckMs });
   }
 
   // Complete only on an assistant node that did not exist before send, whose
@@ -810,13 +870,11 @@ export class OneShotController {
     let lastText = null;
     let stableSince = null;
     let last = null;
+    let pastDeadline = false;
     while (Date.now() - start < hardMs) {
       this.#throwIfStopRequested();
       await sleep(this.timings.pollMs);
       last = await this.#eval(readTurns);
-      // Past the soft deadline, wait on only while the page shows work (a stop
-      // control) or a finished turn still settling (its idle signal).
-      if (Date.now() - start >= timeoutMs && !last.stopVisible && !last.lastAssistant?.idle) break;
       const answer = last.lastAssistant;
       // A fresh chat has no assistant turn before send, so a new turn is one
       // more than the baseline count (ADR 0009's rule, without message ids).
@@ -824,8 +882,20 @@ export class OneShotController {
       const text = String(answer?.answerText || '');
       // Kimi took a prompt, opened a chat, then showed its capacity notice and
       // went back to an empty page (2026-11-18): no answer will come.
-      if (last.notice && !(isNew && text.trim())) {
+      if (this.#isRefusal(last.notice) && !(isNew && text.trim())) {
         throw namedError('send_refused', { notice: last.notice, stage: 'after_send' });
+      }
+      const elapsed = Date.now() - start;
+      if (elapsed >= timeoutMs) {
+        if (!pastDeadline) {
+          pastDeadline = true;
+          await this.#emitProgress({ phase: 'waiting_past_deadline', softDeadlineMs: timeoutMs, hardDeadlineMs: hardMs, idleSettleMs: this.timings.idleSettleMs });
+        }
+        // Past the soft deadline only a showing stop control holds the run to
+        // the ceiling; a finished turn with answer text gets a short settle.
+        const settling = isNew && answer.idle && !!text.trim() && !this.#isProgressOnly(text) &&
+          elapsed < timeoutMs + this.timings.idleSettleMs;
+        if (!last.stopVisible && !settling) break;
       }
       if (!isNew || last.stopVisible || !answer.idle || this.#isProgressOnly(text)) {
         lastText = null;
@@ -853,6 +923,16 @@ export class OneShotController {
     });
   }
 
+  // Only a notice the adapter names as a refusal ends a run; any other notice
+  // (an offer, a survey) is recorded and the run goes on.
+  #isRefusal(notice) {
+    if (!notice) return false;
+    if ((this.adapter.refusalNotices || []).some((pattern) => pattern.test(notice))) return true;
+    const notes = this.currentRun?.pageNotices;
+    if (notes && !notes.includes(notice) && notes.length < 10) notes.push(notice);
+    return false;
+  }
+
   #isProgressOnly(text) {
     const normalized = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/[.…]+$/u, '');
     if (!normalized) return true;
@@ -866,6 +946,23 @@ export class OneShotController {
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), this.timings.promptDeliveryMs); })
     ]).finally(() => clearTimeout(timer));
     return promptDeliveryFor(prompt, recorded);
+  }
+
+  // The files the site shows in the recorded user turn, matched against the
+  // request. A report like prompt delivery: a turn whose file cards the
+  // profile cannot find is "not checked", never "missing".
+  async #readAttachmentDelivery(attachmentReport) {
+    if (!attachmentReport.length) return { checked: false, reason: 'no_attachments' };
+    if (!this.selectors.turnAttachmentItem.length) return { checked: false, reason: 'profile_has_no_turn_files' };
+    const shown = await this.#eval(readLastUserAttachments).catch(() => null);
+    if (!shown?.items?.length) return { checked: false, reason: 'no_file_cards_in_turn' };
+    const match = matchAttachments(attachmentReport, shown);
+    return {
+      checked: true,
+      complete: match.done,
+      missing: match.report.filter((item) => !item.matchedBy).map((item) => item.name),
+      unexpected: match.unexpected
+    };
   }
 
   // Read after the answer is captured, so opening tool-use expanders cannot

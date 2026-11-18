@@ -41,13 +41,19 @@ function renderGemini(state) {
       rows.push(el('user-query', { matches: [sel('user-turn')], text: turn.text }));
       continue;
     }
-    const chips = CHIP_SOURCES.map((_, index) => el('source-inline-chip', {
+    const chips = (state.noChips ? [] : CHIP_SOURCES).map((_, index) => el('source-inline-chip', {
       matches: [sel('citation')],
       children: [el('button', {
         matches: [sel('citation-button')],
         rect: { x: 300 + index * 80, y: 300, w: 60, h: 20 },
         hidden: state.zeroSizeChip === index,
-        onClick: () => { state.openCard = index; state.cardClicks.push(index); },
+        onClick: () => {
+          // A stale card first shows the previous chip's links for one reading.
+          if (state.staleCard && state.lastCard !== undefined && state.lastCard !== null) state.staleFrom = state.lastCard;
+          state.openCard = index;
+          state.lastCard = index;
+          state.cardClicks.push(index);
+        },
         text: index ? 'PMC +1' : 'NIH'
       })]
     }));
@@ -59,10 +65,10 @@ function renderGemini(state) {
         el('message-content', {
           children: [el('div', {
             matches: [sel('answer-body')],
-            children: [el('p', { children: ['Control blood sugar.', turn.chips[0], ' Treat gum disease.', turn.chips[1]] })]
+            children: [el('p', { children: ['Control blood sugar.', ...(turn.chips[0] ? [turn.chips[0]] : []), ' Treat gum disease.', ...(turn.chips[1] ? [turn.chips[1]] : [])] })]
           })]
         }),
-        el('sources-list', { matches: [sel('sources-list')], children: (state.listedSources || []).map((site) => el('a', { matches: ['a[href]'], attrs: { href: site.url }, text: site.title })) }),
+        ...(state.noSourcesList ? [] : [el('sources-list', { matches: [sel('sources-list')], children: (state.listedSources || []).map((site) => el('a', { matches: ['a[href]'], attrs: { href: site.url }, text: site.title })) })]),
         ...(state.stop ? [] : [el('message-actions', { matches: [sel('idle-signal')], text: 'Copy' })])
       ]
     }));
@@ -71,7 +77,7 @@ function renderGemini(state) {
     rows.push(el('div', {
       children: state.fileCards
         ? FILE_CARD.map((name) => el('div', { matches: [sel('source-card-file')], text: name }))
-        : CHIP_SOURCES[state.openCard].map((link) => el('a', { matches: [sel('source-card-link')], attrs: { href: link.href }, text: link.text }))
+        : CHIP_SOURCES[state.cardShows ?? state.openCard].map((link) => el('a', { matches: [sel('source-card-link')], attrs: { href: link.href }, text: link.text }))
     }));
   }
   rows.push(el('div', {
@@ -145,6 +151,10 @@ function makeGemini({ model = '4 Hydrogen', locked = [], url = 'https://gemini.g
     url,
     onNavigate: (next, fake) => { fake.state.turns = []; },
     onEvaluate: (js, fake) => {
+      if (js.includes('function stampGeminiCitation(') && !js.includes('"countOnly":true')) {
+        fake.state.cardShows = fake.state.staleFrom ?? null;
+        fake.state.staleFrom = null;
+      }
       if (!js.includes('function readTurns(') || !fake.state.sent) return;
       fake.state.reads += 1;
       if (fake.state.reads === 2) fake.state.turns.push({ role: 'assistant' });
@@ -213,6 +223,7 @@ test('oneshot-gemini: a source card that does not close stops the chip loop inst
   const result = await geminiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.deepEqual(state.cardClicks, [0]);
   assert.equal(result.meta.captureNotes.stopped, 'card_still_open');
+  assert.equal(result.meta.captureNotes.sourcesComplete, false);
   assert.deepEqual(result.meta.sources.map((item) => item.url), ['https://www.nih.gov/a']);
 });
 
@@ -262,6 +273,7 @@ test('oneshot-gemini: intents name purposes, not ChatGPT modes', async () => {
 
 test('oneshot-gemini: tool use is the sources list when it has links, unread behind a thinking panel, and none otherwise', async () => {
   const listed = makeGemini();
+  listed.state.noChips = true;
   listed.state.listedSources = [{ url: 'https://www.nih.gov/a', title: 'NIH' }, { url: 'https://example.org/b', title: 'Example' }];
   const shown = await geminiController(listed.page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.deepEqual(shown.meta.toolUse, { state: 'shown', reason: null, steps: [{ tool: 'sources_list', kind: null, title: 'Sources', count: 2, pages: [
@@ -270,12 +282,40 @@ test('oneshot-gemini: tool use is the sources list when it has links, unread beh
   ] }] });
 
   const thinking = makeGemini();
+  thinking.state.noChips = true;
   thinking.state.thoughts = true;
   const unread = await geminiController(thinking.page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.deepEqual(unread.meta.toolUse, { state: 'unread', reason: 'thinking_panel_not_read', steps: null });
 
-  const plain = await geminiController(makeGemini().page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  // Chips citing web pages are pages the answer shows it used.
+  const cited = await geminiController(makeGemini().page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(cited.meta.toolUse.state, 'shown');
+  assert.deepEqual(cited.meta.toolUse.steps.map((step) => [step.tool, step.count]), [['cited_pages', 3]]);
+
+  const plainSite = makeGemini();
+  plainSite.state.noChips = true;
+  const plain = await geminiController(plainSite.page).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.deepEqual(plain.meta.toolUse, { state: 'none', reason: null, steps: [] });
+
+  const noList = makeGemini();
+  noList.state.noChips = true;
+  noList.state.noSourcesList = true;
+  const missing = await geminiController(noList.page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(missing.meta.toolUse, { state: 'unread', reason: 'sources_list_missing', steps: null });
+});
+
+test('oneshot-gemini: a card that shows the previous chip\'s links for a moment is not stamped on the next chip', async () => {
+  const { state, page } = makeGemini();
+  state.staleCard = true;
+  const result = await geminiController(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.deepEqual(state.cardClicks, [0, 1]);
+  assert.equal(result.meta.captureNotes.sourcesComplete, true);
+  assert.deepEqual(result.meta.sources.map((source) => source.url).sort(), [
+    'https://pmc.ncbi.nlm.nih.gov/b',
+    'https://pmc.ncbi.nlm.nih.gov/c',
+    'https://www.nih.gov/a'
+  ]);
+  assert.doesNotMatch(result.text, /Treat gum disease\.\s*\[\d+\]\(https:\/\/www\.nih\.gov/);
 });
 
 test('oneshot-gemini: a mode picker drawn after the composer is waited for, not reported missing', async () => {

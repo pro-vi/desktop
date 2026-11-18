@@ -11,7 +11,7 @@ function textNode(value) {
 }
 
 // Engine timings scaled down for stub pages.
-export const FAST_TIMINGS = Object.freeze({ pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600 });
+export const FAST_TIMINGS = Object.freeze({ pollMs: 1, stableMs: 15, sendAckMs: 200, sendEnableMs: 20, uploadMs: 200, uiCheckMs: 50, promptDeliveryMs: 200, menuMs: 50, controlMs: 100, hardResponseMs: 600, idleSettleMs: 30 });
 
 export function el(tag, {
   attrs = {},

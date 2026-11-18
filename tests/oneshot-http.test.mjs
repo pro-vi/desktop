@@ -280,3 +280,52 @@ test('oneshot-http: /send on a Kimi tab is refused before any run is recorded', 
   const listed = await req({ port, method: 'POST', pth: '/runs/list', body: {} });
   assert.equal(listed.data.runs.length, 0);
 });
+
+test('oneshot-http: the record keeps the engine\'s repairs and capture notes, and an incomplete capture is labeled', async (t) => {
+  const controller = engineController(async () => ({
+    text: 'Answer',
+    meta: {
+      oneShot: true,
+      completionEvidence: { source: 'assistant-node', observedAt: 1 },
+      plainText: 'Answer',
+      sources: [],
+      toolUse: { state: 'none' },
+      sendDebug: { acknowledgedBy: 'user_turn', typingAttempts: 2, trimmedTrailingChars: 1 },
+      draftAttachmentsRemoved: ['old-brief pdf'],
+      captureNotes: { citations: 3, opened: 1, stamped: 1, skipped: 0, stopped: 'card_still_open', sourcesComplete: false },
+      pageNotices: ['Try Plus for faster answers'],
+      attachmentDelivery: { checked: false, reason: 'no_attachments' }
+    }
+  }));
+  const { port } = await startWithController(t, controller);
+  const response = await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi' } });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  const run = (await req({ port, method: 'POST', pth: '/runs/get', body: { runId: response.data.runId } })).data.run;
+  assert.equal(run.label, 'Response received (sources incomplete)');
+  const manifest = run.outputManifest;
+  assert.equal(manifest.typingAttempts, 2);
+  assert.equal(manifest.trimmedTrailingChars, 1);
+  assert.deepEqual(manifest.draftAttachmentsRemoved, ['old-brief pdf']);
+  assert.equal(manifest.captureNotes.stopped, 'card_still_open');
+  assert.deepEqual(manifest.pageNotices, ['Try Plus for faster answers']);
+  assert.deepEqual(manifest.attachmentDelivery, { checked: false, reason: 'no_attachments' });
+});
+
+test('oneshot-http: a refusal after Kimi took the prompt says so and keeps its stage; an unconfirmed send says the prompt may have gone', async (t) => {
+  let next = null;
+  const controller = engineController(async () => { throw next; });
+  const { port } = await startWithController(t, controller);
+  next = Object.assign(new Error('send_refused'), { data: { notice: 'Too many people are chatting with Kimi', stage: 'after_send', conversationUrl: 'https://www.kimi.ai/' } });
+  await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi' } });
+  let run = (await req({ port, method: 'POST', pth: '/runs/list', body: {} })).data.runs[0];
+  assert.equal(run.label, 'Send refused');
+  assert.equal(run.failureStage, 'after_send');
+  assert.match(run.detail, /^The provider took the prompt, then refused it: "Too many people/);
+
+  next = Object.assign(new Error('send_unconfirmed'), { data: { sendDebug: { clicked: true }, conversationUrl: 'https://www.kimi.ai/' } });
+  await req({ port, method: 'POST', pth: '/query', body: { prompt: 'p', vendorId: 'kimi', key: 'bench-kimi' } });
+  run = (await req({ port, method: 'POST', pth: '/runs/list', body: {} })).data.runs[0];
+  assert.equal(run.label, 'Send not confirmed');
+  assert.match(run.detail, /may have reached the provider/);
+  assert.equal(run.conversationUrl, 'https://www.kimi.ai/');
+});

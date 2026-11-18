@@ -115,7 +115,7 @@ function renderSite(state) {
   }));
   rows.push(el('div', {
     attrs: { id: 'send' },
-    matches: hasText ? ['#send'] : ['#send', '#send.off'],
+    matches: hasText && !(state.sendOff > 0) ? ['#send'] : ['#send', '#send.off'],
     rect: { x: 520, y: 600, w: 30, h: 30 },
     onClick: () => state.onSend?.(state)
   }));
@@ -191,6 +191,7 @@ function adapterFor({ modeConfirmed = true, onApplyMode = null, labelBeforeSend 
     profile: TEST_PROFILE,
     modeIntents: { strong: { label: 'Strong' } },
     progressLabels: ['thinking'],
+    refusalNotices: [/too many people are chatting/i],
     freshChatUrl: () => 'https://site.example/new',
     applyMode: async (ctx, mode) => {
       onApplyMode?.(mode);
@@ -609,11 +610,12 @@ test('oneshot-engine: a refusal notice after Send ends the run as send_refused',
   });
   await assert.rejects(
     controllerFor(page).query({ prompt: 'probe', timeoutMs: 400 }),
-    (error) => error.message === 'send_refused' && /Too many people/.test(error.data.notice)
+    (error) => error.message === 'send_refused' && /Too many people/.test(error.data.notice) &&
+      error.data.stage === 'at_send' && error.data.conversationUrl === 'https://site.example/new'
   );
 });
 
-test('oneshot-engine: an emptied composer alone is not taken as a sent prompt', async () => {
+test('oneshot-engine: an emptied composer alone is not taken as a sent prompt, and the run says the prompt may have gone', async () => {
   const { page } = makeSite({
     onSend: (site) => {
       site.sendClicks += 1;
@@ -622,7 +624,7 @@ test('oneshot-engine: an emptied composer alone is not taken as a sent prompt', 
   });
   await assert.rejects(
     controllerFor(page).query({ prompt: 'probe', timeoutMs: 400 }),
-    (error) => error.message === 'send_not_triggered'
+    (error) => error.message === 'send_unconfirmed' && error.data.conversationUrl === 'https://site.example/new'
   );
 });
 
@@ -695,7 +697,7 @@ test('oneshot-engine: a failure while preparing sources keeps the finished answe
   adapter.prepareCapture = async () => { throw new Error('click_target_missing'); };
   const result = await controllerFor(page, adapter).query({ prompt: 'probe', timeoutMs: 2_000 });
   assert.equal(result.text, 'Hello');
-  assert.deepEqual(result.meta.captureNotes, { failed: true, reason: 'click_target_missing' });
+  assert.deepEqual(result.meta.captureNotes, { failed: true, sourcesComplete: false, reason: 'click_target_missing' });
 });
 
 test('oneshot-engine: a failure after Send records the chat that holds the reply', async () => {
@@ -819,7 +821,8 @@ test('oneshot-engine: past the soft deadline the run keeps waiting while the pro
       { stop: false, idle: true, body: answerTree.plain('Long answer') }
     ]
   });
-  const result = await controllerFor(working.page).query({ prompt: 'probe', timeoutMs: 50 });
+  // A 5 s ceiling keeps 40 reads well inside it on a loaded machine.
+  const result = await controllerFor(working.page, adapterFor(), { timings: { ...FAST, hardResponseMs: 5_000 } }).query({ prompt: 'probe', timeoutMs: 50 });
   assert.equal(result.text, 'Long answer');
 
   // Without a stop control there is no sign of work, so the soft deadline ends the wait.
@@ -871,4 +874,123 @@ test('oneshot-engine: a chip no requested file claims keeps the upload from coun
     (error) => error.message === 'attachment_not_shown' && error.data.unexpected.includes('surprise.pdf')
   );
   assert.equal(state.sendClicks, 0);
+});
+
+// Send stays disabled for `reads` reads of the Send control; `during` runs on
+// the read before it enables, the way a page changes while it reads the files.
+function delaySend(page, state, reads, during) {
+  state.sendOff = reads;
+  const evaluate = page.evaluate;
+  page.evaluate = async (js) => {
+    if (js.includes('function readSendButton(') && state.sendOff > 0) {
+      state.sendOff -= 1;
+      if (state.sendOff === 1) during(state);
+    }
+    return await evaluate(js);
+  };
+}
+
+test('oneshot-engine: a composer that changes while Send is still disabled fails before the click', async () => {
+  const { state, page } = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  delaySend(page, state, 3, (site) => { site.composerText += '.'; });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'first line\nlast line.', timeoutMs: 2_000 }),
+    (error) => error.message === 'prompt_staging_failed' && error.data.stage === 'before_send'
+  );
+  assert.equal(state.sendClicks, 0);
+});
+
+test('oneshot-engine: a file that fails while Send is still disabled fails the run before the click', async () => {
+  const [file] = await tempFiles(['brief.pdf']);
+  const { state, page } = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  delaySend(page, state, 3, (site) => { site.chips[0].error = true; });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', attachments: [file], timeoutMs: 2_000 }),
+    (error) => error.message === 'attachment_upload_failed' && error.data.stage === 'before_send'
+  );
+  assert.equal(state.sendClicks, 0);
+});
+
+test('oneshot-engine: past the soft deadline a finished turn with no answer text ends the run at the deadline, with a progress phase', async () => {
+  const { page } = makeSite({ timeline: [{ stop: false, idle: true, body: answerTree.plain('') }] });
+  const phases = [];
+  const started = Date.now();
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 50, onProgress: (patch) => patch.phase && phases.push(patch.phase) }),
+    (error) => error.message === 'timeout_waiting_for_response'
+  );
+  assert.ok(Date.now() - started < 400, 'waited toward the hard ceiling');
+  assert.ok(phases.includes('waiting_past_deadline'));
+});
+
+test('oneshot-engine: past the soft deadline a finished turn whose text keeps changing gets only the settle window', async () => {
+  const { state, page } = makeSite();
+  let tick = 0;
+  const evaluate = page.evaluate;
+  page.evaluate = async (js) => {
+    if (js.includes('function readTurns(') && state.sendClicks > 0) {
+      tick += 1;
+      state.stop = false;
+      state.turns = state.turns.filter((turn) => turn.role === 'user');
+      state.turns.push({ role: 'assistant', idle: true, body: answerTree.plain(`Updated ${tick}s ago`) });
+    }
+    return await evaluate(js);
+  };
+  const started = Date.now();
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 50 }),
+    (error) => error.message === 'timeout_waiting_for_response'
+  );
+  assert.ok(Date.now() - started < 400, 'waited toward the hard ceiling');
+});
+
+test('oneshot-engine: a refusal notice shown after the soft deadline is recorded as a refusal, not a timeout', async () => {
+  const { page } = makeSite({
+    timeline: [
+      ...Array.from({ length: 80 }, () => ({ stop: true, body: answerTree.plain('') })),
+      { stop: false, notice: 'Too many people are chatting right now.' }
+    ]
+  });
+  await assert.rejects(
+    controllerFor(page).query({ prompt: 'probe', timeoutMs: 20 }),
+    (error) => error.message === 'send_refused' && error.data.stage === 'after_send'
+  );
+});
+
+test('oneshot-engine: a notice the adapter does not name as a refusal is recorded and the run goes on', async () => {
+  const { page } = makeSite({
+    timeline: [
+      { stop: true, body: answerTree.plain(''), notice: 'Try Plus for faster answers' },
+      ...stableAnswer(answerTree.plain('Hello'))
+    ]
+  });
+  const result = await controllerFor(page).query({ prompt: 'probe', timeoutMs: 2_000 });
+  assert.equal(result.text, 'Hello');
+  assert.deepEqual(result.meta.pageNotices, ['Try Plus for faster answers']);
+});
+
+test('oneshot-engine: a name inside another file\'s name, or a type after a shortened name, still matches the right chip', () => {
+  for (const order of [['q3-report.pdf', 'report.pdf'], ['report.pdf', 'q3-report.pdf']]) {
+    const both = matchAttachments([{ name: 'report.pdf' }, { name: 'q3-report.pdf' }], { items: order.map((text) => ({ text })) });
+    assert.equal(both.done, true, order.join(', '));
+    assert.deepEqual(both.report.map((item) => item.matchedBy), ['name', 'name']);
+  }
+  // A lone report.pdf must not be taken as shown by a q3-report.pdf chip.
+  const lone = matchAttachments([{ name: 'report.pdf' }], { items: [{ text: 'q3-report.pdf' }] });
+  assert.equal(lone.done, false);
+  assert.equal(lone.report[0].matchedBy, null);
+  // With a space, "report.pdf" is a whole token inside "q3 report.pdf"; the longer name claims first.
+  const spaced = matchAttachments([{ name: 'report.pdf' }, { name: 'q3 report.pdf' }], { items: [{ text: 'q3 report.pdf' }, { text: 'report.pdf' }] });
+  assert.equal(spaced.done, true);
+  const stems = matchAttachments([{ name: 'report.pdf' }, { name: 'q3-report.pdf' }], { items: [{ text: 'q3-report PDF' }, { text: 'report PDF' }] });
+  assert.equal(stems.done, true);
+  const typeAfter = matchAttachments([{ name: 'doc_02_bank_statement.pdf' }], { items: [{ text: 'doc_02_ban..._statement pdf' }] });
+  assert.equal(typeAfter.report[0].matchedBy, 'shortened-name');
+});
+
+test('oneshot-engine: a profile with no turn file cards reports attachment delivery as not checked', async () => {
+  const [file] = await tempFiles(['brief.pdf']);
+  const { page } = makeSite({ timeline: stableAnswer(answerTree.plain('Hello')) });
+  const result = await controllerFor(page).query({ prompt: 'probe', attachments: [file], timeoutMs: 2_000 });
+  assert.deepEqual(result.meta.attachmentDelivery, { checked: false, reason: 'profile_has_no_turn_files' });
 });

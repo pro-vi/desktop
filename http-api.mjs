@@ -894,8 +894,16 @@ async function writeOneShotAnswerFiles({ outDir, meta }) {
     sourcesPath,
     sourceCount: sources.length,
     attachments: Array.isArray(meta?.attachments) ? meta.attachments : [],
+    attachmentDelivery: meta?.attachmentDelivery || null,
     toolUsePath,
-    toolUseCounts: toolUseCounts(toolUse)
+    toolUseCounts: toolUseCounts(toolUse),
+    // What the engine did to the page beyond typing and sending, so a reader
+    // of the record can see it without the result.
+    typingAttempts: meta?.sendDebug?.typingAttempts ?? null,
+    trimmedTrailingChars: meta?.sendDebug?.trimmedTrailingChars ?? 0,
+    draftAttachmentsRemoved: Array.isArray(meta?.draftAttachmentsRemoved) ? meta.draftAttachmentsRemoved : [],
+    captureNotes: meta?.captureNotes || null,
+    pageNotices: Array.isArray(meta?.pageNotices) ? meta.pageNotices : []
   };
 }
 
@@ -1849,6 +1857,7 @@ export function startHttpApi({
         status: 'error',
         label: known.label,
         detail: known.detail(detail),
+        ...(detail?.stage ? { failureStage: detail.stage } : {}),
         ...(detail?.conversationUrl ? { conversationUrl: detail.conversationUrl } : {}),
         ...(known.attachment ? { attachmentDebug: detail || null } : {})
       };
@@ -2292,6 +2301,7 @@ export function startHttpApi({
       ...(outcome.promptDelivery ? { promptDelivery: outcome.promptDelivery } : {}),
       ...(outcome.promptStaging ? { promptStaging: outcome.promptStaging } : {}),
       ...(outcome.attachmentDebug ? { attachmentDebug: outcome.attachmentDebug } : {}),
+      ...(outcome.failureStage ? { failureStage: outcome.failureStage } : {}),
       ...(outcome.responseDebug ? { responseDebug: outcome.responseDebug } : {}),
       ...(outcome.recovery ? { recovery: outcome.recovery } : {}),
       ...(terminalProviderSlot ? { providerSlot: terminalProviderSlot } : {})
@@ -2729,11 +2739,13 @@ export function startHttpApi({
   // Delivery (ADR 0014) and mode checks report on a saved answer, never fail
   // it; the label is the one line every read path shows, so it carries each
   // notice. A downgrade reaches a success only through a later mode recheck.
-  const successLabel = ({ promptDelivery, modeVerification, degradedFrom = null }) => {
+  const successLabel = ({ promptDelivery, modeVerification, degradedFrom = null, captureNotes = null }) => {
     const notices = [];
     if (promptDelivery?.checked === true && promptDelivery.complete === false) notices.push('prompt incomplete');
     if (modeVerification === 'unverified') notices.push('mode unverified');
     if (degradedFrom) notices.push('mode downgraded');
+    // A one-shot capture that could not read every citation saved fewer sources.
+    if (captureNotes?.sourcesComplete === false) notices.push('sources incomplete');
     return `Response received${notices.length ? ` (${notices.join('; ')})` : ''}`;
   };
 
@@ -2743,7 +2755,7 @@ export function startHttpApi({
     const modeUsage = Object.hasOwn(outputManifest || {}, 'modeUsed') ? outputManifest : meta;
     return {
       status: 'success',
-      label: successLabel({ promptDelivery: meta.promptDelivery, modeVerification: modeUsage.modeVerification, degradedFrom: modeUsage.degradedFrom }),
+      label: successLabel({ promptDelivery: meta.promptDelivery, modeVerification: modeUsage.modeVerification, degradedFrom: modeUsage.degradedFrom, captureNotes: meta.captureNotes }),
       detail: result?.text ? trimPreview(result.text, 180) : 'The provider returned a response.',
       conversationUrl: conversationUrl || null,
       source: op?.source || 'http',

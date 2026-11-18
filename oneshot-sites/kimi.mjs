@@ -32,8 +32,10 @@ export function kimiFreshChatUrl(currentUrl) {
 export function readKimiModelTrigger(a, h) {
   const trigger = h.all(a.trigger).find(h.visible);
   if (!trigger) return { found: false };
+  // A hidden label is not what the page shows. On 2026-11-18 Instant showed
+  // "Instant | High" with the effort label visible, so Instant still records it.
   const label = (selectors) => {
-    const node = h.all(selectors, trigger)[0];
+    const node = h.all(selectors, trigger).find(h.visible);
     return node ? h.textOf(node).trim() || null : null;
   };
   return {
@@ -77,8 +79,11 @@ export function readKimiToolFlow(a, h) {
   const turn = turns[turns.length - 1];
   if (!turn) return { found: false };
   const flow = h.all(a.toolFlow, turn)[0];
-  if (!flow) return { found: true, flow: false, steps: [] };
+  // Excluded nodes (Kimi's tool rollup) without a flow mean tool steps in a
+  // structure this reader does not know.
+  if (!flow) return { found: true, flow: false, excluded: h.all(a.answerExclude, turn).length > 0, steps: [] };
   const toggle = h.all(a.toolFlowToggle, flow)[0] || null;
+  const containers = h.all(a.toolStep, flow).length;
   const steps = h.all(a.toolStep, flow)
     .filter((node) => !h.matchesAny(node, a.toolStepThinking))
     .map((node) => {
@@ -104,7 +109,7 @@ export function readKimiToolFlow(a, h) {
         })) : []
       };
     });
-  return { found: true, flow: true, toggleExpanded: toggle ? toggle.getAttribute('aria-expanded') === 'true' : true, steps };
+  return { found: true, flow: true, containers, toggleExpanded: toggle ? toggle.getAttribute('aria-expanded') === 'true' : true, steps };
 }
 
 // Scrolls a tool-flow control into view and returns where to click it:
@@ -131,6 +136,7 @@ export function placeKimiReferenceToggle(a, h) {
 function toolSelectors(ctx) {
   return {
     assistantTurn: ctx.selectorsFor('assistant-turn'),
+    answerExclude: ctx.selectorsFor('answer-exclude'),
     toolFlow: ctx.selectorsFor('tool-flow'),
     toolFlowToggle: ctx.selectorsFor('tool-flow-toggle'),
     toolStep: ctx.selectorsFor('tool-step'),
@@ -247,24 +253,30 @@ async function readKimiModeLabel(ctx) {
 async function prepareKimiCapture(ctx) {
   const sel = toolSelectors(ctx);
   const place = await ctx.evaluate(placeKimiReferenceToggle, sel);
-  if (!place.found) return { references: 'none_shown' };
-  if (place.panelOpen) return { references: 'open' };
+  if (!place.found) return { references: 'none_shown', sourcesComplete: true };
+  if (place.panelOpen) return { references: 'open', sourcesComplete: true };
   await ctx.sleep(Math.min(200, ctx.timings.menuMs));
   const again = await ctx.evaluate(placeKimiReferenceToggle, sel);
   await ctx.click(again.rect);
   const opened = await ctx.waitFor(() => ctx.evaluate(placeKimiReferenceToggle, sel), (value) => value.panelOpen);
-  return { references: opened.panelOpen ? 'open' : 'did_not_open' };
+  return opened.panelOpen ? { references: 'open', sourcesComplete: true } : { references: 'did_not_open', sourcesComplete: false };
 }
 
-// Kimi names a step's tool in its class (toolcall-web_search).
+// Kimi names a step's tool in its class (toolcall-web_search), and a search
+// step's title its page count ("Found 7 web pages").
 const isSearchTool = (tool) => /search/.test(String(tool || ''));
+const searchPageCount = (title) => {
+  const found = /(\d+)\s+web\s+pages?/i.exec(String(title || ''));
+  return found ? Number(found[1]) : null;
+};
 
 async function readKimiToolUse(ctx) {
   const sel = toolSelectors(ctx);
   const read = () => ctx.evaluate(readKimiToolFlow, sel);
   let flow = await read();
   if (!flow.found) return { state: 'unread', reason: 'assistant_turn_missing' };
-  if (!flow.flow) return { state: 'none' };
+  if (!flow.flow) return flow.excluded ? { state: 'unread', reason: 'tool_structure_unrecognized' } : { state: 'none' };
+  if (!flow.containers) return { state: 'unread', reason: 'tool_steps_missing' };
   if (!flow.toggleExpanded) {
     const toggle = await ctx.evaluate(placeKimiToolControl, { ...sel, target: 'toggle' });
     if (!toggle.found) return { state: 'unread', reason: 'tool_flow_toggle_missing' };
@@ -287,20 +299,27 @@ async function readKimiToolUse(ctx) {
   flow = await read();
   const unexpanded = flow.steps.filter((step) => step.expandable && !step.expanded).length;
   if (unexpanded) return { state: 'unread', reason: `tool_steps_not_expanded:${unexpanded}` };
+  // A search step that says it found pages but lists none was not read.
+  const emptySearches = flow.steps.filter((step) => isSearchTool(step.tool) && searchPageCount(step.title) > 0 && !step.pages.length).length;
+  if (emptySearches) return { state: 'unread', reason: `search_pages_unread:${emptySearches}` };
   return {
     state: 'shown',
-    steps: flow.steps.map((step) => {
-      const count = /(\d+)/.exec(step.title);
-      return { tool: step.tool, kind: isSearchTool(step.tool) ? 'search' : null, title: step.title, count: count ? Number(count[1]) : null, pages: step.pages };
-    })
+    steps: flow.steps.map((step) => ({
+      tool: step.tool,
+      kind: isSearchTool(step.tool) ? 'search' : null,
+      title: step.title,
+      count: isSearchTool(step.tool) ? searchPageCount(step.title) : null,
+      pages: step.pages
+    }))
   };
 }
 
 // A send Kimi refuses stays in the composer as a draft, files included, and
 // the next chat shows those files again (seen 2026-11-18). A chip's delete
 // control works only once the pointer has rested on the chip.
+// Only chips inside the composer's attachment area are read or deleted.
 export function placeKimiDraftChip(a, h) {
-  const nodes = h.all(a.item).filter(h.visible);
+  const nodes = h.all(a.area).flatMap((area) => h.all(a.item, area)).filter(h.visible);
   const chips = nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
   if (!chips.length) return { count: 0 };
   chips[0].scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -309,7 +328,7 @@ export function placeKimiDraftChip(a, h) {
 }
 
 async function clearKimiDraftAttachments(ctx) {
-  const sel = { item: ctx.selectorsFor('attachment-item'), remove: ctx.selectorsFor('attachment-remove') };
+  const sel = { area: ctx.selectorsFor('attachment-area'), item: ctx.selectorsFor('attachment-item'), remove: ctx.selectorsFor('attachment-remove') };
   const read = () => ctx.evaluate(placeKimiDraftChip, sel);
   let chip = await read();
   while (chip.count > 0) {
@@ -352,6 +371,9 @@ export const kimiAdapter = Object.freeze({
   // Exact labels a Kimi answer body can show before any answer text; none
   // were observed live yet, so this starts empty and grows from captures.
   progressLabels: Object.freeze([]),
+  // The refusal texts Kimi's notice showed live on 2026-11-18. Any other
+  // notice is recorded and does not end the run.
+  refusalNotices: Object.freeze([/too many people are chatting/i, /already have several chats open/i]),
   freshChatUrl: kimiFreshChatUrl,
   clearDraftAttachments: clearKimiDraftAttachments,
   applyMode: applyKimiMode,
