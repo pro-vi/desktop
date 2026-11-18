@@ -31,6 +31,20 @@ test('popup-policy: allows x.com auth popup URL for grok vendor', () => {
   assert.equal(isAllowedAuthPopupUrl('https://x.com/i/flow/login', { vendorId: 'grok' }), true);
 });
 
+test('popup-policy: allows Google auth popup URL for kimi vendor', () => {
+  assert.equal(isAllowedAuthPopupUrl('https://accounts.google.com/signin/v2/identifier', { vendorId: 'kimi' }), true);
+});
+
+test('popup-policy: allows about:blank popup opened by either Kimi site', () => {
+  for (const openerUrl of ['https://www.kimi.com/', 'https://www.kimi.ai/']) {
+    assert.equal(
+      shouldAllowPopup({ url: 'about:blank', vendorId: 'kimi', openerUrl, frameName: 'oauth_popup' }),
+      true,
+      openerUrl
+    );
+  }
+});
+
 test('popup-policy: allows additional Google auth host used in SSO chains', () => {
   assert.equal(isAllowedAuthPopupUrl('https://myaccount.google.com/', { vendorId: 'gemini' }), true);
 });

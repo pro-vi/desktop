@@ -35,6 +35,12 @@
       "name": "Google AI Studio",
       "url": "https://aistudio.google.com/prompts/new_chat",
       "status": "supported"
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "url": "https://www.kimi.com/",
+      "status": "planned"
     }
   ]
 }

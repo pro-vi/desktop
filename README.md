@@ -18,6 +18,7 @@ Agentify Desktop is a local-first control center for AI work: connect your real,
 - `grok.com`
 
 **Planned**
+- `www.kimi.com` (mainland China accounts) and `www.kimi.ai` (international accounts): one Kimi app on two sites with separate sign-in. Tabs open; queries are not built yet.
 - Additional vendor profiles via `vendors.json` + selector overrides.
 
 ## CAPTCHA policy (human-in-the-loop)

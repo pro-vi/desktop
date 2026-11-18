@@ -30,7 +30,7 @@ const CHATGPT_AUTH_HOST_ALLOWLIST = [
   '.grok.com'
 ];
 
-const SUPPORTED_VENDOR_IDS = ['chatgpt', 'perplexity', 'claude', 'aistudio', 'gemini', 'grok'];
+const SUPPORTED_VENDOR_IDS = ['chatgpt', 'perplexity', 'claude', 'aistudio', 'gemini', 'grok', 'kimi'];
 const VENDOR_HOST_ALLOWLIST = [
   'chatgpt.com',
   '.chatgpt.com',
@@ -43,7 +43,14 @@ const VENDOR_HOST_ALLOWLIST = [
   'perplexity.ai',
   '.perplexity.ai',
   'grok.com',
-  '.grok.com'
+  '.grok.com',
+  // Kimi runs one chat app on two sites with separate sign-in: kimi.com for
+  // mainland China accounts (WeChat QR, +86 phone, SSO) and kimi.ai for
+  // international ones (phone, Google, SSO). Checked on both login dialogs 2026-11-18.
+  'kimi.com',
+  '.kimi.com',
+  'kimi.ai',
+  '.kimi.ai'
 ];
 
 function normalizeHostname(hostname) {
