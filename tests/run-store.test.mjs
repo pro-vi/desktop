@@ -249,6 +249,7 @@ test('run-store: response diagnostics never coerce malformed boundary values', (
     stopCount: false,
     hardDeadlineMs: 20,
     stop: true,
+    freshStopCount: 1,
     pageTextChars: 'many',
     preSendPageTextChars: -5,
     providerMessageId: 42,
@@ -259,6 +260,7 @@ test('run-store: response diagnostics never coerce malformed boundary values', (
   assert.equal(parsed.stopCount, null);
   assert.equal(parsed.hardDeadlineMs, 20);
   assert.equal(parsed.stop, true);
+  assert.equal(parsed.freshStopCount, 1);
   assert.equal(parsed.pageTextChars, null);
   assert.equal(parsed.preSendPageTextChars, null);
   assert.equal(parsed.providerMessageId, null);

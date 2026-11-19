@@ -2287,6 +2287,54 @@ test('http-api: query returns runId and persists durable run state', async (t) =
   assert.equal(fetched.data.run.outputManifest.responsePath, persisted.outputManifest.responsePath);
 });
 
+test('http-api: query takes the caller\'s run id, and refuses a malformed or used one', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-requested-run-id-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  let queries = 0;
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    query: async () => {
+      queries += 1;
+      return { text: 'answer', codeBlocks: [], meta: { completionEvidence: { source: 'assistant-node', observedAt: 1 } } };
+    },
+    getUrl: async () => 'https://chatgpt.com/c/requested-run-id'
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't0', key: 'default', vendorId: 'chatgpt', vendorName: 'ChatGPT' }],
+    ensureTab: async () => 't0',
+    createTab: async () => 't0',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    providerTabOperations: createProviderTabOperationLeases(),
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't0',
+    serverId: 'sid-test',
+    stateDir,
+    getSettings: async () => ({ maxInflightQueries: 2, maxQueriesPerMinute: 100, minTabGapMs: 0, minGlobalGapMs: 0, showTabsByDefault: false }),
+    getStatus: async ({ tabId }) => ({ ok: true, tabId, url: 'https://chatgpt.com/', blocked: false, promptVisible: true, kind: null, tabs: tabs.listTabs() })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+  const runId = '0f6e2c0a-9d3b-4c55-8a41-5b7f3e2d1c09';
+
+  const accepted = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'first', source: 'mcp', runId: runId.toUpperCase() } });
+  assert.equal(accepted.res.status, 200);
+  assert.equal(accepted.data.runId, runId);
+  assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, 'runs', `${runId}.json`), 'utf8')).id, runId);
+
+  const reused = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'second', source: 'mcp', runId } });
+  assert.equal(reused.res.status, 409);
+  assert.equal(reused.data.error, 'run_id_conflict');
+  const malformed = await req({ port, token: 'secret', method: 'POST', pth: '/query', body: { prompt: 'third', source: 'mcp', runId: '../escape' } });
+  assert.equal(malformed.res.status, 400);
+  assert.equal(malformed.data.error, 'invalid_run_id');
+  assert.equal(queries, 1);
+});
+
 test('http-api: a query result without controller completion evidence creates no artifact, receipt, or success', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-http-evidence-missing-'));
   t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));

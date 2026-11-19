@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { DOT_PAGE_FAILURE_REASONS } from './chatgpt-dot-ui.mjs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -168,6 +169,21 @@ function runStatusText(run = {}, data = {}) {
     lines.push(`${truncation}${data.outputText}`);
   }
   return lines.join('\n');
+}
+
+// A failure with no HTTP response (fetch failed) leaves the run to finish on
+// its own. As of Node 24.14, fetch fails this way after 300 s without response
+// headers (301 s measured), and a blocking /query sends headers only when the
+// run finishes. The error carries the run id so the caller can wait on it.
+function rethrowQueryTransport(error, { tool, runId, next = 'call agentify_wait_run with this runId' }) {
+  if (error?.data) throw error;
+  const cause = error?.cause?.code || error?.cause?.message || null;
+  throw new Error([
+    `${tool} lost its connection to Agentify Desktop (${error?.message || String(error)}${cause ? `: ${cause}` : ''}).`,
+    `runId=${runId}`,
+    `The run keeps going if Agentify Desktop received it: ${next}.`,
+    'If agentify_wait_run reports run_not_found, check agentify_list_runs before sending again: the request may not have arrived, or the running Agentify Desktop is older than this MCP server and named the run itself.'
+  ].join('\n'));
 }
 
 // A sync call refused before Send reports where the composer text went wrong,
@@ -976,12 +992,14 @@ registerTool(
       }
     }
     const conn = await getConn();
+    const runId = crypto.randomUUID();
     const data = await requestJson({
       ...conn,
       method: 'POST',
       path: '/query',
       body: {
         source: 'mcp',
+        runId,
         model,
         tabId,
         key: effectiveKey,
@@ -1005,7 +1023,7 @@ registerTool(
         timeoutMs: timeoutMs || 10 * 60_000,
         fireAndForget: fireAndForget || undefined
       }
-    }).catch(rethrowPromptStaging);
+    }).catch((error) => rethrowQueryTransport(error, { tool: 'agentify_query', runId })).catch(rethrowPromptStaging);
     if (data.async) {
       const structuredContent = asyncQueryStructuredContent(data);
       const content = [{ type: 'text', text: `Query submitted. runId=${structuredContent.runId || ''}. Next: call agentify_wait_run with this runId for proven completion. Use agentify_get_run only for a non-blocking snapshot.` }];
@@ -1845,12 +1863,14 @@ registerTool(
   async ({ model, tabId, key, projectUrl, modeIntent, prompt, attachments, timeoutMs, maxImages }) => {
     const resolvedAttachments = resolveLocalPaths(attachments || []);
     const conn = await getConn();
+    const runId = crypto.randomUUID();
     const q = await requestJson({
       ...conn,
       method: 'POST',
       path: '/query',
       body: {
         source: 'mcp',
+        runId,
         model,
         tabId,
         key,
@@ -1861,7 +1881,11 @@ registerTool(
         attachments: resolvedAttachments,
         timeoutMs: timeoutMs || 10 * 60_000
       }
-    }).catch(rethrowPromptStaging);
+    }).catch((error) => rethrowQueryTransport(error, {
+      tool: 'agentify_image_gen',
+      runId,
+      next: 'call agentify_wait_run with this runId, then agentify_download_images on the same tab or key'
+    })).catch(rethrowPromptStaging);
     const d = await requestJson({
       ...conn,
       method: 'POST',

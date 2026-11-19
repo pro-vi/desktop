@@ -359,6 +359,46 @@ function applyAssistantNodeBasis(snap, { roleStrict = false } = {}) {
   return { ...snap, nodeBasis: 'verbatim' };
 }
 
+// Stop controls already visible before a send are recorded by element, and
+// later counted as this send's own only if they are new elements or carry a
+// different data-testid or aria-label. A count baseline cannot tell them
+// apart: as of the ChatGPT web app on 2026-11-18, a control matching the stop
+// selector is visible on project pages before the send and gone after the
+// route change to the new conversation, so a baseline of one hid the reply's
+// own stop control and Pro answers were saved mid-stream.
+const PRE_SEND_STOP_CONTROLS_KEY = '__agentifyPreSendStopControls';
+
+function stopControlState(node) {
+  return [node.getAttribute('data-testid') || '', node.getAttribute('aria-label') || ''].join('|');
+}
+
+// Page-script statement: record the visible stop controls in `stopNodes` under
+// `token` before the send.
+export function recordPreSendStopControlsScript(token) {
+  return `try {
+    const stopControlState = ${stopControlState.toString()};
+    const states = new WeakMap();
+    for (const n of stopNodes) states.set(n, stopControlState(n));
+    window[${JSON.stringify(PRE_SEND_STOP_CONTROLS_KEY)}] = { token: ${JSON.stringify(token)}, states };
+  } catch {}`;
+}
+
+// Page-script expression: how many visible stop controls in `stopNodes` were
+// not on the page before the send recorded under `token`. With no record for
+// that token (no token, or the document was replaced) every visible one
+// counts: a missing baseline may make the wait run long, but must not hide the
+// reply's own stop control and cut its answer.
+export function freshStopCountScript(token) {
+  if (!token) return 'stopNodes.length';
+  return `(() => {
+    const stopControlState = ${stopControlState.toString()};
+    const baseline = window[${JSON.stringify(PRE_SEND_STOP_CONTROLS_KEY)}];
+    const states = baseline && baseline.token === ${JSON.stringify(token)} ? baseline.states : null;
+    if (!states) return stopNodes.length;
+    return stopNodes.filter((n) => states.get(n) !== stopControlState(n)).length;
+  })()`;
+}
+
 function looksLikeResearchShellText(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!text) return false;
@@ -6022,12 +6062,12 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
-  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, initialPromptLen = 0, initialStopCount = 0 } = {}) {
+  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, initialPromptLen = 0, preSendStopToken = null } = {}) {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea);
+    const freshStopCountExpr = freshStopCountScript(preSendStopToken);
     const start = Date.now();
-    const baselineStopCount = Math.max(0, Number(initialStopCount) || 0);
     while (Date.now() - start < timeoutMs) {
       this.#throwIfStopRequested();
       const snap = await this.#eval(`(() => {
@@ -6037,8 +6077,8 @@ export class ChatGPTController {
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         };
-        const stopCount = Array.from(document.querySelectorAll(${stopSel})).filter(visible).length;
-        const stopVisible = stopCount > 0;
+        const stopNodes = Array.from(document.querySelectorAll(${stopSel})).filter(visible);
+        const freshStopCount = ${freshStopCountExpr};
         const send = Array.from(document.querySelectorAll(${sendSel})).find(visible);
         const sendDisabled = !!send && !!send.disabled;
 
@@ -6093,13 +6133,11 @@ export class ChatGPTController {
         } else if (prompt && (prompt.isContentEditable || prompt.getAttribute('contenteditable') === 'true' || prompt.getAttribute('role') === 'textbox')) {
           promptLen = String(prompt.innerText || prompt.textContent || '').trim().length;
         }
-        return { stopVisible, stopCount, sendDisabled, promptLen };
+        return { freshStopCount, sendDisabled, promptLen };
       })()`);
 
       const promptChanged = Number.isFinite(initialPromptLen) && initialPromptLen > 0 && snap?.promptLen >= 0 && snap.promptLen < initialPromptLen;
-      const stopAppeared = Number.isFinite(snap?.stopCount)
-        ? snap.stopCount > baselineStopCount
-        : (!!snap?.stopVisible && baselineStopCount === 0);
+      const stopAppeared = Number(snap?.freshStopCount) > 0;
       const disabledWithoutPromptRead = !!snap?.sendDisabled && !(snap?.promptLen >= 0);
       if (stopAppeared || promptChanged || disabledWithoutPromptRead) return true;
       await sleep(pollMs);
@@ -6120,6 +6158,7 @@ export class ChatGPTController {
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const stopSel = JSON.stringify(this.selectors.stopButton);
     let lastSendDebug = null;
+    const preSendStopToken = crypto.randomUUID();
     const res = await this.#eval(`(() => {
       const host = location.hostname || '';
       const visible = (n) => {
@@ -6209,6 +6248,7 @@ export class ChatGPTController {
       };
       const stopNodes = Array.from(document.querySelectorAll(${stopSel})).filter(visible);
       const stopCount = stopNodes.length;
+      ${recordPreSendStopControlsScript(preSendStopToken)}
       const prompt = pickPrompt();
       ${CHATGPT_MODE_PICKER_PRIMITIVES_JS}
       ${chatgptComposerSurface.toString()}
@@ -6315,6 +6355,7 @@ export class ChatGPTController {
       composerHasForm: !!res?.composerHasForm,
       preExistingStopVisible: !!res?.preExistingStopVisible,
       initialStopCount: Number.isFinite(res?.stopCount) ? res.stopCount : 0,
+      preSendStopToken,
       button: res?.button || null,
       submitter: res?.submitter || null
     };
@@ -6404,7 +6445,7 @@ export class ChatGPTController {
         timeoutMs: 1800,
         pollMs: 120,
         initialPromptLen: res?.promptLen || 0,
-        initialStopCount: res?.stopCount || 0
+        preSendStopToken
       });
       lastSendDebug = {
         ...lastSendDebug,
@@ -6431,7 +6472,7 @@ export class ChatGPTController {
           timeoutMs: 2200,
           pollMs: 120,
           initialPromptLen: res?.promptLen || 0,
-          initialStopCount: res?.stopCount || 0
+          preSendStopToken
         });
         lastSendDebug = {
           ...lastSendDebug,
@@ -6529,7 +6570,7 @@ export class ChatGPTController {
         timeoutMs: 1400,
         pollMs: 120,
         initialPromptLen: res?.promptLen || 0,
-        initialStopCount: res?.stopCount || 0
+        preSendStopToken
       });
       lastSendDebug = {
         ...lastSendDebug,
@@ -6627,7 +6668,7 @@ export class ChatGPTController {
           timeoutMs: 1500,
           pollMs: 120,
           initialPromptLen: res?.promptLen || 0,
-          initialStopCount: res?.stopCount || 0
+          preSendStopToken
         });
         lastSendDebug = {
           ...lastSendDebug,
@@ -7154,6 +7195,7 @@ export class ChatGPTController {
     preSendText = '',
     preSendPageText = '',
     preSendStopCount = 0,
+    preSendStopToken = null,
     preSendProviderMessageId = null,
     minimumTimeoutMs = 0,
     minimumStableMs = 0,
@@ -7219,6 +7261,7 @@ export class ChatGPTController {
       Math.ceil(DEEP_RESEARCH_OBSERVATION_INTERVAL_MS / Math.max(1, Number(pollMs) || 1))
     );
     const baselineStopCount = Math.max(0, Number(preSendStopCount) || 0);
+    const freshStopCountExpr = freshStopCountScript(preSendStopToken);
 
     while (Date.now() - start < (durableObservation ? hardDeadlineMs : effectiveTimeoutMs)) {
       this.#throwIfStopRequested();
@@ -7246,8 +7289,10 @@ export class ChatGPTController {
           const style = window.getComputedStyle(n);
           return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
         };
-        const stopCount = Array.from(document.querySelectorAll(${stopSel})).filter(visible).length;
+        const stopNodes = Array.from(document.querySelectorAll(${stopSel})).filter(visible);
+        const stopCount = stopNodes.length;
         const stop = stopCount > 0;
+        const freshStopCount = ${freshStopCountExpr};
         const send = Array.from(document.querySelectorAll(${sendSel})).find((n) => {
           return visible(n);
         });
@@ -7316,6 +7361,7 @@ export class ChatGPTController {
           deepResearchFramePresent,
           stop,
           stopCount,
+          freshStopCount,
           sendEnabled,
           sendFound,
           txt,
@@ -7351,7 +7397,10 @@ export class ChatGPTController {
       const stopCount = Number.isFinite(Number(snap?.stopCount))
         ? Math.max(0, Number(snap.stopCount))
         : (snap?.stop ? 1 : 0);
-      const activeStop = stopCount > baselineStopCount || (!!snap?.stop && baselineStopCount === 0);
+      // A snapshot without freshStopCount carries no pre-send baseline, so
+      // every visible stop control counts as this send's own.
+      const freshStopCount = Number.isFinite(snap?.freshStopCount) ? Math.max(0, snap.freshStopCount) : stopCount;
+      const activeStop = freshStopCount > 0;
       const hasImageOutput = Number(snap?.imageCandidateCount || 0) > 0;
       const imagePlaceholder = IMAGE_PLACEHOLDER_RE.test(mainTxt);
       const hasThinkingLine = IMAGE_THINKING_LINE_RE.test(mainTxt);
@@ -7397,6 +7446,7 @@ export class ChatGPTController {
         stop: activeStop,
         rawStop: !!snap?.stop,
         stopCount,
+        freshStopCount,
         baselineStopCount,
         providerMessageId: snap?.providerMessageId || null,
         preSendProviderMessageId: preSendProviderMessageId || null,
@@ -7427,7 +7477,7 @@ export class ChatGPTController {
 
       // Detect whether we've seen a NEW response (not pre-existing page content).
       // A new response is indicated by: more assistant nodes than before send,
-      // or different text than the pre-send last message, or a stop button appearing.
+      // or different text than the pre-send last message, or a new stop control appearing.
       if (!newResponseSeen) {
         if (assistantAdvanced || activeStop || effectiveThinking || (preSendCount === 0 && pageChanged)) {
           newResponseSeen = true;
@@ -7699,6 +7749,7 @@ export class ChatGPTController {
         preSendText: prePrompt?.lastText || '',
         preSendPageText: prePrompt?.pageText || '',
         preSendStopCount: sendDebug?.initialStopCount || 0,
+        preSendStopToken: sendDebug?.preSendStopToken || null,
         preSendProviderMessageId: prePrompt?.providerMessageId || null,
         imageGeneration,
         durableObservation,
@@ -8288,6 +8339,7 @@ export class ChatGPTController {
           preSendText: preSend?.lastText || '',
           preSendPageText: preSend?.pageText || '',
           preSendStopCount: sendDebug?.initialStopCount || 0,
+          preSendStopToken: sendDebug?.preSendStopToken || null,
           preSendProviderMessageId: preSend?.providerMessageId || null,
           minimumTimeoutMs: 60 * 60_000,
           minimumStableMs: 60_000,

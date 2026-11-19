@@ -6,7 +6,14 @@ import path from 'node:path';
 import vm from 'node:vm';
 import crypto from 'node:crypto';
 
-import { ChatGPTController, chatgptMessageId, chatgptMessageRole, defaultReconcileGraceMs } from '../chatgpt-controller.mjs';
+import {
+  ChatGPTController,
+  chatgptMessageId,
+  chatgptMessageRole,
+  defaultReconcileGraceMs,
+  freshStopCountScript,
+  recordPreSendStopControlsScript
+} from '../chatgpt-controller.mjs';
 import { normalizeLiveCapture } from '../transcript-contract.mjs';
 import { createConversationArtifactDescriptor } from '../conversation-artifact-contract.mjs';
 import { createProviderCompatibilityBridge, loadChatGptCompatibilityProfile } from '../chatgpt-compatibility.mjs';
@@ -2733,6 +2740,116 @@ test('chatgpt-controller: query emits conversationUrl progress when a new thread
   }
 });
 
+function stopControlNode(testId, label = '') {
+  const attrs = { 'data-testid': testId, 'aria-label': label };
+  return { attrs, getAttribute: (name) => attrs[name] ?? null };
+}
+
+test('chatgpt-controller: a stop control counts as the reply\'s own only when the send did not find it', () => {
+  const window = {};
+  const run = (js, stopNodes, context = { window }) => vm.runInNewContext(js, { ...context, stopNodes });
+  const stale = stopControlNode('', 'Cancel');
+  run(recordPreSendStopControlsScript('send-1'), [stale]);
+
+  // The control seen before the send stays on screen: not the reply's.
+  assert.equal(run(freshStopCountScript('send-1'), [stale]), 0);
+  // It leaves and the reply's stop control appears: one count, but a new element.
+  const replyStop = stopControlNode('stop-button', 'Stop streaming');
+  assert.equal(run(freshStopCountScript('send-1'), [replyStop]), 1);
+  // The same element is relabelled into the reply's stop control.
+  stale.attrs['data-testid'] = 'stop-button';
+  assert.equal(run(freshStopCountScript('send-1'), [stale]), 1);
+  // No record for this send (another send's record, or a replaced document): every visible control counts.
+  assert.equal(run(freshStopCountScript('send-2'), [stopControlNode('x'), stopControlNode('y')]), 2);
+  assert.equal(run(freshStopCountScript('send-1'), [replyStop], { window: {} }), 1);
+  assert.equal(run(freshStopCountScript(null), [replyStop]), 1);
+});
+
+test('chatgpt-controller: query keeps waiting while the reply\'s stop control replaces one seen before the send', async () => {
+  // The project-page behavior described at PRE_SEND_STOP_CONTROLS_KEY: the
+  // pre-send control is gone after the route change, and the reply's own stop
+  // control brings the count back to one while the answer streams.
+  const partial = 'Direct answers\n1. What breaks H1–H4?';
+  const final = `${partial}\nEverything after the first answer.`;
+  let waitChecks = 0;
+  let recordedToken = null;
+  let waitToken = null;
+  const realNow = Date.now;
+  let fakeNow = 3_500_000;
+  Date.now = () => {
+    fakeNow += 500;
+    return fakeNow;
+  };
+
+  try {
+    const page = {
+      async navigate() {},
+      async evaluate(js) {
+        if (js.includes('const hasTurnstile')) return readyState();
+        if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 240, h: 48 } };
+        if (js.includes('already_generating')) {
+          recordedToken = js.match(/__agentifyPreSendStopControls"\] = \{ token: "([^"]+)"/)?.[1] || null;
+          return { ok: true, rect: { x: 320, y: 320, w: 30, h: 30 }, host: 'chatgpt.com', promptLen: 8, stopCount: 1, preExistingStopVisible: true };
+        }
+        if (js.includes('return { count: nodes.length')) return { count: 0, lastText: '', pageText: 'Project page' };
+        if (js.includes('promptLen')) return { freshStopCount: 1, sendDisabled: false, promptLen: 0 };
+        if (js.includes('fallbackMainText')) {
+          waitChecks += 1;
+          waitToken = js.match(/baseline\.token === "([^"]+)"/)?.[1] || null;
+          const streaming = waitChecks <= 4;
+          return {
+            stop: streaming,
+            stopCount: streaming ? 1 : 0,
+            freshStopCount: streaming ? 1 : 0,
+            sendEnabled: false,
+            sendFound: false,
+            txt: streaming ? partial : final,
+            count: 1,
+            usedFallback: false,
+            hasError: false,
+            hasContinue: false,
+            hasRegenerate: false,
+            isThinking: false,
+            imageCandidateCount: 0,
+            pageText: streaming ? partial : final,
+            currentUrl: 'https://chatgpt.com/g/g-p-test/c/reply-stop'
+          };
+        }
+        if (js.includes('const codes = Array.from')) return { codeBlocks: [] };
+        throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+      },
+      async getUrl() {
+        return 'https://chatgpt.com/g/g-p-test/c/reply-stop';
+      },
+      async sendKey() {},
+      async insertText() {},
+      async moveMouse() {},
+      async mouseDown() {},
+      async mouseUp() {},
+      async setFileInputFiles() {}
+    };
+
+    const controller = new ChatGPTController({
+      page,
+      selectors: {
+        promptTextarea: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        stopButton: 'button[data-testid="stop-button"]',
+        assistantMessage: '[data-message-author-role="assistant"]'
+      }
+    });
+
+    const result = await controller.query({ prompt: 'agentify', timeoutMs: 600_000 });
+
+    assert.equal(result.text, final);
+    assert.equal(waitChecks > 4, true);
+    assert.equal(typeof recordedToken, 'string');
+    assert.equal(waitToken, recordedToken);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('chatgpt-controller: query does not block completion on a pre-existing stop control', async () => {
   const progress = [];
   let waitForAssistantChecks = 0;
@@ -2770,6 +2887,7 @@ test('chatgpt-controller: query does not block completion on a pre-existing stop
           return {
             stop: true,
             stopCount: 1,
+            freshStopCount: 0,
             sendEnabled: false,
             sendFound: false,
             txt: 'Final answer with enough substance to be the response.',
@@ -4162,7 +4280,7 @@ for (const changedAt of ['choose_action', 'click_button', 'click_result', 'keypr
       if (js.includes('const hasTurnstile') || js.includes('already_generating') || js.includes('form.requestSubmit(submitBtn);') || js.includes('prompt?.focus?.();')) {
         return vm.runInNewContext(js, dom);
       }
-      if (js.includes('promptLen') && js.includes('stopVisible')) return { stopVisible: false, sendDisabled: false, promptLen: 1, stopCount: 0 };
+      if (js.includes('promptLen') && js.includes('freshStopCount')) return { freshStopCount: 0, sendDisabled: false, promptLen: 1 };
       return await originalEvaluate(js);
     };
     harness.page.insertText = async (text) => { prompt.value = text; prompt.innerText = text; prompt.textContent = text; };
@@ -5976,7 +6094,7 @@ async function nativeSubmitterFixture(t, { tag = 'button', type = 'submit', fore
       prompt.innerText = prompt.value;
       return vm.runInNewContext(js, dom);
     }
-    if (js.includes('promptLen') && js.includes('stopVisible')) return { promptLen: sent ? 0 : page.draft.length, stopVisible: sent, stopCount: sent ? 1 : 0, sendDisabled: sent };
+    if (js.includes('promptLen') && js.includes('freshStopCount')) return { promptLen: sent ? 0 : page.draft.length, freshStopCount: sent ? 1 : 0, sendDisabled: sent };
     return await originalEvaluate(js);
   };
   const originalSendKey = page.sendKey.bind(page);

@@ -69,6 +69,7 @@ export function parseResponseDebug(value) {
     rawStop: booleanOrNull(value.rawStop),
     stopCount: numberOrNull(value.stopCount),
     baselineStopCount: numberOrNull(value.baselineStopCount),
+    freshStopCount: numberOrNull(value.freshStopCount),
     sendFound: booleanOrNull(value.sendFound),
     sendEnabled: booleanOrNull(value.sendEnabled),
     thinking: booleanOrNull(value.thinking),

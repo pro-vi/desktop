@@ -156,6 +156,8 @@ function mapErrorToHttp(error) {
   if (msg === 'relative_path_not_allowed') return { code: 400, body: { error: 'relative_path_not_allowed', data: error?.data || null } };
   if (msg === 'missing_url') return { code: 400, body: { error: 'missing_url' } };
   if (msg === 'missing_prompt') return { code: 400, body: { error: 'missing_prompt' } };
+  if (msg === 'invalid_run_id') return { code: 400, body: { error: 'invalid_run_id' } };
+  if (msg === 'run_id_conflict') return { code: 409, body: { error: 'run_id_conflict' } };
   if (msg === 'missing_attachment_path') return { code: 400, body: { error: 'missing_attachment_path', data: error?.data || null } };
   if (msg === 'missing_context_path') return { code: 400, body: { error: 'missing_context_path', data: error?.data || null } };
   if (msg === 'missing_bundle_name') return { code: 400, body: { error: 'missing_bundle_name' } };
@@ -450,6 +452,15 @@ function defaultVendor(vendors = []) {
 
 function trimOrNull(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+// A caller may choose its query's run id, so it can still find the run when
+// its own connection ends before the response does.
+function parseRequestedRunId(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const id = String(value).trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new Error('invalid_run_id');
+  return id;
 }
 
 function assertNoModelIntent(body) {
@@ -4702,8 +4713,10 @@ export function startHttpApi({
         const modelIntent = chatProfile?.modelIntent || requestedModelIntent || null;
         const persistKeyLocationForRun = (chatProfile ? chatProfile.persistKeyLocation : !imageGeneration && !oneShot);
         const entryTarget = chatProfile?.entryTarget || null;
+        const requestedRunId = parseRequestedRunId(body.runId);
+        if (requestedRunId && runStore.get(requestedRunId)) throw new Error('run_id_conflict');
         const op = {
-          id: crypto.randomUUID(),
+          id: requestedRunId || crypto.randomUUID(),
           kind: 'query',
           tabId: null,
           startedAt: Date.now(),

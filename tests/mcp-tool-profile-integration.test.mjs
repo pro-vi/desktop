@@ -761,12 +761,15 @@ test('mcp query forwards an optional live continuation binding through real stdi
   assert.equal(malformed.every(({ isError }) => isError === true), true);
   for (const result of malformed) assert.match(result.content[0].text, /conversation-not-live-bound/);
   assert.equal(requests.length, 2);
+  // Each query carries a run id the MCP server chose, so a dropped connection can name it.
+  assert.match(requests[0].body?.runId || '', /^[0-9a-f-]{36}$/);
   assert.deepEqual(requests[0], {
     method: 'POST',
     path: '/query',
     authorization: `Bearer ${token}`,
     body: {
       source: 'mcp',
+      runId: requests[0].body.runId,
       key: 'thread-key',
       chatUrl: 'https://chatgpt.com/c/conversation-1',
       liveSourceId: 'source-1',
@@ -1887,4 +1890,51 @@ test('mcp image generation resolves and forwards reference attachments', async (
     files: ['/tmp/generated-image.png'],
     dir: '/tmp/generated-images'
   });
+});
+
+test('mcp query names its run id when the connection ends before the response', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentify-mcp-query-transport-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const token = 'mcp-query-transport-token';
+  const serverId = 'mcp-query-transport-server';
+  let queryBody = null;
+  const api = http.createServer(async (req, res) => {
+    if (req.url === '/health') return sendJson(res, { ok: true, serverId });
+    if (req.url === '/status') return sendJson(res, { ok: true, url: 'https://chatgpt.com/' });
+    if (req.url === '/query') {
+      queryBody = await readJsonBody(req);
+      // The run carries on in the app; only this request's connection ends.
+      return req.socket.destroy();
+    }
+    return sendJsonStatus(res, 404, { error: 'not_found' });
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    api.closeAllConnections();
+    if (api.listening) await new Promise((resolve, reject) => api.close((error) => (error ? reject(error) : resolve())));
+  });
+  await writeToken(token, stateDir);
+  await writeState({ ok: true, port: api.address().port, serverId }, stateDir);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--tool-profile', 'core'],
+    env: { ...process.env, AGENTIFY_DESKTOP_STATE_DIR: stateDir, AGENTIFY_DESKTOP_TOKEN: token },
+    stderr: 'pipe'
+  });
+  const client = new Client({ name: 'agentify-query-transport-test', version: '1.0.0' }, { capabilities: {} });
+
+  let result;
+  try {
+    await client.connect(transport);
+    result = await client.callTool({ name: 'agentify_query', arguments: { prompt: 'long review', key: 'transport-key' } });
+  } finally {
+    await client.close();
+  }
+
+  assert.match(queryBody?.runId || '', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.equal(result.isError, true);
+  const text = result.content.map((block) => block.text || '').join('\n');
+  assert.match(text, /fetch failed/);
+  assert.match(text, new RegExp(`^runId=${queryBody.runId}$`, 'm'));
+  assert.match(text, /agentify_wait_run/);
 });
