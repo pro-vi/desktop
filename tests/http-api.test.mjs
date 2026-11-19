@@ -9350,12 +9350,20 @@ test('http-api: query returns 429 when maxInflightQueries exceeded', async (t) =
   assert.equal(q2.data.legacyReason, 'max_inflight');
   assert.equal(q2.data.providerSlots.activeLeases.length, 1);
 
-  const q3p = req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'hi3' } });
-  await new Promise((r) => setTimeout(r, 20));
+  // The first query still holds the only slot, so the server must refuse the
+  // third at once. Take that answer before freeing the slot: a fixed sleep let
+  // the release land first on a slow runner, and the third query took the slot.
+  let refusalTimer;
+  const q3 = await Promise.race([
+    req({ port, token: 'secret', method: 'POST', pth: '/query', body: { key: 'q2', prompt: 'hi3' } }),
+    new Promise((_, reject) => {
+      refusalTimer = setTimeout(() => reject(new Error('third query was not refused while the slot was held')), 5000);
+    })
+  ]).finally(() => clearTimeout(refusalTimer));
   const startedBeforeRelease = started;
 
   release();
-  const [q1r, q3] = await Promise.all([q1, q3p]);
+  const q1r = await q1;
   assert.equal(q1r.res.status, 200);
   assert.equal(startedBeforeRelease, 1);
   assert.equal(q3.res.status, 429);
